@@ -1,15 +1,36 @@
 # meteor现代化支持 (meteor-modern-support)
 
-Meteor Client 扩展模组
-功能一览
+## 前言
+
+\-**本项目代码由AI生成，作者本人并不精通java，无关本mod的技术问题不建议找我，大概率拿不到有用的回答**
+在使用meteor client模组的过程中，经常遇到一些问题。比如现代反作弊对meteor的旋转几乎是百分百拦截。meteor本身也缺少非常多的实用功能。此项目致力于为meteor添加现代化的功能，如加入了移动矫正的杀戮光环，绝不回弹卡脚。
+
+
 
 |功能|说明|
 |-|-|
 |移动矫正 API|旋转时修正移动方向：走路、鞘翅移动方向与旋转朝向一致（参考 Baritone LookBehavior）|
 |KillAura 集成|为 Meteor 的 KillAura 添加「移动矫正」设置（关闭 / 停止移动 / 严格 / 静默）|
-|转圈（Misc 分类）|Derp 移植：偏航 5 模式 + 俯仰 3 模式，平滑转头，可配移动矫正|
 |配置自动保存|设置修改 / 模块开关后异步防抖保存，强退不丢配置|
 |\|18n 语言支持|Meteor 全界面多语言：Config 里可设置语言（默认跟随 Minecraft），游戏目录动态加载语言文件|
+
+
+
+
+
+
+
+
+
+## 分页功能
+
+我们为meteor加入了分页功能，在安装的插件过多的情况下，一页难以显示，分页是个好主意。
+在conifg页面，现在有页面设置选项，你可以创建多个页面，这些页面都会显示在顶端页面选择栏(不知道是不是这么表达，就是config,GUI那一栏)上，点击即可进入另一页面。config的页面设置界面点击页面列表中的页面名称，可以选择此页面肇展示的板块。
+我们会在启动时检查所有模块应用的页面。如果一个模块没有被记录过，那么推断他是新加的插件，自动在主界面开启显示。
+
+
+
+
 
 
 
@@ -21,8 +42,7 @@ Meteor Client 扩展模组
 
 ### 为什么需要它
 
-Meteor 原版 `Rotations.rotate` 是**静默旋转**：只在发包瞬间修改旋转，移动计算（aiStep）仍按客户端原朝向进行 → 旋转与移动方向不一致（走路、鞘翅方向不对），且旋转结束后有残留锁定（"不归位"）。
-
+Meteor 原版 `Rotations.rotate` 是**发包旋转**：只在发包旋转，移动计算（aiStep）仍按客户端原朝向进行 → 旋转与移动方向不一致（走路、鞘翅方向不对）,在现代反作弊下回弹几乎是必然。
 本 API 采用 **Baritone LookBehavior** 的机制：**移动计算前真实设置玩家朝向** → WASD 移动方向、鞘翅方向自然跟随旋转；移动包发送后恢复原朝向（客户端静默）。状态由调用方每 tick 刷新，停止调用后自动归位。
 
 ### 快速开始（两步）
@@ -47,7 +67,7 @@ MovementCorrection.rotateWithMode(yaw, pitch, movementCorrection.get());
 |-|-|
 |关闭|原版静默旋转，不矫正移动|
 |停止移动|暂未实现（选中等同关闭）|
-|严格|真实旋转 + 客户端静默：服务器朝向正确、移动方向跟随服务器朝向、客户端视角不动（已通过 Grim 最严格反作弊，0 回弹）|
+|严格|真实旋转 + 客户端静默：服务器朝向正确、移动方向跟随服务器朝向、客户端视角不动|
 |静默|在严格基础上映射 WASD 按键：移动方向与**客户端视觉朝向**一致。例如服务器朝正右（90°）、视觉朝正前（0°）时，W 键等效 A 键，人物仍朝视觉正前方移动；斜向自动产生 W+D 组合键效果，moveVector 使用浮点向量，任意角度精确|
 
 ### 时序与生命周期
@@ -65,7 +85,6 @@ MovementCorrection.rotateWithMode(yaw, pitch, movementCorrection.get());
 
 * **KillAura 集成**（`mixin/MixinKillAura.java`）：通过 `@Redirect` 拦截 `Rotations.rotate(DD)` 的两个调用点，替换为移动矫正
 * **转圈模块**（`modules/Spin.java`）：完整的"设置项 + rotateWithMode"使用范例
-
 
 
 
@@ -128,6 +147,14 @@ Setting.Meteor.<设置内部名>.Description   → 设置描述
 
 
 
+
+
+
+
+
+
+
+
 ## 构建
 
 ```bash
@@ -135,6 +162,7 @@ Setting.Meteor.<设置内部名>.Description   → 设置描述
 ```
 
 产物位于 `build/libs/meteor-modern-support-<版本>.jar`。
+
 
 
 
