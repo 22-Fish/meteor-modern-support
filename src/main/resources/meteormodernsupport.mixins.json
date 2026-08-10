@@ -1,0 +1,30 @@
+{
+  "required": true,
+  "package": "fish22.modernsupport.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "client": [
+    "MixinElytraFly",
+    "MixinElytraFlightModes",
+    "MixinFireworkRocketEntity",
+    "EntityRotationAccessor",
+    "MixinFreezeKeyboardInput",
+    "MixinFreezeTravel",
+    "MixinKillAura",
+    "MixinKeyboardInput",
+    "MixinModules",
+    "MixinPlayerTravel",
+    "MixinSetting",
+    "MixinSettings",
+    "MixinModule",
+    "MixinConfig",
+    "MixinConfigScreen",
+    "MixinModuleListFilter",
+    "MixinModulesScreen",
+    "MixinTextRenderer",
+    "MixinVanillaTextRenderer",
+    "MixinWTopBar"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

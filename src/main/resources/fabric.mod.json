@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "id": "meteor-modern-support",
+  "version": "${version}",
+  "name": "meteor现代化支持",
+  "description": "meteor现代化支持 - Meteor Client addon by 22_Fish. 提供移动矫正 API 及 KillAura 集成, 内置 i18n 语言支持 (翻译基于 Meteor-I18n-Support-plugin, CC0, https://github.com/dingzhen-vape/Meteor-I18n-Support-plugin).",
+  "authors": [
+    "22_Fish"
+  ],
+  "contact": {
+    "sources": "https://github.com/22_Fish"
+  },
+  "icon": "assets/template/icon.png",
+  "environment": "client",
+  "entrypoints": {
+    "meteor": [
+      "fish22.modernsupport.ModernSupport"
+    ]
+  },
+  "mixins": [
+    "meteormodernsupport.mixins.json"
+  ],
+  "custom": {
+    "meteor-client:color": "225,25,25",
+    "modmenu": {
+      "parent": {
+        "id": "meteor-client"
+      }
+    }
+  },
+  "depends": {
+    "java": ">=${jdk_version}",
+    "minecraft": "${minecraft_version}",
+    "meteor-client": "*"
+  }
+}
