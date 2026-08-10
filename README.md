@@ -141,7 +141,7 @@ Setting.Meteor.<设置内部名>.Description   → 设置描述
 
 ### 来源
 
-翻译文件与实现思路基于 [Meteor-I18n-Support-plugin](https://github.com/dingzhen-vape/Meteor-I18n-Support-plugin)（作者 kono\_yalu，CC0 协议(使用cc0应该违反了GPL协议,已告知作者)）。
+翻译文件与实现思路基于 [Meteor-I18n-Support-plugin](https://github.com/dingzhen-vape/Meteor-I18n-Support-plugin)（作者 kono\_yalu）
 
 
 
