@@ -46,8 +46,9 @@ import net.minecraft.world.level.block.state.BlockState;
  * <p>meteor模式：完整移植 Meteor 官方 ElytraFly Bounce 模式的逻辑
  * （俯仰/偏航锁定、自动跳跃、落地自动重飞 recast、防回弹重试等），行为与原版一致。
  *
- * <p>合法模式：不锁定任何角度、不做任何额外操作，只做一件事——
- * 穿着鞘翅时只要在空中（不在地面）就自动发送起飞包，落地后重新离地又会自动起飞。
+ * <p>合法模式：穿着鞘翅时只要在空中（不在地面）就自动起飞，
+ * 并可按需锁定俯仰（默认 90° 朝下俯冲加速）、锁定偏航、自动跳跃（落地自动跳起再飞）。
+ * 起飞参考合法平飞：本地 tryToStartFallFlying 立即进入滑翔 + 发包，不等服务器广播。
  */
 public class ElytraBounce extends Module {
 
@@ -177,6 +178,53 @@ public class ElytraBounce extends Module {
         .build()
     );
 
+    // ====== 合法模式设置（按需锁定视角） ======
+
+    private final Setting<Boolean> legalLockPitch = sgGeneral.add(new BoolSetting.Builder()
+        .name("俯仰锁定")
+        .description("是否锁定俯仰角度（起飞后视角自动朝固定俯仰角）。")
+        .defaultValue(true)
+        .visible(() -> mode.get() == Mode.Legal)
+        .build()
+    );
+
+    private final Setting<Double> legalPitch = sgGeneral.add(new DoubleSetting.Builder()
+        .name("俯仰角度")
+        .description("俯仰锁定开启时使用的固定俯仰角度，默认 90° 朝下（垂直俯冲加速）。")
+        .defaultValue(90)
+        .min(-90)
+        .max(90)
+        .sliderRange(-90, 90)
+        .visible(() -> mode.get() == Mode.Legal && legalLockPitch.get())
+        .build()
+    );
+
+    private final Setting<YawLockMode> legalYawLockMode = sgGeneral.add(new EnumSetting.Builder<YawLockMode>()
+        .name("偏航锁定")
+        .description("偏航锁定方式（同 meteor 原版）。智能：吸附到最近的 45° 倍数。简单：锁定为固定角度。关闭：不锁定。")
+        .defaultValue(YawLockMode.Smart)
+        .visible(() -> mode.get() == Mode.Legal)
+        .build()
+    );
+
+    private final Setting<Double> legalYaw = sgGeneral.add(new DoubleSetting.Builder()
+        .name("偏航角度")
+        .description("偏航锁定为「简单」时使用的固定偏航角度。")
+        .defaultValue(0)
+        .range(0, 360)
+        .sliderRange(0, 360)
+        .visible(() -> mode.get() == Mode.Legal && legalYawLockMode.get() == YawLockMode.Simple)
+        .build()
+    );
+
+    private final Setting<Boolean> legalAutoJump = sgGeneral.add(new BoolSetting.Builder()
+        .name("自动跳跃")
+        .description("自动为你按住跳跃键，落地瞬间自动跳起，配合自动起飞连续弹跳。")
+        .defaultValue(true)
+        .visible(() -> mode.get() == Mode.Legal)
+        .build()
+    );
+
     // ====== meteor模式状态（原版 Bounce 逻辑） ======
 
     /** 是否被服务器回弹（收到位置纠正包） */
@@ -190,9 +238,12 @@ public class ElytraBounce extends Module {
 
     // ====== 合法模式状态 ======
 
+    /** 上一 tick 的滑翔状态（检测服务器取消起飞） */
+    private boolean wasFlying = false;
+
     /**
-     * 起飞包节流倒计时：服务器端已滑翔时收到重复起飞包会取消滑翔
-     * （tryToStartFallFlying 失败 → stopFallFlying），发一次后等服务器广播确认再重发
+     * 起飞节流倒计时：本地假滑翔后被服务器取消（tryToStartFallFlying 失败会
+     * stopFallFlying 取消滑翔）时冷却几 tick 再重试，避免来回震荡
      */
     private int takeoffCooldown = 0;
 
@@ -212,6 +263,10 @@ public class ElytraBounce extends Module {
 
     @Override
     public void onActivate() {
+        rubberbanded = false;
+        tickDelay = restartDelay.get();
+        wasFlying = false;
+        takeoffCooldown = 0;
         if (mode.get() == Mode.Meteor) {
             prevFov = mc.options.fovEffectScale().get();
         }
@@ -274,31 +329,45 @@ public class ElytraBounce extends Module {
     private void legalTick() {
         LocalPlayer p = mc.player;
 
-        // 已滑翔：无需处理，重置节流
-        if (p.isFallFlying()) {
+        // 滑翔状态从 true 变 false（服务器取消起飞/落地）：起飞被拒时冷却几 tick 再试，
+        // 避免「假滑翔 → 服务器取消 → 再假滑翔」来回震荡
+        boolean flying = p.isFallFlying();
+        if (wasFlying && !flying) {
+            takeoffCooldown = 5;
+        }
+        wasFlying = flying;
+
+        // 必须穿着鞘翅，否则不干预（不按跳跃、不锁视角）
+        if (!LivingEntity.canGlideUsing(p.getItemBySlot(EquipmentSlot.CHEST), EquipmentSlot.CHEST)) return;
+
+        // 弹跳条件（非创造飞行/非乘客/非攀爬/非水中/无漂浮）：
+        // 自动跳跃（落地瞬间自动跳起）+ 俯仰/偏航锁定
+        if (checkConditions(p)) {
+            if (legalAutoJump.get()) mc.options.keyJump.setDown(true);
+            p.setYRot(getLegalYawDirection());
+            if (legalLockPitch.get()) p.setXRot(legalPitch.get().floatValue());
+        }
+
+        if (flying) return;
+
+        // 落地：重置冷却（重新离地立即起飞）
+        if (p.onGround()) {
             takeoffCooldown = 0;
             return;
         }
 
-        // 必须穿着鞘翅
-        if (!LivingEntity.canGlideUsing(p.getItemBySlot(EquipmentSlot.CHEST), EquipmentSlot.CHEST)) return;
-
-        // 只有不在地面（在空中）才起飞
-        if (p.onGround()) return;
-
-        // 起飞前置条件（原版滑翔同样要求）：非创造飞行、非乘客、非水中、无漂浮、非攀爬
-        if (p.getAbilities().flying || p.isPassenger() || p.isInWater() || p.hasEffect(MobEffects.LEVITATION)) return;
-        BlockState blockState = p.getInBlockState();
-        if (blockState.is(BlockTags.CLIMBABLE) && !blockState.is(BlockTags.CAN_GLIDE_THROUGH)) return;
-
-        // 节流：发一次起飞包后等服务器广播确认，确认前不重发
+        // 起飞节流：冷却期间不重发
         if (takeoffCooldown > 0) {
             takeoffCooldown--;
             return;
         }
 
-        mc.getConnection().send(new ServerboundPlayerCommandPacket(p, ServerboundPlayerCommandPacket.Action.START_FALL_FLYING));
-        takeoffCooldown = 5;
+        // 参考合法平飞：本地 tryToStartFallFlying 立即进入滑翔 + 发包。
+        // 只发包等广播会受网络延迟影响（广播未到前重发会被服务器 stopFallFlying 取消），
+        // 本地先滑翔则广播只是确认，不依赖延迟
+        if (p.tryToStartFallFlying()) {
+            mc.getConnection().send(new ServerboundPlayerCommandPacket(p, ServerboundPlayerCommandPacket.Action.START_FALL_FLYING));
+        }
     }
 
     // ====== meteor模式：原版 Bounce 逻辑（移植自 Meteor 官方 ElytraFly Bounce 模式） ======
@@ -346,14 +415,24 @@ public class ElytraBounce extends Module {
     private void unpress() {
         mc.options.keyUp.setDown(false);
         if (autoJump.get()) mc.options.keyJump.setDown(false);
+        if (legalAutoJump.get()) mc.options.keyJump.setDown(false);
     }
 
-    /** 计算偏航锁定目标角度（智能/简单/关闭） */
+    /** 计算偏航锁定目标角度（智能/简单/关闭），meteor 模式 */
     private float getYawDirection() {
         return switch (yawLockMode.get()) {
             case None -> mc.player.getYRot();
             case Smart -> Math.round((mc.player.getYRot() + 1f) / 45f) * 45f;
             case Simple -> yaw.get().floatValue();
+        };
+    }
+
+    /** 计算偏航锁定目标角度（智能/简单/关闭），合法模式 */
+    private float getLegalYawDirection() {
+        return switch (legalYawLockMode.get()) {
+            case None -> mc.player.getYRot();
+            case Smart -> Math.round((mc.player.getYRot() + 1f) / 45f) * 45f;
+            case Simple -> legalYaw.get().floatValue();
         };
     }
 
