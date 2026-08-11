@@ -1,7 +1,7 @@
 /*
  * This file is part of meteor-modern-support (meteor现代化支持).
  *
- * Copyright (c) 2026 fish22
+ * Copyright (c) 2026 22_Fish
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -201,6 +201,11 @@ public class MovementCorrection {
     /** 客户端视觉朝向 yaw（设置朝向前的原朝向，静默模式按键映射用） */
     public static float getVisualYaw() {
         return prevYaw;
+    }
+
+    /** 客户端视觉朝向 pitch（applyInput bob 跟随目标用） */
+    public static float getVisualPitch() {
+        return prevPitch;
     }
 
     /**

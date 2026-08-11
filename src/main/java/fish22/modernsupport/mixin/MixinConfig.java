@@ -10,6 +10,8 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
+import static meteordevelopment.meteorclient.MeteorClient.mc;
+
 /**
  * 在 Meteor 设置主界面 (Config) 添加"语言"设置 (下拉列表):
  *  选项自动拉取游戏目录 meteor-lang/ 下所有文件夹 (文件夹名 = 语言代码)
@@ -32,12 +34,16 @@ public abstract class MixinConfig {
             .build()
         );
 
-        // 刷新按钮: 修改 meteor-lang 下的语言文件后, 点击重新加载并立即生效
+        // 刷新按钮: 修改 meteor-lang 下的语言文件后, 点击重新加载并立即生效。
+        // 重新翻译后 GUI 文本不会实时重建, 自动关闭界面, 重开即可看到新文本
         sgLanguage.add(new ActionSetting(
             "reload-languages",
             "Reload: re-read language files from meteor-lang/ and re-apply translations immediately.",
             "Reload",
-            I18n::reloadAndApply,
+            () -> {
+                I18n.reloadAndApply();
+                mc.setScreen(null);
+            },
             null
         ));
     }

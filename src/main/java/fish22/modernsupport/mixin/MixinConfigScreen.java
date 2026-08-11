@@ -1,24 +1,6 @@
-/*
- * This file is part of meteor-modern-support (meteor现代化支持).
- *
- * Copyright (c) 2026 22_Fish
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program. If not, see <https://www.gnu.org/licenses/>.
- */
-
 package fish22.modernsupport.mixin;
 
+import fish22.modernsupport.gui.ConfigSection;
 import fish22.modernsupport.gui.PageConfigSection;
 import meteordevelopment.meteorclient.gui.GuiTheme;
 import meteordevelopment.meteorclient.gui.tabs.builtin.ConfigTab;
@@ -30,9 +12,10 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Redirect;
 
 /**
- * Config 页注入：
- * 创建设置列表时在末尾追加"页面配置"设置分组（模块分页管理），
- * 与其他设置分组一起显示、滚动，位于列表底部。
+ * Config 页注入：创建设置列表时在末尾追加"页面配置"（模块分页管理）和"配置设置"（配置分块）。
+ *
+ * <p>设置列表首次渲染在这里追加；Settings.tick 因可见性变化重建列表时
+ * 由 {@link MixinSettings} 同样补回（两个区块始终存在于列表底部）。
  */
 @Mixin(value = ConfigTab.ConfigScreen.class, remap = false)
 public abstract class MixinConfigScreen {
@@ -42,6 +25,7 @@ public abstract class MixinConfigScreen {
         WWidget widget = theme.settings(settings);
         if (widget instanceof WContainer container) {
             PageConfigSection.addToSettings(container, theme);
+            ConfigSection.addToSettings(container, theme);
         }
         return widget;
     }

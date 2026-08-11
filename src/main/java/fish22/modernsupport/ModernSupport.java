@@ -8,12 +8,14 @@ import fish22.modernsupport.settings.ActionSetting;
 import fish22.modernsupport.settings.ItemUseListSetting;
 import fish22.modernsupport.utils.AutoSave;
 import fish22.modernsupport.utils.I18n;
+import fish22.modernsupport.utils.ModuleConfigs;
 import fish22.modernsupport.utils.ModulePages;
 import fish22.modernsupport.utils.MovementCorrection;
 import com.mojang.logging.LogUtils;
 import meteordevelopment.meteorclient.MeteorClient;
 import meteordevelopment.meteorclient.addons.MeteorAddon;
 import meteordevelopment.meteorclient.events.meteor.ActiveModulesChangedEvent;
+import meteordevelopment.meteorclient.events.game.GameJoinedEvent;
 import meteordevelopment.meteorclient.gui.WidgetScreen;
 import meteordevelopment.meteorclient.gui.utils.SettingsWidgetFactory;
 import meteordevelopment.meteorclient.gui.widgets.WKeybind;
@@ -102,6 +104,9 @@ public class ModernSupport extends MeteorAddon {
         // 初始化移动矫正 API
         MovementCorrection.init();
 
+        // 初始化配置分块（meteor-client/config/ 下的模块配置快照）
+        ModuleConfigs.init();
+
         // 订阅模块开关事件：开关状态变化时自动保存配置
         MeteorClient.EVENT_BUS.subscribe(ModernSupport.class);
 
@@ -130,6 +135,12 @@ public class ModernSupport extends MeteorAddon {
     @EventHandler
     private static void onActiveModulesChanged(ActiveModulesChangedEvent event) {
         AutoSave.onChanged();
+    }
+
+    /** 进入世界/服务器：配置分块按服务器自动应用 */
+    @EventHandler
+    private static void onGameJoined(GameJoinedEvent event) {
+        ModuleConfigs.onGameJoin();
     }
 
     /** 物品列表增删改后刷新当前设置界面 (重建控件, 列表变化即时显示) */
