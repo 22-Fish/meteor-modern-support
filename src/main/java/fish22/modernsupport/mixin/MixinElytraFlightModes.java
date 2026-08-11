@@ -53,6 +53,13 @@ public abstract class MixinElytraFlightModes {
      * <p>EnumSetting 的选项来自 getEnumConstants()（反射读 $VALUES），移除后模式列表
      * 不再显示 Bounce，旧配置里的 "Bounce" 解析不到会回退默认值；
      * 官方代码中对 ElytraFlightModes.Bounce 的引用仍是合法的静态字段，永不命中，安全。
+     *
+     * <p>移除后必须重新分配剩余常量的 ordinal：Meteor 官方 ElytraFly.onModeChanged
+     * 的 switch 编译成 javac 的 $SwitchMap$ 数组（长度 = 运行时 values().length），
+     * 按 ordinal 索引。移除 Bounce 后 $VALUES 变短，追加的 Armor/Legal 若 ordinal
+     * 仍为 4/5 会越界抛 ArrayIndexOutOfBoundsException（合法平飞切模式即崩）。
+     * 重排后 Armor=3（$SwitchMap$[3] 是 Bounce 的 case，仅 new Bounce() 无害，
+     * 事件已被 MixinElytraFly 接管）、Legal=4（$SwitchMap$[4]=0 走 default 无操作）。
      */
     private static void removeEnumConstant(String name) {
         try {
@@ -67,9 +74,17 @@ public abstract class MixinElytraFlightModes {
             // 没找到目标常量，无需处理
             if (filtered.length == oldValues.length) return;
 
-            Object base = getUnsafe().staticFieldBase(valuesField);
-            long offset = getUnsafe().staticFieldOffset(valuesField);
-            getUnsafe().putObject(base, offset, filtered);
+            sun.misc.Unsafe unsafe = getUnsafe();
+
+            // 按新数组下标重排 ordinal，保证所有 ordinal < $VALUES.length（$SwitchMap$ 边界）
+            long ordinalOffset = unsafe.objectFieldOffset(Enum.class.getDeclaredField("ordinal"));
+            for (int i = 0; i < filtered.length; i++) {
+                unsafe.putInt(filtered[i], ordinalOffset, i);
+            }
+
+            Object base = unsafe.staticFieldBase(valuesField);
+            long offset = unsafe.staticFieldOffset(valuesField);
+            unsafe.putObject(base, offset, filtered);
         } catch (Exception e) {
             throw new RuntimeException("Failed to remove enum constant " + name + " from ElytraFlightModes", e);
         }
