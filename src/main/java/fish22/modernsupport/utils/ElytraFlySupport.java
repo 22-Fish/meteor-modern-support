@@ -131,6 +131,7 @@ public class ElytraFlySupport {
     public static Setting<Integer> fwPriorityLv2;
     public static Setting<Integer> fwPriorityLv3;
     public static Setting<HoverMode> hoverMode;
+    public static Setting<Boolean> notGlidingUnfreeze;
     public static Setting<Boolean> hoverFirework;
     public static Setting<Integer> hoverFwIntervalLv1;
     public static Setting<Integer> hoverFwIntervalLv2;
@@ -240,13 +241,6 @@ public class ElytraFlySupport {
 
     /** 收包监听（由 MixinElytraFly 拦截官方 onPacketReceive 后调用） */
     public static void onPacketReceive(PacketEvent.Receive event) {
-        // 合法平飞冻结中收到传送/位置纠正包（珍珠落地、活塞推送、回弹等）→ 解除冻结。
-        // 冻结时 travel 被取消、本地 onGround 不更新，珍珠落地后落地分支检测不到会卡住；
-        // 位置包到达即恢复本地物理，下一 tick 落地分支自然确认。
-        if (isLegalMode() && Freeze.isFrozen() && event.packet instanceof ClientboundPlayerPositionPacket) {
-            Freeze.setExternalFrozen(false);
-        }
-
         // 服务器位置纠正（回弹）后暂停换装，避免继续震荡（仅甲飞 Grim）
         if (!isArmorMode() || armorMode.get() != ArmorMode.Grim) return;
         if (event.packet instanceof ClientboundPlayerPositionPacket) {
@@ -437,6 +431,12 @@ public class ElytraFlySupport {
         boolean jumpPressed = mc.options.keyJump.isDown() && !jumpWasDown;
         jumpWasDown = mc.options.keyJump.isDown();
 
+        // 移动输入（起飞分支解冻判断用，飞行分支复用）
+        boolean forward = mc.options.keyUp.isDown();
+        boolean back = mc.options.keyDown.isDown();
+        boolean left = mc.options.keyLeft.isDown();
+        boolean right = mc.options.keyRight.isDown();
+
         // 滑翔状态转变（起飞成功瞬间）：立即释放一次烟花，不等自动烟花间隔
         boolean flying = mc.player.isFallFlying();
         if (flying && !prevFlying && autoFirework.get()) {
@@ -464,9 +464,11 @@ public class ElytraFlySupport {
 
         // 起飞：空中未滑翔
         if (!mc.player.isFallFlying()) {
-            // 身上没穿鞘翅（死亡重生等异常状态）：解除冻结，避免冻结残留卡住动不了
-            // （合法平飞必须穿鞘翅，没鞘翅必然不在正常飞行/悬停状态）
-            if (!isElytraEquipped()) {
+            // 不在滑翔（落地/珍珠传送打断等）：按移动键（WASD/跳跃）即解除冻结，
+            // 不需要起飞放烟花；开启「不在滑翔解冻」则无条件解除（后续功能预留）。
+            // 冻结时 travel 被取消、onGround 不更新，落地分支可能检测不到，
+            // 这里用服务器同步的滑翔状态 + 移动输入兜底
+            if (notGlidingUnfreeze.get() || forward || back || left || right || mc.options.keyJump.isDown()) {
                 Freeze.setExternalFrozen(false);
             }
             if (autoSwapElytra.get()) {
@@ -513,10 +515,6 @@ public class ElytraFlySupport {
             return;
         }
 
-        boolean forward = mc.options.keyUp.isDown();
-        boolean back = mc.options.keyDown.isDown();
-        boolean left = mc.options.keyLeft.isDown();
-        boolean right = mc.options.keyRight.isDown();
         boolean jump = mc.options.keyJump.isDown();
         boolean sneak = mc.options.keyShift.isDown();
 

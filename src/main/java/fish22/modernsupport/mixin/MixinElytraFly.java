@@ -99,6 +99,9 @@ public abstract class MixinElytraFly {
     private Setting<ElytraFlySupport.HoverMode> hoverMode;
 
     @Unique
+    private Setting<Boolean> notGlidingUnfreeze;
+
+    @Unique
     private Setting<Boolean> hoverFirework;
 
     @Unique
@@ -139,7 +142,7 @@ public abstract class MixinElytraFly {
 
         armorMode = sgArmor.add(new EnumSetting.Builder<ElytraFlySupport.ArmorMode>()
             .name("甲飞方式")
-            .description("普通：每 tick 闪换 + 本地强制滑翔，适合原版服务器。Grim：参考 blackout 的 packet 模式（跟随服务器 + 快速恢复 + 烟花插链），适合严格反作弊服务器。")
+            .description("普通：每 tick 闪换 + 本地强制滑翔，适合原版服务器")
             .defaultValue(ElytraFlySupport.ArmorMode.Normal)
             .visible(this::isArmorMode)
             .build()
@@ -147,7 +150,7 @@ public abstract class MixinElytraFly {
 
         muteSounds = sgArmor.add(new BoolSetting.Builder()
             .name("静音")
-            .description("屏蔽换装音效（盔甲装备声、鞘翅飞行声）。")
+            .description("屏蔽换装音效")
             .defaultValue(true)
             .visible(this::isArmorMode)
             .build()
@@ -166,7 +169,7 @@ public abstract class MixinElytraFly {
 
         firework = sgGrim.add(new BoolSetting.Builder()
             .name("烟花")
-            .description("Grim 模式：每次换装起飞后立即使用烟花加速（趁服务器滑翔窗口）。")
+            .description("Grim 模式：每次换装起飞后立即使用烟花加速")
             .defaultValue(true)
             .visible(() -> isArmorMode() && armorMode.get() == ElytraFlySupport.ArmorMode.Grim)
             .build()
@@ -207,7 +210,7 @@ public abstract class MixinElytraFly {
 
         autoFirework = sgLegal.add(new BoolSetting.Builder()
             .name("自动烟花")
-            .description("合法平飞：飞行中按间隔自动释放快捷栏烟花加速（静默释放，烟花等级决定用哪个间隔）。")
+            .description("飞行中自动释放烟花加速")
             .defaultValue(true)
             .visible(this::isLegalMode)
             .build()
@@ -215,7 +218,7 @@ public abstract class MixinElytraFly {
 
         autoSwapElytra = sgLegal.add(new BoolSetting.Builder()
             .name("自动替换鞘翅")
-            .description("穿胸甲时：空中按跳跃键自动换上鞘翅起飞（热栏/背包找鞘翅），落地自动换回胸甲。不开则需自己穿鞘翅。")
+            .description("空中按跳跃键自动换上鞘翅起飞落地自动换回胸甲。")
             .defaultValue(false)
             .visible(this::isLegalMode)
             .build()
@@ -223,7 +226,7 @@ public abstract class MixinElytraFly {
 
         backpackFirework = sgLegal.add(new BoolSetting.Builder()
             .name("背包烟花")
-            .description("合法平飞：自动烟花从背包任意位置找（交换到手上使用后换回，未换回自动重试）。不勾选只找快捷栏。")
+            .description("自动烟花允许使用背包中的烟花")
             .defaultValue(false)
             .visible(() -> isLegalMode() && autoFirework.get())
             .build()
@@ -231,7 +234,7 @@ public abstract class MixinElytraFly {
 
         fwPriorityLv1 = sgLegal.add(new IntSetting.Builder()
             .name("1级烟花优先级")
-            .description("1 级烟花的优先级（1~3）。同时存在多个等级时优先使用优先级高的；优先级相同遵循原逻辑（快捷栏顺序取第一个）。")
+            .description("1 级烟花的优先级，优先级高的烟花优先使用")
             .defaultValue(1)
             .min(1)
             .max(3)
@@ -241,7 +244,7 @@ public abstract class MixinElytraFly {
 
         fwPriorityLv2 = sgLegal.add(new IntSetting.Builder()
             .name("2级烟花优先级")
-            .description("2 级烟花的优先级（1~3）。同时存在多个等级时优先使用优先级高的；优先级相同遵循原逻辑（快捷栏顺序取第一个）。")
+            .description("2 级烟花的优先级，优先级高的烟花优先使用")
             .defaultValue(1)
             .min(1)
             .max(3)
@@ -251,7 +254,7 @@ public abstract class MixinElytraFly {
 
         fwPriorityLv3 = sgLegal.add(new IntSetting.Builder()
             .name("3级烟花优先级")
-            .description("3 级烟花的优先级（1~3）。同时存在多个等级时优先使用优先级高的；优先级相同遵循原逻辑（快捷栏顺序取第一个）。")
+            .description("3 级烟花的优先级，优先级高的烟花优先使用")
             .defaultValue(1)
             .min(1)
             .max(3)
@@ -261,7 +264,7 @@ public abstract class MixinElytraFly {
 
         fwIntervalLv1 = sgLegal.add(new IntSetting.Builder()
             .name("1级烟花间隔")
-            .description("1 级烟花（飞行时间 1）的释放间隔（tick）。1 级烟花寿命约 20~31 tick，默认 20 可保持加速不断。")
+            .description("1 级烟花的释放间隔（tick）")
             .defaultValue(20)
             .min(1)
             .max(100)
@@ -272,7 +275,7 @@ public abstract class MixinElytraFly {
 
         fwIntervalLv2 = sgLegal.add(new IntSetting.Builder()
             .name("2级烟花间隔")
-            .description("2 级烟花（飞行时间 2）的释放间隔（tick）。2 级烟花寿命约 30~41 tick，默认 30 可保持加速不断。")
+            .description("2 级烟花的释放间隔（tick）")
             .defaultValue(30)
             .min(1)
             .max(100)
@@ -283,7 +286,7 @@ public abstract class MixinElytraFly {
 
         fwIntervalLv3 = sgLegal.add(new IntSetting.Builder()
             .name("3级烟花间隔")
-            .description("3 级烟花（飞行时间 3）的释放间隔（tick）。3 级烟花寿命约 40~51 tick，默认 40 可保持加速不断。")
+            .description("3 级烟花的释放间隔（tick）")
             .defaultValue(40)
             .min(1)
             .max(100)
@@ -297,7 +300,7 @@ public abstract class MixinElytraFly {
 
         hoverMode = sgHover.add(new EnumSetting.Builder<ElytraFlySupport.HoverMode>()
             .name("悬停模式")
-            .description("不输入时如何悬停。悬停：每 tick 抵消重力停在空中。冻结：开启冻结模块的效果（完全静止，不发位置移动包，旋转照常）。")
+            .description("不输入时如何悬停。悬停：直接浮在原地，不推荐。|冻结：开启冻结模块的效果（完全静止，不发位置移动包），推荐")
             .defaultValue(ElytraFlySupport.HoverMode.Hover)
             .visible(this::isLegalMode)
             .build()
@@ -305,7 +308,7 @@ public abstract class MixinElytraFly {
 
         hoverFirework = sgHover.add(new BoolSetting.Builder()
             .name("悬停时自动烟花")
-            .description("悬停模式：悬停期间按间隔静默释放快捷栏烟花，仅为保持滑翔状态正常（防止反作弊拦截），不影响悬停。")
+            .description("悬停期间按间隔静默释放快捷栏烟花，仅为保持滑翔状态正常防止反作弊拦截，不影响悬停。")
             .defaultValue(false)
             .visible(() -> isLegalMode() && hoverMode.get() == ElytraFlySupport.HoverMode.Hover)
             .build()
@@ -313,7 +316,7 @@ public abstract class MixinElytraFly {
 
         hoverFwIntervalLv1 = sgHover.add(new IntSetting.Builder()
             .name("悬停1级烟花间隔")
-            .description("悬停时 1 级烟花的释放间隔（tick）。")
+            .description("悬停时 1 级烟花的释放间隔（tick）")
             .defaultValue(20)
             .min(1)
             .max(100)
@@ -324,7 +327,7 @@ public abstract class MixinElytraFly {
 
         hoverFwIntervalLv2 = sgHover.add(new IntSetting.Builder()
             .name("悬停2级烟花间隔")
-            .description("悬停时 2 级烟花的释放间隔（tick）。")
+            .description("悬停时 2 级烟花的释放间隔（tick）")
             .defaultValue(30)
             .min(1)
             .max(100)
@@ -335,7 +338,7 @@ public abstract class MixinElytraFly {
 
         hoverFwIntervalLv3 = sgHover.add(new IntSetting.Builder()
             .name("悬停3级烟花间隔")
-            .description("悬停时 3 级烟花的释放间隔（tick）。")
+            .description("悬停时 3 级烟花的释放间隔（tick）")
             .defaultValue(40)
             .min(1)
             .max(100)
@@ -346,7 +349,7 @@ public abstract class MixinElytraFly {
 
         discardMomentum = sgHover.add(new BoolSetting.Builder()
             .name("丢弃动量")
-            .description("冻结悬停：勾选后冻结期间清空玩家动量（含重力累积），解除冻结后从零开始。")
+            .description("勾选后冻结清空玩家动量，解除冻结后动量清零。反作弊不拦截情况下推荐开启，提示飞行精确度")
             .defaultValue(false)
             .visible(() -> isLegalMode() && hoverMode.get() == ElytraFlySupport.HoverMode.Freeze)
             .build()
@@ -354,7 +357,15 @@ public abstract class MixinElytraFly {
 
         freezeFirework = sgHover.add(new BoolSetting.Builder()
             .name("冻结烟花")
-            .description("冻结悬停：开启后冻结期间烟花冷却暂停（前后加起来算一次完整烟花周期）；关闭时冻结期间冷却照常递减（烟花实体在冻结期间也会消耗寿命），解除冻结后冷却已到即正常释放。")
+            .description("冻结期间冻结烟花使用，解冻后继续使用\"还未使用完\"的烟花")
+            .defaultValue(false)
+            .visible(() -> isLegalMode() && hoverMode.get() == ElytraFlySupport.HoverMode.Freeze)
+            .build()
+        );
+
+        notGlidingUnfreeze = sgHover.add(new BoolSetting.Builder()
+            .name("不在滑翔解冻")
+            .description("不在滑翔状态时立即解除冻结")
             .defaultValue(false)
             .visible(() -> isLegalMode() && hoverMode.get() == ElytraFlySupport.HoverMode.Freeze)
             .build()
@@ -381,6 +392,7 @@ public abstract class MixinElytraFly {
         ElytraFlySupport.fwIntervalLv2 = fwIntervalLv2;
         ElytraFlySupport.fwIntervalLv3 = fwIntervalLv3;
         ElytraFlySupport.hoverMode = hoverMode;
+        ElytraFlySupport.notGlidingUnfreeze = notGlidingUnfreeze;
         ElytraFlySupport.hoverFirework = hoverFirework;
         ElytraFlySupport.hoverFwIntervalLv1 = hoverFwIntervalLv1;
         ElytraFlySupport.hoverFwIntervalLv2 = hoverFwIntervalLv2;
