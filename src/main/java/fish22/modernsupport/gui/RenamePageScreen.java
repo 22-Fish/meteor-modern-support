@@ -1,7 +1,7 @@
 /*
  * This file is part of meteor-modern-support (meteor现代化支持).
  *
- * Copyright (c) 2026 fish22
+ * Copyright (c) 2026 22_Fish
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by

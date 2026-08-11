@@ -1,8 +1,11 @@
 package fish22.modernsupport;
 
+import fish22.modernsupport.gui.ItemPickerScreen;
 import fish22.modernsupport.modules.Freeze;
+import fish22.modernsupport.modules.ItemUse;
 import fish22.modernsupport.modules.Spin;
 import fish22.modernsupport.settings.ActionSetting;
+import fish22.modernsupport.settings.ItemUseListSetting;
 import fish22.modernsupport.utils.AutoSave;
 import fish22.modernsupport.utils.I18n;
 import fish22.modernsupport.utils.ModulePages;
@@ -11,12 +14,21 @@ import com.mojang.logging.LogUtils;
 import meteordevelopment.meteorclient.MeteorClient;
 import meteordevelopment.meteorclient.addons.MeteorAddon;
 import meteordevelopment.meteorclient.events.meteor.ActiveModulesChangedEvent;
+import meteordevelopment.meteorclient.gui.WidgetScreen;
 import meteordevelopment.meteorclient.gui.utils.SettingsWidgetFactory;
+import meteordevelopment.meteorclient.gui.widgets.WKeybind;
 import meteordevelopment.meteorclient.gui.widgets.pressable.WButton;
+import meteordevelopment.meteorclient.gui.widgets.pressable.WCheckbox;
 import meteordevelopment.meteorclient.systems.Systems;
 import meteordevelopment.meteorclient.systems.modules.Modules;
+import meteordevelopment.meteorclient.utils.misc.Keybind;
+import meteordevelopment.meteorclient.utils.misc.Names;
 import meteordevelopment.orbit.EventHandler;
 import org.slf4j.Logger;
+
+import java.util.List;
+
+import static meteordevelopment.meteorclient.MeteorClient.mc;
 
 /**
  * meteor现代化支持 — Meteor Client 扩展模组
@@ -42,6 +54,51 @@ public class ModernSupport extends MeteorAddon {
             button.action = actionSetting::run;
         });
 
+        // 注册「一键使用物品」物品列表设置的 GUI 渲染:
+        // 顶部「新增物品」按钮 + 每行 [物品][背包使用][快捷键][删除]
+        SettingsWidgetFactory.registerCustomFactory(ItemUseListSetting.class, theme -> (table, setting) -> {
+            ItemUseListSetting listSetting = (ItemUseListSetting) setting;
+
+            // 新增物品按钮: 打开物品选择界面, 选完加入列表末尾
+            WButton addBtn = table.add(theme.button("新增物品")).expandCellX().widget();
+            addBtn.action = () -> mc.setScreen(new ItemPickerScreen(theme, "选择物品", item -> {
+                listSetting.get().add(new ItemUseListSetting.ItemUseEntry(item, false, Keybind.none()));
+            }));
+
+            table.row();
+
+            // 快捷键控件列表 (渲染时重建, 避免累积旧控件)
+            List<WKeybind> keybindWidgets = listSetting.getKeybindWidgets();
+            keybindWidgets.clear();
+
+            // 每行: 物品按钮(点击更换) + 背包使用勾选 + 快捷键 + 删除
+            List<ItemUseListSetting.ItemUseEntry> entries = listSetting.get();
+            for (int i = 0; i < entries.size(); i++) {
+                int idx = i;
+                ItemUseListSetting.ItemUseEntry entry = entries.get(i);
+
+                WButton itemBtn = table.add(theme.button(Names.get(entry.item))).expandCellX().widget();
+                itemBtn.action = () -> mc.setScreen(new ItemPickerScreen(theme, "选择物品", item -> {
+                    entry.item = item;
+                }));
+
+                table.add(theme.label("背包使用"));
+                WCheckbox backpackCb = table.add(theme.checkbox(entry.backpackUse)).widget();
+                backpackCb.action = () -> entry.backpackUse = backpackCb.checked;
+
+                WKeybind keybind = table.add(theme.keybind(entry.keybind, Keybind.none())).widget();
+                keybindWidgets.add(keybind);
+
+                WButton delBtn = table.add(theme.button("删除")).widget();
+                delBtn.action = () -> {
+                    entries.remove(idx);
+                    reloadItemUseScreen();
+                };
+
+                table.row();
+            }
+        });
+
         // 初始化移动矫正 API
         MovementCorrection.init();
 
@@ -50,6 +107,9 @@ public class ModernSupport extends MeteorAddon {
 
         // 娱乐模块
         Modules.get().add(new Spin());
+
+        // 杂项模块
+        Modules.get().add(new ItemUse());
 
         // 移动模块
         Modules.get().add(new Freeze());
@@ -70,6 +130,11 @@ public class ModernSupport extends MeteorAddon {
     @EventHandler
     private static void onActiveModulesChanged(ActiveModulesChangedEvent event) {
         AutoSave.onChanged();
+    }
+
+    /** 物品列表增删改后刷新当前设置界面 (重建控件, 列表变化即时显示) */
+    private static void reloadItemUseScreen() {
+        if (mc.screen instanceof WidgetScreen widgetScreen) widgetScreen.reload();
     }
 
     @Override

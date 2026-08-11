@@ -26,6 +26,8 @@ import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.item.component.Fireworks;
 
+import java.util.function.Predicate;
+
 import static meteordevelopment.meteorclient.MeteorClient.mc;
 
 /**
@@ -124,6 +126,10 @@ public class ElytraFlySupport {
     public static Setting<Integer> fwIntervalLv1;
     public static Setting<Integer> fwIntervalLv2;
     public static Setting<Integer> fwIntervalLv3;
+    public static Setting<Boolean> backpackFirework;
+    public static Setting<Integer> fwPriorityLv1;
+    public static Setting<Integer> fwPriorityLv2;
+    public static Setting<Integer> fwPriorityLv3;
     public static Setting<HoverMode> hoverMode;
     public static Setting<Boolean> hoverFirework;
     public static Setting<Integer> hoverFwIntervalLv1;
@@ -210,6 +216,9 @@ public class ElytraFlySupport {
 
     /** 每 tick 主逻辑（TickEvent.Pre，由 MixinElytraFly 拦截官方 onPreTick 后调用） */
     public static void onTick() {
+        // 背包交换使用后的换回确认（任何模式下都要检查，未换回则重试）
+        BackpackUse.tick();
+
         if (mc.player == null) return;
 
         if (isArmorMode()) {
@@ -231,6 +240,13 @@ public class ElytraFlySupport {
 
     /** 收包监听（由 MixinElytraFly 拦截官方 onPacketReceive 后调用） */
     public static void onPacketReceive(PacketEvent.Receive event) {
+        // 合法平飞冻结中收到传送/位置纠正包（珍珠落地、活塞推送、回弹等）→ 解除冻结。
+        // 冻结时 travel 被取消、本地 onGround 不更新，珍珠落地后落地分支检测不到会卡住；
+        // 位置包到达即恢复本地物理，下一 tick 落地分支自然确认。
+        if (isLegalMode() && Freeze.isFrozen() && event.packet instanceof ClientboundPlayerPositionPacket) {
+            Freeze.setExternalFrozen(false);
+        }
+
         // 服务器位置纠正（回弹）后暂停换装，避免继续震荡（仅甲飞 Grim）
         if (!isArmorMode() || armorMode.get() != ArmorMode.Grim) return;
         if (event.packet instanceof ClientboundPlayerPositionPacket) {
@@ -409,6 +425,14 @@ public class ElytraFlySupport {
         // 打开容器/界面时不动手
         if (mc.player.containerMenu.containerId != 0) return;
 
+        // 死亡/死亡画面：解除冻结并取消起飞请求，避免死亡后冻结状态残留（重生后卡住动不了）
+        if (mc.player.isDeadOrDying()) {
+            Freeze.setExternalFrozen(false);
+            takeoffRequested = false;
+            takeoffRetryTicks = 0;
+            return;
+        }
+
         // 跳跃键按下事件（上升沿）：按下瞬间才触发起飞，按住不重复触发
         boolean jumpPressed = mc.options.keyJump.isDown() && !jumpWasDown;
         jumpWasDown = mc.options.keyJump.isDown();
@@ -440,6 +464,11 @@ public class ElytraFlySupport {
 
         // 起飞：空中未滑翔
         if (!mc.player.isFallFlying()) {
+            // 身上没穿鞘翅（死亡重生等异常状态）：解除冻结，避免冻结残留卡住动不了
+            // （合法平飞必须穿鞘翅，没鞘翅必然不在正常飞行/悬停状态）
+            if (!isElytraEquipped()) {
+                Freeze.setExternalFrozen(false);
+            }
             if (autoSwapElytra.get()) {
                 // 自动替换：跳跃键按下瞬间发起起飞请求；
                 // 起飞未成功前按间隔自动重试（服务器拒绝起飞包时等几 tick 再重发），直到成功或落地。
@@ -610,15 +639,17 @@ public class ElytraFlySupport {
     }
     */
 
-    /** 飞行中自动烟花：间隔到且快捷栏有烟花 → 延后到移动包发送后静默释放（烟花加速方向跟随服务器视角） */
+    /** 飞行中自动烟花：间隔到且有烟花 → 延后到移动包发送后释放（烟花加速方向跟随服务器视角） */
     private static void tickFlightFirework() {
         if (legalFwCooldown > 0) {
             legalFwCooldown--;
             return;
         }
-        int interval = fwIntervalForLevel(getHotbarFireworkLevel());
+        int level = selectFireworkLevel();
+        if (level == -1) return;
+        int interval = fwIntervalForLevel(level);
         MovementCorrection.runAfterSend(() -> {
-            if (tryUseFireworkSilent()) {
+            if (tryUseFireworkOfLevel(level)) {
                 legalFwCooldown = interval;
             }
         });
@@ -626,23 +657,27 @@ public class ElytraFlySupport {
 
     /** 起飞后立即释放一次烟花（延后到移动包发送后，方向跟随服务器视角），并重置冷却 */
     private static void tryFireworkOnce() {
-        int interval = fwIntervalForLevel(getHotbarFireworkLevel());
+        int level = selectFireworkLevel();
+        if (level == -1) return;
+        int interval = fwIntervalForLevel(level);
         MovementCorrection.runAfterSend(() -> {
-            if (tryUseFireworkSilent()) {
+            if (tryUseFireworkOfLevel(level)) {
                 legalFwCooldown = interval;
             }
         });
     }
 
-    /** 悬停中自动烟花：间隔到且快捷栏有烟花 → 延后到移动包发送后静默释放 */
+    /** 悬停中自动烟花：间隔到且有烟花 → 延后到移动包发送后释放 */
     private static void tickHoverFirework() {
         if (legalFwCooldown > 0) {
             legalFwCooldown--;
             return;
         }
-        int interval = hoverFwIntervalForLevel(getHotbarFireworkLevel());
+        int level = selectFireworkLevel();
+        if (level == -1) return;
+        int interval = hoverFwIntervalForLevel(level);
         MovementCorrection.runAfterSend(() -> {
-            if (tryUseFireworkSilent()) {
+            if (tryUseFireworkOfLevel(level)) {
                 legalFwCooldown = interval;
             }
         });
@@ -667,19 +702,83 @@ public class ElytraFlySupport {
     }
 
     /**
-     * 静默释放快捷栏烟花（合法平飞用）：优先副手，其次热栏静默切换释放后换回。
-     * 不找背包（背包释放暂未实现）。释放成功返回 true。
+     * 按优先级选择要使用的烟花等级；没有可用烟花返回 -1。
+     * 同时存在多个等级时用优先级高的；多个等级同优先级时遵循原逻辑
+     * （快捷栏第一个烟花的等级）。
      */
-    private static boolean tryUseFireworkSilent() {
-        if (mc.player.getOffhandItem().is(Items.FIREWORK_ROCKET)) {
+    private static int selectFireworkLevel() {
+        int bestPriority = -1;
+        int bestLevel = -1;
+        int tieCount = 0;
+        for (int level = 1; level <= 3; level++) {
+            if (!hasFireworkOfLevel(level)) continue;
+            int priority = priorityOf(level);
+            if (priority > bestPriority) {
+                bestPriority = priority;
+                bestLevel = level;
+                tieCount = 1;
+            } else if (priority == bestPriority) {
+                tieCount++;
+            }
+        }
+        if (bestLevel == -1) return -1;
+        // 多个等级同优先级 → 原逻辑（快捷栏第一个烟花的等级）
+        return tieCount > 1 ? getHotbarFireworkLevel() : bestLevel;
+    }
+
+    /** 指定等级的烟花优先级 */
+    private static int priorityOf(int level) {
+        return switch (level) {
+            case 2 -> fwPriorityLv2.get();
+            case 3 -> fwPriorityLv3.get();
+            default -> fwPriorityLv1.get();
+        };
+    }
+
+    /** 是否存在指定等级的烟花（背包烟花开启时查全背包，否则只查快捷栏） */
+    private static boolean hasFireworkOfLevel(int level) {
+        Predicate<ItemStack> pred = fireworkOfLevel(level);
+        if (backpackFirework.get()) {
+            return pred.test(mc.player.getOffhandItem())
+                || pred.test(mc.player.getMainHandItem())
+                || InvUtils.find(pred).found();
+        }
+        return InvUtils.findInHotbar(pred).found();
+    }
+
+    /** 指定等级的烟花判断 */
+    private static Predicate<ItemStack> fireworkOfLevel(int level) {
+        return stack -> stack.is(Items.FIREWORK_ROCKET) && fireworkLevel(stack) == level;
+    }
+
+    /** 烟花等级（飞行时间 1/2/3）；非烟花返回 1 */
+    private static int fireworkLevel(ItemStack stack) {
+        Fireworks component = stack.get(DataComponents.FIREWORKS);
+        return component != null ? component.flightDuration() : 1;
+    }
+
+    /**
+     * 按指定等级释放烟花：背包烟花开启走背包交换使用（含换回确认重试），
+     * 否则快捷栏静默使用（副手优先，其次热栏静默切换释放后换回）。返回是否成功。
+     */
+    private static boolean tryUseFireworkOfLevel(int level) {
+        Predicate<ItemStack> pred = fireworkOfLevel(level);
+        if (backpackFirework.get()) {
+            return BackpackUse.use(pred);
+        }
+
+        if (pred.test(mc.player.getOffhandItem())) {
             mc.gameMode.useItem(mc.player, InteractionHand.OFF_HAND);
             mc.player.swing(InteractionHand.OFF_HAND);
             return true;
         }
-
-        FindItemResult firework = InvUtils.findInHotbar(Items.FIREWORK_ROCKET);
+        FindItemResult firework = InvUtils.findInHotbar(pred);
         if (!firework.found()) return false;
-
+        if (firework.isMainHand()) {
+            mc.gameMode.useItem(mc.player, InteractionHand.MAIN_HAND);
+            mc.player.swing(InteractionHand.MAIN_HAND);
+            return true;
+        }
         InvUtils.swap(firework.slot(), true);
         mc.gameMode.useItem(mc.player, InteractionHand.MAIN_HAND);
         mc.player.swing(InteractionHand.MAIN_HAND);
@@ -687,7 +786,7 @@ public class ElytraFlySupport {
         return true;
     }
 
-    /** 读取快捷栏烟花的等级（飞行时间 1/2/3，默认 1）；没有烟花返回 1 */
+    /** 读取快捷栏第一个烟花的等级（飞行时间 1/2/3，默认 1）；没有烟花返回 1 */
     private static int getHotbarFireworkLevel() {
         FindItemResult firework = InvUtils.findInHotbar(Items.FIREWORK_ROCKET);
         if (!firework.found()) return 1;
@@ -695,8 +794,7 @@ public class ElytraFlySupport {
         ItemStack stack = firework.isOffhand()
             ? mc.player.getOffhandItem()
             : mc.player.getInventory().getItem(firework.slot());
-        Fireworks component = stack.get(DataComponents.FIREWORKS);
-        return component != null ? component.flightDuration() : 1;
+        return fireworkLevel(stack);
     }
 
     /** 当前胸甲槽是否穿着鞘翅 */

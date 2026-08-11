@@ -69,6 +69,18 @@ public abstract class MixinElytraFly {
     private Setting<Boolean> autoSwapElytra;
 
     @Unique
+    private Setting<Boolean> backpackFirework;
+
+    @Unique
+    private Setting<Integer> fwPriorityLv1;
+
+    @Unique
+    private Setting<Integer> fwPriorityLv2;
+
+    @Unique
+    private Setting<Integer> fwPriorityLv3;
+
+    @Unique
     private Setting<Boolean> discardMomentum;
 
     @Unique
@@ -209,6 +221,44 @@ public abstract class MixinElytraFly {
             .build()
         );
 
+        backpackFirework = sgLegal.add(new BoolSetting.Builder()
+            .name("背包烟花")
+            .description("合法平飞：自动烟花从背包任意位置找（交换到手上使用后换回，未换回自动重试）。不勾选只找快捷栏。")
+            .defaultValue(false)
+            .visible(() -> isLegalMode() && autoFirework.get())
+            .build()
+        );
+
+        fwPriorityLv1 = sgLegal.add(new IntSetting.Builder()
+            .name("1级烟花优先级")
+            .description("1 级烟花的优先级（1~3）。同时存在多个等级时优先使用优先级高的；优先级相同遵循原逻辑（快捷栏顺序取第一个）。")
+            .defaultValue(1)
+            .min(1)
+            .max(3)
+            .visible(() -> isLegalMode() && autoFirework.get())
+            .build()
+        );
+
+        fwPriorityLv2 = sgLegal.add(new IntSetting.Builder()
+            .name("2级烟花优先级")
+            .description("2 级烟花的优先级（1~3）。同时存在多个等级时优先使用优先级高的；优先级相同遵循原逻辑（快捷栏顺序取第一个）。")
+            .defaultValue(1)
+            .min(1)
+            .max(3)
+            .visible(() -> isLegalMode() && autoFirework.get())
+            .build()
+        );
+
+        fwPriorityLv3 = sgLegal.add(new IntSetting.Builder()
+            .name("3级烟花优先级")
+            .description("3 级烟花的优先级（1~3）。同时存在多个等级时优先使用优先级高的；优先级相同遵循原逻辑（快捷栏顺序取第一个）。")
+            .defaultValue(1)
+            .min(1)
+            .max(3)
+            .visible(() -> isLegalMode() && autoFirework.get())
+            .build()
+        );
+
         fwIntervalLv1 = sgLegal.add(new IntSetting.Builder()
             .name("1级烟花间隔")
             .description("1 级烟花（飞行时间 1）的释放间隔（tick）。1 级烟花寿命约 20~31 tick，默认 20 可保持加速不断。")
@@ -321,6 +371,10 @@ public abstract class MixinElytraFly {
         ElytraFlySupport.correctionBackoff = correctionBackoff;
         ElytraFlySupport.autoFirework = autoFirework;
         ElytraFlySupport.autoSwapElytra = autoSwapElytra;
+        ElytraFlySupport.backpackFirework = backpackFirework;
+        ElytraFlySupport.fwPriorityLv1 = fwPriorityLv1;
+        ElytraFlySupport.fwPriorityLv2 = fwPriorityLv2;
+        ElytraFlySupport.fwPriorityLv3 = fwPriorityLv3;
         ElytraFlySupport.discardMomentum = discardMomentum;
         ElytraFlySupport.freezeFirework = freezeFirework;
         ElytraFlySupport.fwIntervalLv1 = fwIntervalLv1;

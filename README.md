@@ -2,17 +2,18 @@
 
 ## 前言
 
-\-**本项目代码由AI生成，作者本人并不精通java，无关本mod的技术问题不建议找我，大概率拿不到有用的回答**
-在使用meteor client模组的过程中，经常遇到一些问题。比如现代反作弊对meteor的旋转几乎是百分百拦截。meteor本身也缺少非常多的实用功能。此项目致力于为meteor添加现代化的功能，如加入了移动矫正的杀戮光环，绝不回弹卡脚。
+* **⚠本项目代码由AI生成**
+* 在使用meteor client模组的过程中，经常遇到一些问题。比如现代反作弊对meteor的旋转几乎是百分百拦截。meteor本身也缺少非常多的实用功能。此项目致力于为meteor添加现代化的功能，如加入了移动矫正的杀戮光环，绝不回弹卡脚。
+* meteor经常因为非正常关闭丢失配置，我们修改了保存机制，让meteor每次状态变化都进行保存。
 
 
 
 |功能|说明|
 |-|-|
-|移动矫正 API|旋转时修正移动方向：走路、鞘翅移动方向与旋转朝向一致（参考 Baritone LookBehavior）|
-|KillAura 集成|为 Meteor 的 KillAura 添加「移动矫正」设置（关闭 / 停止移动 / 严格 / 静默）|
-|配置自动保存|设置修改 / 模块开关后异步防抖保存，强退不丢配置|
-|\|18n 语言支持|Meteor 全界面多语言：Config 里可设置语言（默认跟随 Minecraft），游戏目录动态加载语言文件|
+|移动矫正 API|旋转时修正移动方向：走路、鞘翅移动方向与旋转朝向一致（参考 [Baritone](https://github.com/cabaletta/baritone)，[LiquidBounce](https://github.com/CCBlueX/LiquidBounce)）|
+|配置保存修改|设置修改 / 模块开关后异步防抖保存，强退不丢配置|
+|[Meteor-I18n-Support-plugin](https://github.com/dingzhen-vape/Meteor-I18n-Support-plugin) 语言支持|Meteor 全界面多语言：Config 里可设置语言（默认跟随 Minecraft），游戏目录动态加载语言文件|
+|背包使用|已经初步实现。一个tick内交换2次，直接使用背包中的物品。|
 
 
 
@@ -42,8 +43,9 @@
 
 ### 为什么需要它
 
-Meteor 原版 `Rotations.rotate` 是**发包旋转**：只在发包旋转，移动计算（aiStep）仍按客户端原朝向进行 → 旋转与移动方向不一致（走路、鞘翅方向不对）,在现代反作弊下回弹几乎是必然。
-本 API 采用 **Baritone LookBehavior** 的机制：**移动计算前真实设置玩家朝向** → WASD 移动方向、鞘翅方向自然跟随旋转；移动包发送后恢复原朝向（客户端静默）。状态由调用方每 tick 刷新，停止调用后自动归位。
+* Meteor 原版 `Rotations.rotate` 是**发包旋转**：只在发包旋转，移动计算（aiStep）仍按客户端原朝向进行 → 旋转与移动方向不一致（走路、鞘翅方向不对）,在现代反作弊下回弹几乎是必然。
+* 本 API 采用 **Baritone LookBehavior** 的机制：**移动计算前真实设置玩家朝向** → WASD 移动方向、鞘翅方向自然跟随旋转；移动包发送后恢复原朝向（客户端静默）。状态由调用方每 tick 刷新，停止调用后自动归位。
+* **一般情况下请不要使用严格模式，但是为了可能的特殊需求，仍保留**
 
 ### 快速开始（两步）
 
@@ -65,8 +67,8 @@ MovementCorrection.rotateWithMode(yaw, pitch, movementCorrection.get());
 
 |模式|行为|
 |-|-|
-|关闭|原版静默旋转，不矫正移动|
-|停止移动|暂未实现（选中等同关闭）|
+|关闭|原版meteor旋转|
+|停止移动|暂未实现，选中等同关闭|
 |严格|真实旋转 + 客户端静默：服务器朝向正确、移动方向跟随服务器朝向、客户端视角不动|
 |静默|在严格基础上映射 WASD 按键：移动方向与**客户端视觉朝向**一致。例如服务器朝正右（90°）、视觉朝正前（0°）时，W 键等效 A 键，人物仍朝视觉正前方移动；斜向自动产生 W+D 组合键效果，moveVector 使用浮点向量，任意角度精确|
 
@@ -92,9 +94,9 @@ MovementCorrection.rotateWithMode(yaw, pitch, movementCorrection.get());
 
 
 
-## 语言支持（|18n）
+## 语言支持（[Meteor-I18n-Support-plugin](https://github.com/dingzhen-vape/Meteor-I18n-Support-plugin)）
 
-Meteor 本体的文字（模块名、设置名、描述）是代码写死的，本 mod 通过 mixin 在构造时替换为语言文件中的翻译，并支持运行时切换（改完立即生效，无需重启）。
+Meteor 本体的文字（模块名、设置名、描述）是代码写死的，本 mod 通过 mixin 在构造时替换为语言文件中的翻译，并支持运行时切换（改完点击按钮刷新，重进界面立即生效，无需重启游戏）
 
 ### 设置入口
 
@@ -116,8 +118,10 @@ Meteor 设置主界面（`/meteor` → Config）新增 **Language（语言）** 
     ├── 简体中文/
     │   ├── meteor.json          ← 主翻译模板（随内置自动同步，不建议手改）
     │   └── my-addon.json        ← 自己的插件翻译
-    └── English/
-        └── meteor.json
+    ├── English/
+    │   └── meteor.json
+    └── Alien tongue/              ← 创建一个文件夹，它会被当成全新语言解析，会出现在语言列表
+         └── meteor.json
 ```
 
 > 主翻译文件 `meteor.json` 会在启动/重载时自动与内置模板同步（内容不同才替换），自定义翻译请新建自己的 JSON 文件。

@@ -1,5 +1,5 @@
 [versions]
-mod-version = "1.2.0"
+mod-version = "1.2.1"
 
 # Fabric (https://fabricmc.net/develop)
 jdk = "25"
@@ -30,3 +30,4 @@ meteor-client = { module = "meteordevelopment:meteor-client", version.ref = "met
 
 [plugins]
 fabric-loom = { id = "net.fabricmc.fabric-loom", version.ref = "loom" }
+
