@@ -75,7 +75,7 @@ public abstract class MixinKillAura {
 
         movementCorrectionMode = sg.add(new EnumSetting.Builder<MovementCorrection.Mode>()
             .name("移动矫正")
-            .description("移动矫正模式。严格：真实旋转但客户端静默（服务器朝向正确，视角不动）。静默：在严格基础上映射 WASD 按键，移动方向与视觉朝向一致。停止移动暂未实现。")
+            .description("移动矫正模式。严格：移动方向为真实旋转。静默：在严格基础上映射 WASD 按键,尝试让移动方向与视觉朝向一致。")
             .defaultValue(MovementCorrection.Mode.OFF)
             .visible(() -> rotation.get() != KillAura.RotationMode.None)
             .build()
@@ -83,7 +83,7 @@ public abstract class MixinKillAura {
 
         onHitHoldTicks = sg.add(new IntSetting.Builder()
             .name("转回延迟")
-            .description("攻击时旋转（OnHit）模式下，攻击后保持旋转的 tick 数，然后转回原朝向。")
+            .description("OnHit模式下，攻击后保持旋转的 tick 数")
             .defaultValue(1)
             .min(0)
             .max(20)
@@ -93,7 +93,7 @@ public abstract class MixinKillAura {
 
         smoothLook = sg.add(new BoolSetting.Builder()
             .name("平滑转头")
-            .description("平滑旋转到目标角度（服务器视角连续，反作弊友好，但转动耗时长）。关闭时瞬间转到目标角度（最快）。")
+            .description("平滑旋转到目标角度")
             .defaultValue(false)
             .visible(() -> rotation.get() != KillAura.RotationMode.None)
             .build()
@@ -101,7 +101,7 @@ public abstract class MixinKillAura {
 
         smoothSpeed = sg.add(new IntSetting.Builder()
             .name("转动速度")
-            .description("平滑转头开启时，每 tick 最多转动的角度（°/tick）。")
+            .description("平滑转头开启时，每 tick 最多转动的角度（°/tick）")
             .defaultValue(60)
             .min(1)
             .max(180)

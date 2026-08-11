@@ -61,9 +61,9 @@ public class Freeze extends Module {
         .name("解冻动量")
         .description("""
             解冻时的动量处理方式。
-            KeepAll（保留全部）：保留冻结前和冻结期间受到的所有动量。
-            KeepFrozen（丢弃期间动量）：恢复冻结前那一刻的动量，期间所有动量直接丢弃（击退、推动等全部不保留）。
-            Clear（清零）：解冻后动量归零，原地站住。""")
+            KeepAll（保留全部）：保留受到的所有动量
+            KeepFrozen（丢弃期间动量）：恢复冻结前的动量，冻结期间动量丢弃
+            Clear（清零）：解冻后动量归零""")
         .defaultValue(UnfreezeMotion.KeepAll)
         .build()
     );
@@ -73,7 +73,7 @@ public class Freeze extends Module {
 
     public Freeze() {
         super(Categories.Movement, "冻结",
-            "冻结时完全移除移动运算（停止移动）并不发位置移动包；旋转照常。活塞、珍珠、传送等位置更新不受影响。关闭后恢复。");
+            "冻结时完全移除移动运算并不发位置移动包；旋转照常。珍珠、传送等位置更新不受影响。关闭后恢复。");
     }
 
     @Override

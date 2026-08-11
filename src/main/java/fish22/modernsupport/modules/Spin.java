@@ -111,7 +111,7 @@ public class Spin extends Module {
     );
     private final Setting<Integer> yawJitterForward = sgGeneral.add(new IntSetting.Builder()
         .name("朝前 tick")
-        .description("抖动模式：保持当前朝向的 tick 数。")
+        .description("保持当前朝向的 tick 数。")
         .defaultValue(2)
         .min(0)
         .max(100)
@@ -119,7 +119,7 @@ public class Spin extends Module {
     );
     private final Setting<Integer> yawJitterBackward = sgGeneral.add(new IntSetting.Builder()
         .name("朝后 tick")
-        .description("抖动模式：转向 180° 后保持的 tick 数。")
+        .description("转向 180° 后保持的 tick 数。")
         .defaultValue(2)
         .min(0)
         .max(100)
@@ -137,7 +137,7 @@ public class Spin extends Module {
     // 俯仰
     private final Setting<PitchMode> pitchMode = sgGeneral.add(new EnumSetting.Builder<PitchMode>()
         .name("俯仰模式")
-        .description("俯仰（上下看）的变化方式。")
+        .description("俯仰的变化方式。")
         .defaultValue(PitchMode.RANDOM)
         .build()
     );
@@ -161,19 +161,19 @@ public class Spin extends Module {
     // 其他
     private final Setting<MovementCorrection.Mode> movementCorrection = sgMovement.add(new EnumSetting.Builder<MovementCorrection.Mode>()
         .name("移动矫正")
-        .description("旋转时如何矫正移动方向。严格：真实旋转但客户端静默（移动跟随服务器朝向）。静默：在严格基础上映射 WASD 按键，移动方向与视觉朝向一致。停止移动暂未实现。")
+        .description("移动矫正模式。严格：移动方向为真实旋转。静默：在严格基础上映射 WASD 按键,尝试让移动方向与视觉朝向一致。")
         .defaultValue(MovementCorrection.Mode.OFF)
         .build()
     );
     private final Setting<Boolean> smoothTurn = sgMovement.add(new BoolSetting.Builder()
         .name("平滑转头")
-        .description("平滑旋转到目标角度（服务器视角连续，反作弊友好，但转动耗时长）。关闭时瞬间转到目标角度（最快）。")
+        .description("平滑旋转到目标角度。")
         .defaultValue(false)
         .build()
     );
     private final Setting<Integer> turnSpeed = sgMovement.add(new IntSetting.Builder()
         .name("转动速度")
-        .description("平滑转头开启时，每 tick 最多转动的角度（°/tick）。越低越平滑（反作弊友好），越高越接近瞬移。")
+        .description("平滑转头开启时，每 tick 最多转动的角度")
         .defaultValue(60)
         .min(1)
         .max(180)
@@ -187,7 +187,7 @@ public class Spin extends Module {
         .build()
     );
     private final Setting<Boolean> notDuringSprint = sgGeneral.add(new BoolSetting.Builder()
-        .name("疾跑时不转")
+        .name("疾跑时停止")
         .description("冲刺时不改变视角。")
         .defaultValue(true)
         .build()

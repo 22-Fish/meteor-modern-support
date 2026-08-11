@@ -33,12 +33,12 @@ public class ItemUse extends Module {
 
     private final ItemUseListSetting itemList = sgGeneral.add(new ItemUseListSetting(
         "物品列表",
-        "按快捷键一键使用对应物品。不勾选背包使用：快捷栏静默使用（副手优先）。勾选：同一 tick 先把背包里的该物品与手上物品交换，再使用，再交换回去。物品不在背包时不触发。",
+        "按快捷键一键使用对应物品。开启背包使用可以使用背包中的物品",
         null
     ));
 
     public ItemUse() {
-        super(Categories.Misc, "一键使用物品", "配置物品与快捷键，按下快捷键一键使用对应物品（可勾选背包使用，自动从背包交换到手上）。");
+        super(Categories.Misc, "一键使用物品", "配置物品与快捷键，按下快捷键一键使用对应物品（可勾选背包使用，自动从背包交换到手上）");
     }
 
     @EventHandler
