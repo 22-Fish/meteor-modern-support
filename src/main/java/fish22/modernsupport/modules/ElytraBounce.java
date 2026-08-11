@@ -19,6 +19,7 @@
 
 package fish22.modernsupport.modules;
 
+import fish22.modernsupport.utils.MovementCorrection;
 import meteordevelopment.meteorclient.MeteorClient;
 import meteordevelopment.meteorclient.events.packets.PacketEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
@@ -222,8 +223,8 @@ public class ElytraBounce extends Module {
 
     private final Setting<Boolean> legalAutoJump = sgGeneral.add(new BoolSetting.Builder()
         .name("自动跳跃")
-        .description("自动为你按住跳跃键，落地瞬间自动跳起，配合自动起飞连续弹跳。")
-        .defaultValue(true)
+        .description("自动为你按住跳跃键，落地瞬间自动跳起连续弹跳。注意：落地不停飞容易被反作弊拦截，默认关闭。")
+        .defaultValue(false)
         .visible(() -> mode.get() == Mode.Legal)
         .build()
     );
@@ -245,10 +246,10 @@ public class ElytraBounce extends Module {
     private boolean wasFlying = false;
 
     /**
-     * 起飞节流倒计时：本地假滑翔后被服务器取消（tryToStartFallFlying 失败会
-     * stopFallFlying 取消滑翔）时冷却几 tick 再重试，避免来回震荡
+     * 起飞被服务器取消的标志：取消后空中不再自动重试（避免反复起飞→被拦截→抽搐），
+     * 等落地（onGround）后重置，重新离地再起飞
      */
-    private int takeoffCooldown = 0;
+    private boolean takeoffCancelled = false;
 
     /** 诊断提示去重标志（避免每 tick 刷屏） */
     private boolean warnedNoElytra = false;
@@ -275,11 +276,11 @@ public class ElytraBounce extends Module {
         rubberbanded = false;
         tickDelay = restartDelay.get();
         wasFlying = false;
-        takeoffCooldown = 0;
         warnedNoElytra = false;
         warnedElytraFlyActive = false;
         warnedTakeoffCancelled = false;
         warnedTakeoffFailed = false;
+        takeoffCancelled = false;
         if (mode.get() == Mode.Meteor) {
             prevFov = mc.options.fovEffectScale().get();
         }
@@ -290,7 +291,6 @@ public class ElytraBounce extends Module {
         unpress();
         rubberbanded = false;
         tickDelay = restartDelay.get();
-        takeoffCooldown = 0;
         if (mode.get() == Mode.Meteor && prevFov != 0 && !sprint.get()) {
             mc.options.fovEffectScale().set(prevFov);
         }
@@ -348,14 +348,14 @@ public class ElytraBounce extends Module {
     private void legalTick() {
         LocalPlayer p = mc.player;
 
-        // 滑翔状态从 true 变 false（服务器取消起飞/落地）：起飞被拒时冷却几 tick 再试，
-        // 避免「假滑翔 → 服务器取消 → 再假滑翔」来回震荡
+        // 滑翔状态从 true 变 false（服务器取消起飞/落地）：标记为取消，空中不再重试，
+        // 等落地后重新离地再起飞——避免「起飞→被反作弊拦截→再起飞」反复抽搐
         boolean flying = p.isFallFlying();
         if (wasFlying && !flying) {
-            takeoffCooldown = 5;
+            takeoffCancelled = true;
             // 提示起飞被服务器取消（帮助定位：反作弊/条件不符）
             if (!p.onGround() && !warnedTakeoffCancelled) {
-                ChatUtils.info("鞘翅弹跳:起飞被服务器取消,若反复如此可能是反作弊拦截");
+                ChatUtils.info("鞘翅弹跳:起飞被服务器取消,已停止重试,落地后可再次起飞");
                 warnedTakeoffCancelled = true;
             }
         }
@@ -382,26 +382,26 @@ public class ElytraBounce extends Module {
         }
 
         // 弹跳条件（非创造飞行/非乘客/非攀爬/非水中/无漂浮）：
-        // 自动跳跃（落地瞬间自动跳起）+ 俯仰/偏航锁定
+        // 自动跳跃 + 服务器视角锁定。锁定用移动矫正 SEVERE（服务器视角=目标、客户端静默）：
+        // 真实旋转（直接 setXRot/setYRot）的旋转包有网络延迟，服务器按旧朝向模拟而本地已转向，
+        // 移动方向与服务器模拟不一致会被回弹（抽搐）；静默锁定两端一致
         if (checkConditions(p)) {
             if (legalAutoJump.get()) mc.options.keyJump.setDown(true);
-            p.setYRot(getLegalYawDirection());
-            if (legalLockPitch.get()) p.setXRot(legalPitch.get().floatValue());
+            float yaw = getLegalYawDirection();
+            float pitch = legalLockPitch.get() ? legalPitch.get().floatValue() : mc.player.getXRot();
+            MovementCorrection.rotate(yaw, pitch, MovementCorrection.Mode.SEVERE);
         }
 
         if (flying) return;
 
-        // 落地：重置冷却（重新离地立即起飞）
+        // 落地：重置取消标志（重新离地立即起飞）
         if (p.onGround()) {
-            takeoffCooldown = 0;
+            takeoffCancelled = false;
             return;
         }
 
-        // 起飞节流：冷却期间不重发
-        if (takeoffCooldown > 0) {
-            takeoffCooldown--;
-            return;
-        }
+        // 起飞曾被服务器取消：空中不再重试，等落地重置后再起飞
+        if (takeoffCancelled) return;
 
         // 原版双击空格同款起飞：本地 tryToStartFallFlying 立即进入滑翔 + 发包。
         // 只发包等广播会受网络延迟影响（广播未到前重发会被服务器 stopFallFlying 取消），
