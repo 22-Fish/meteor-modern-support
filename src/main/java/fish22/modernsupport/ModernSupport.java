@@ -1,6 +1,7 @@
 package fish22.modernsupport;
 
 import fish22.modernsupport.gui.ItemPickerScreen;
+import fish22.modernsupport.modules.ElytraBounce;
 import fish22.modernsupport.modules.Freeze;
 import fish22.modernsupport.modules.ItemUse;
 import fish22.modernsupport.modules.Spin;
@@ -118,6 +119,8 @@ public class ModernSupport extends MeteorAddon {
 
         // 移动模块
         Modules.get().add(new Freeze());
+        // 鞘翅弹跳（从 ElytraFly Bounce 模式分离的独立模块）
+        Modules.get().add(new ElytraBounce());
         // 鞘翅飞行增强已通过 MixinElytraFly 注入 Meteor 官方 ElytraFly 模块
 
         // 模块分页系统：注册 + 加载存档 + 启动登记检查（新分类自动进主界面）
