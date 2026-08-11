@@ -30,6 +30,9 @@ import meteordevelopment.meteorclient.settings.Setting;
 import meteordevelopment.meteorclient.settings.SettingGroup;
 import meteordevelopment.meteorclient.systems.modules.Categories;
 import meteordevelopment.meteorclient.systems.modules.Module;
+import meteordevelopment.meteorclient.systems.modules.Modules;
+import meteordevelopment.meteorclient.systems.modules.movement.elytrafly.ElytraFly;
+import meteordevelopment.meteorclient.utils.player.ChatUtils;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.network.protocol.game.ClientboundPlayerPositionPacket;
@@ -247,6 +250,11 @@ public class ElytraBounce extends Module {
      */
     private int takeoffCooldown = 0;
 
+    /** 诊断提示去重标志（避免每 tick 刷屏） */
+    private boolean warnedNoElytra = false;
+    private boolean warnedElytraFlyActive = false;
+    private boolean warnedTakeoffCancelled = false;
+
     public ElytraBounce() {
         super(Categories.Movement, "鞘翅弹跳", "鞘翅飞行中的弹跳（Bounce）功能，已从「鞘翅飞行」模块分离。meteor模式：原版行为。合法模式：穿着鞘翅时只要在空中就自动起飞。");
     }
@@ -267,6 +275,9 @@ public class ElytraBounce extends Module {
         tickDelay = restartDelay.get();
         wasFlying = false;
         takeoffCooldown = 0;
+        warnedNoElytra = false;
+        warnedElytraFlyActive = false;
+        warnedTakeoffCancelled = false;
         if (mode.get() == Mode.Meteor) {
             prevFov = mc.options.fovEffectScale().get();
         }
@@ -334,11 +345,33 @@ public class ElytraBounce extends Module {
         boolean flying = p.isFallFlying();
         if (wasFlying && !flying) {
             takeoffCooldown = 5;
+            // 提示起飞被服务器取消（帮助定位：反作弊/条件不符）
+            if (!p.onGround() && !warnedTakeoffCancelled) {
+                ChatUtils.info("鞘翅弹跳:起飞被服务器取消,若反复如此可能是反作弊拦截");
+                warnedTakeoffCancelled = true;
+            }
         }
         wasFlying = flying;
 
-        // 必须穿着鞘翅，否则不干预（不按跳跃、不锁视角）
-        if (!LivingEntity.canGlideUsing(p.getItemBySlot(EquipmentSlot.CHEST), EquipmentSlot.CHEST)) return;
+        // 必须穿着鞘翅，否则不干预（不按跳跃、不锁视角），并提示
+        if (!LivingEntity.canGlideUsing(p.getItemBySlot(EquipmentSlot.CHEST), EquipmentSlot.CHEST)) {
+            if (!warnedNoElytra) {
+                ChatUtils.info("鞘翅弹跳:需要把鞘翅穿在胸甲槽才会起飞");
+                warnedNoElytra = true;
+            }
+            return;
+        }
+        warnedNoElytra = false;
+
+        // 提示与「鞘翅飞行」模块冲突（两个飞行控制模块同时开可能互相干扰）
+        if (Modules.get().isActive(ElytraFly.class)) {
+            if (!warnedElytraFlyActive) {
+                ChatUtils.info("鞘翅弹跳:检测到「鞘翅飞行」模块已开启,建议先关闭它再使用本模块");
+                warnedElytraFlyActive = true;
+            }
+        } else {
+            warnedElytraFlyActive = false;
+        }
 
         // 弹跳条件（非创造飞行/非乘客/非攀爬/非水中/无漂浮）：
         // 自动跳跃（落地瞬间自动跳起）+ 俯仰/偏航锁定
@@ -362,7 +395,7 @@ public class ElytraBounce extends Module {
             return;
         }
 
-        // 参考合法平飞：本地 tryToStartFallFlying 立即进入滑翔 + 发包。
+        // 原版双击空格同款起飞：本地 tryToStartFallFlying 立即进入滑翔 + 发包。
         // 只发包等广播会受网络延迟影响（广播未到前重发会被服务器 stopFallFlying 取消），
         // 本地先滑翔则广播只是确认，不依赖延迟
         if (p.tryToStartFallFlying()) {
