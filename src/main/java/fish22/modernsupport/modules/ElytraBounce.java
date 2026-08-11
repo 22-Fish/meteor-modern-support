@@ -254,6 +254,7 @@ public class ElytraBounce extends Module {
     private boolean warnedNoElytra = false;
     private boolean warnedElytraFlyActive = false;
     private boolean warnedTakeoffCancelled = false;
+    private boolean warnedTakeoffFailed = false;
 
     public ElytraBounce() {
         super(Categories.Movement, "鞘翅弹跳", "鞘翅飞行中的弹跳（Bounce）功能，已从「鞘翅飞行」模块分离。meteor模式：原版行为。合法模式：穿着鞘翅时只要在空中就自动起飞。");
@@ -278,6 +279,7 @@ public class ElytraBounce extends Module {
         warnedNoElytra = false;
         warnedElytraFlyActive = false;
         warnedTakeoffCancelled = false;
+        warnedTakeoffFailed = false;
         if (mode.get() == Mode.Meteor) {
             prevFov = mc.options.fovEffectScale().get();
         }
@@ -296,22 +298,28 @@ public class ElytraBounce extends Module {
 
     // ====== 事件 ======
 
+    /**
+     * 合法模式在 TickEvent.Pre（玩家 tick 之前）处理起飞：与合法平飞一致的时机——
+     * 本地 tryToStartFallFlying 后本 tick 的移动就走滑翔物理，移动包状态与服务器一致。
+     * meteor 模式的冲刺处理也在这里（原版 Bounce 的 onPreTick）。
+     */
     @EventHandler
-    private void onTick(TickEvent.Post event) {
+    private void onPreTick(TickEvent.Pre event) {
         if (mc.player == null) return;
 
         if (mode.get() == Mode.Legal) {
             legalTick();
         } else {
-            meteorTick();
+            // 原版：持续冲刺开启时每 tick 强制冲刺
+            if (checkConditions(mc.player) && sprint.get()) mc.player.setSprinting(true);
         }
     }
 
+    /** meteor 模式主逻辑（原版 Bounce 的 onTick 时机，TickEvent.Post） */
     @EventHandler
-    private void onPreTick(TickEvent.Pre event) {
+    private void onTick(TickEvent.Post event) {
         if (mc.player == null || mode.get() != Mode.Meteor) return;
-        // 原版：持续冲刺开启时每 tick 强制冲刺
-        if (checkConditions(mc.player) && sprint.get()) mc.player.setSprinting(true);
+        meteorTick();
     }
 
     @EventHandler
@@ -400,6 +408,10 @@ public class ElytraBounce extends Module {
         // 本地先滑翔则广播只是确认，不依赖延迟
         if (p.tryToStartFallFlying()) {
             mc.getConnection().send(new ServerboundPlayerCommandPacket(p, ServerboundPlayerCommandPacket.Action.START_FALL_FLYING));
+        } else if (!warnedTakeoffFailed) {
+            // 起飞条件不满足（未穿鞘翅/在水中/已滑翔等）：提示一次帮助定位
+            ChatUtils.info("鞘翅弹跳:起飞条件不满足(需要穿鞘翅且不在水中)");
+            warnedTakeoffFailed = true;
         }
     }
 
