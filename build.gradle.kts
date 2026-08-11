@@ -30,6 +30,11 @@ dependencies {
     implementation(libs.meteor.client)
 }
 
+loom {
+    // 加宽原版 private 方法（发包挖掘需要 MultiPlayerGameMode.startPrediction）
+    accessWidenerPath = file("src/main/resources/meteor-modern-support.accesswidener")
+}
+
 java {
     toolchain {
         languageVersion.set(JavaLanguageVersion.of(libs.versions.jdk.get().toInt()))

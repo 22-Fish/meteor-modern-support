@@ -30,6 +30,9 @@ import meteordevelopment.orbit.EventHandler;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.world.entity.Entity;
 
+import java.util.ArrayList;
+import java.util.List;
+
 import static meteordevelopment.meteorclient.MeteorClient.mc;
 
 /**
@@ -101,8 +104,8 @@ public class MovementCorrection {
     /** 旋转保持剩余 tick 数（OnHit 模式：攻击后延迟转回） */
     private static int holdTicks = 0;
 
-    /** 移动包发送完毕后执行的动作（攻击包延迟到旋转包之后发出用） */
-    private static Runnable postSendAction;
+    /** 移动包发送完毕后执行的动作队列（多个调用方可同时注册，互不覆盖） */
+    private static final List<Runnable> postSendActions = new ArrayList<>();
 
     /** 本 tick 是否调用过 rotate（烟花加速方向对齐用；TickEvent.Post 时重置） */
     private static boolean rotatedThisTick = false;
@@ -112,10 +115,11 @@ public class MovementCorrection {
 
     /**
      * 注册一个在移动包发送完毕后执行的动作。
-     * 只保留最新注册的一个（多目标时由调用方自行合并）。
+     * 多个调用方（如 KillAura 延迟攻击、鞘翅延迟烟花）可同时注册，互不覆盖，
+     * Post 时按注册顺序全部执行。
      */
     public static void runAfterSend(Runnable action) {
-        postSendAction = action;
+        postSendActions.add(action);
     }
 
     /**
@@ -284,9 +288,16 @@ public class MovementCorrection {
     private static void onSendMovementPacketsPost(SendMovementPacketsEvent.Post event) {
         // 延迟动作（如攻击包）不依赖矫正状态，始终执行：
         // 此刻移动包（含旋转）已发出，服务器视角已到位，攻击包此时发出才能命中。
-        if (postSendAction != null) {
-            postSendAction.run();
-            postSendAction = null;
+        if (!postSendActions.isEmpty()) {
+            List<Runnable> actions = new ArrayList<>(postSendActions);
+            postSendActions.clear();
+            for (Runnable action : actions) {
+                try {
+                    action.run();
+                } catch (Exception e) {
+                    ModernSupport.LOG.error("[移动矫正] runAfterSend 回调执行异常", e);
+                }
+            }
         }
 
         if (!active || mc.player == null) return;

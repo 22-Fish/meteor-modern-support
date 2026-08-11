@@ -10,7 +10,9 @@ import meteordevelopment.meteorclient.settings.SettingGroup;
 import meteordevelopment.meteorclient.systems.modules.combat.KillAura;
 import meteordevelopment.meteorclient.utils.player.Rotations;
 import net.minecraft.client.multiplayer.MultiPlayerGameMode;
+import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.util.Mth;
+import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.player.Player;
 import org.spongepowered.asm.mixin.Mixin;
@@ -176,6 +178,23 @@ public abstract class MixinKillAura {
         MovementCorrection.runAfterSend(this::doPendingAttacks);
     }
 
+    // ====== swing 延迟：不立即发，等攻击包发出后统一挥动 ======
+    //
+    // 服务端 ServerPlayer.swing 会 resetAttackStrengthTicker（重置攻击冷却），
+    // 若 swing 包先于攻击包到达，攻击包判定时冷却刚被清零 → 全部轻击/丢弃。
+    // 原版顺序是攻击包 → swing，这里把 swing 一并延迟到 doPendingAttacks 里保证顺序。
+
+    @Redirect(
+        method = "attack",
+        at = @At(
+            value = "INVOKE",
+            target = "Lnet/minecraft/client/player/LocalPlayer;swing(Lnet/minecraft/world/InteractionHand;)V"
+        )
+    )
+    private void redirectSwing(LocalPlayer player, InteractionHand hand) {
+        // 挥动延迟到 doPendingAttacks（攻击包之后），不在这里立即发包
+    }
+
     /** 执行延迟的攻击（在移动包发送完毕后被调用，此时服务器视角已到位） */
     @Unique
     private void doPendingAttacks() {
@@ -183,6 +202,8 @@ public abstract class MixinKillAura {
 
         for (Entity target : pendingAttacks) {
             mc.gameMode.attack(mc.player, target);
+            // 攻击包之后挥动：服务端先判定攻击（冷却满=重击），再处理 swing（重置冷却，开始积累下一击）
+            mc.player.swing(InteractionHand.MAIN_HAND);
         }
         pendingAttacks.clear();
         hitTimer = 0;
