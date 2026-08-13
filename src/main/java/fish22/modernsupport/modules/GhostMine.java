@@ -20,6 +20,7 @@
 package fish22.modernsupport.modules;
 
 import meteordevelopment.meteorclient.MeteorClient;
+import meteordevelopment.meteorclient.events.entity.player.DoAttackEvent;
 import meteordevelopment.meteorclient.events.entity.player.StartBreakingBlockEvent;
 import meteordevelopment.meteorclient.events.packets.PacketEvent;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
@@ -43,12 +44,15 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.network.protocol.game.ServerboundMovePlayerPacket;
 import net.minecraft.network.protocol.game.ServerboundPlayerActionPacket;
+import net.minecraft.network.protocol.game.ServerboundSwingPacket;
 import net.minecraft.tags.ItemTags;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
+
+import net.minecraft.world.phys.HitResult;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -80,6 +84,14 @@ public class GhostMine extends Module {
                 .description("设置挖掘方块的最大距离")
                 .sliderRange(1, 6)
                 .defaultValue(6)
+                .build()
+        );
+    public Setting<Boolean> ignoreRangeWhileMining = sgGeneral
+        .add(
+            new BoolSetting.Builder()
+                .name("挖掘中无视距离")
+                .description("距离只影响能否开始挖掘；开始挖掘之后无论走多远都继续挖")
+                .defaultValue(true)
                 .build()
         );
     public Setting<Double> speed = sgGeneral
@@ -138,11 +150,19 @@ public class GhostMine extends Module {
                 .defaultValue(false)
                 .build()
         );
-    public Setting<Boolean> swingHand = sgGeneral
+    public Setting<Boolean> swingStart = sgGeneral
         .add(
             new BoolSetting.Builder()
-                .name("挥手")
-                .description("挖掘时是否挥手")
+                .name("挖掘开始挥手")
+                .description("挖掘开始时挥手。勾选：挥手动画+swing 包发给服务器（其他玩家可见）；不勾选：只有本地挥手动画，不发包")
+                .defaultValue(true)
+                .build()
+        );
+    public Setting<Boolean> swingEnd = sgGeneral
+        .add(
+            new BoolSetting.Builder()
+                .name("挖掘结束挥手")
+                .description("挖掘结束时挥手。勾选：挥手动画+swing 包发给服务器（其他玩家可见）；不勾选：只有本地挥手动画，不发包")
                 .defaultValue(true)
                 .build()
         );
@@ -277,6 +297,10 @@ public class GhostMine extends Module {
     private boolean hasSwitch = false;
     private int switchTicks = 0;
     private long lastInstantTime = 0;
+    // 挖掘挥手包控制：allow=放行下一个 swing 包，block=拦截下一个 swing 包（由「挖掘开始/结束挥手」设置决定，
+    // 不依赖瞄准状态，避免挖掘开始/结束瞬间没瞄准方块时包漏拦/漏放）
+    private boolean allowSwingPacket = false;
+    private boolean blockSwingPacket = false;
 
     public static final List<Block> unbreakableBlocks = Arrays.asList(
         Blocks.COMMAND_BLOCK,
@@ -612,8 +636,11 @@ public class GhostMine extends Module {
 
     /**
      * 范围检查：超出距离时清除目标
+     * 开启「挖掘中无视距离」时距离只限制开始挖掘（onClickBlock），已开始的目标不受距离影响
      */
     public void rangeCheck() {
+        if (ignoreRangeWhileMining.get()) return;
+
         if (firstBlockDate != null && PlayerUtils.distanceTo(firstBlockDate.pos) > range.get().intValue()) {
             firstBlockDate = null;
         }
@@ -666,7 +693,10 @@ public class GhostMine extends Module {
      * - 主挖完成后发真实 STOP + 绕过技术
      */
     public void mineBlock(BlockPos pos, Direction direction) {
-        if (swingHand.get()) mc.player.swing(InteractionHand.MAIN_HAND);
+        // 开始挖掘挥手：勾选「挖掘开始挥手」时 swing 包强制放行（服务器可见），不勾选强制拦截（只有本地动画）
+        if (swingStart.get()) allowSwingPacket = true;
+        else blockSwingPacket = true;
+        mc.player.swing(InteractionHand.MAIN_HAND);
 
         // 1. 发送 START 包
         mc.getConnection().send(
@@ -724,13 +754,46 @@ public class GhostMine extends Module {
         mc.gameMode.startPrediction(mc.level, id ->
             new ServerboundPlayerActionPacket(ServerboundPlayerActionPacket.Action.STOP_DESTROY_BLOCK, pos, direction, id));
 
-        if (swingHand.get()) mc.player.swing(InteractionHand.MAIN_HAND);
+        // 挖掘结束挥手：勾选「挖掘结束挥手」时 swing 包强制放行（服务器可见），不勾选强制拦截（只有本地动画）
+        if (swingEnd.get()) allowSwingPacket = true;
+        else blockSwingPacket = true;
+        mc.player.swing(InteractionHand.MAIN_HAND);
     }
 
     // ==================== 事件处理 ====================
 
+    /**
+     * 拦截点击方块时的攻击：原版 startAttack 无论结果如何都会无条件挥手（swing），
+     * swing 包会重置服务端攻击冷却，干扰真实攻击。
+     * 瞄准方块时直接取消 startAttack，挖掘由按住左键的 continueDestroyBlock → startDestroyBlock 链路接管。
+     * 没瞄准方块（空气/实体）时放行，攻击不受影响。
+     */
+    @EventHandler
+    private void onDoAttack(DoAttackEvent event) {
+        if (mc.hitResult != null && mc.hitResult.getType() == HitResult.Type.BLOCK) {
+            event.cancel();
+        }
+    }
+
     @EventHandler
     public void onPacket(PacketEvent.Send event) {
+        if (event.packet instanceof ServerboundSwingPacket) {
+            // 挖掘开始/结束的挥手包按配置强制放行或拦截（勾选=放行，不勾选=拦截）
+            if (allowSwingPacket) {
+                allowSwingPacket = false;
+                return;
+            }
+            if (blockSwingPacket) {
+                blockSwingPacket = false;
+                event.cancel();
+                return;
+            }
+            // 其余 swing 包（攻击挥手、其他来源）正常放行：
+            // 单击方块时的攻击挥手已由 onDoAttack（拦截 startAttack）处理，这里不再按瞄准状态过滤，
+            // 避免误伤挖掘挥手包
+            return;
+        }
+
         if (event.packet instanceof ServerboundPlayerActionPacket playerActionPacket) {
             if (playerActionPacket.getAction() == ServerboundPlayerActionPacket.Action.START_DESTROY_BLOCK
                 && unbreakableBlocks.contains(mc.level.getBlockState(playerActionPacket.getPos()).getBlock())) {

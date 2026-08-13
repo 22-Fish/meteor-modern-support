@@ -186,6 +186,9 @@ public class ElytraFlySupport {
     /** 距下次自动烟花的剩余 tick 数（合法平飞，飞行/悬停共用） */
     private static int legalFwCooldown = 0;
 
+    /** 起飞烟花已排队标志：同一 tick 的飞行/悬停自动烟花检查到此标志直接跳过，避免一次起飞双放烟花 */
+    private static boolean takeoffFireworkPending = false;
+
     /** 音效屏蔽监听器（甲飞换装音效） */
     private static final SoundListener SOUND_LISTENER = new SoundListener();
 
@@ -201,6 +204,7 @@ public class ElytraFlySupport {
         holdElytraTicks = 0;
         lastFireworkMs = 0;
         legalFwCooldown = 0;
+        takeoffFireworkPending = false;
         jumpWasDown = false;
         takeoffRequested = false;
         takeoffRetryTicks = 0;
@@ -639,6 +643,8 @@ public class ElytraFlySupport {
 
     /** 飞行中自动烟花：间隔到且有烟花 → 延后到移动包发送后释放（烟花加速方向跟随服务器视角） */
     private static void tickFlightFirework() {
+        // 起飞烟花已排队：同一 tick 的自动烟花跳过，避免两个回调同 tick 都执行导致双放
+        if (takeoffFireworkPending) return;
         if (legalFwCooldown > 0) {
             legalFwCooldown--;
             return;
@@ -658,7 +664,11 @@ public class ElytraFlySupport {
         int level = selectFireworkLevel();
         if (level == -1) return;
         int interval = fwIntervalForLevel(level);
+        // 起飞烟花排队中：本 tick 的自动烟花（飞行/悬停分支）检查到此标志直接跳过，
+        // 防止两个回调同 tick 都执行（runAfterSend 队列化后都会执行）导致一次起飞双放
+        takeoffFireworkPending = true;
         MovementCorrection.runAfterSend(() -> {
+            takeoffFireworkPending = false;
             if (tryUseFireworkOfLevel(level)) {
                 legalFwCooldown = interval;
             }
@@ -667,6 +677,8 @@ public class ElytraFlySupport {
 
     /** 悬停中自动烟花：间隔到且有烟花 → 延后到移动包发送后释放 */
     private static void tickHoverFirework() {
+        // 起飞烟花已排队：同一 tick 的自动烟花跳过，避免双放
+        if (takeoffFireworkPending) return;
         if (legalFwCooldown > 0) {
             legalFwCooldown--;
             return;

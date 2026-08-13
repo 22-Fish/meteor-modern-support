@@ -17,6 +17,7 @@
     "MixinPlayerTravel",
     "MixinSetting",
     "MixinSettings",
+    "SettingGroupAccessor",
     "MixinModule",
     "MixinConfig",
     "MixinConfigScreen",
