@@ -127,6 +127,7 @@ public class ElytraFlySupport {
     public static Setting<Integer> fwIntervalLv2;
     public static Setting<Integer> fwIntervalLv3;
     public static Setting<Boolean> backpackFirework;
+    public static Setting<BackpackUse.Mode> backpackMode;
     public static Setting<Integer> fwPriorityLv1;
     public static Setting<Integer> fwPriorityLv2;
     public static Setting<Integer> fwPriorityLv3;
@@ -221,9 +222,6 @@ public class ElytraFlySupport {
 
     /** 每 tick 主逻辑（TickEvent.Pre，由 MixinElytraFly 拦截官方 onPreTick 后调用） */
     public static void onTick() {
-        // 背包交换使用后的换回确认（任何模式下都要检查，未换回则重试）
-        BackpackUse.tick();
-
         if (mc.player == null) return;
 
         if (isArmorMode()) {
@@ -774,7 +772,7 @@ public class ElytraFlySupport {
     private static boolean tryUseFireworkOfLevel(int level) {
         Predicate<ItemStack> pred = fireworkOfLevel(level);
         if (backpackFirework.get()) {
-            return BackpackUse.use(pred);
+            return BackpackUse.use(pred, backpackMode.get());
         }
 
         if (pred.test(mc.player.getOffhandItem())) {

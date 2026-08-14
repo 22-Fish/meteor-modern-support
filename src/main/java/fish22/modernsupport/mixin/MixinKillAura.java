@@ -1,7 +1,6 @@
 package fish22.modernsupport.mixin;
 
 import fish22.modernsupport.utils.MovementCorrection;
-import meteordevelopment.meteorclient.MeteorClient;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.renderer.Renderer3D;
 import meteordevelopment.meteorclient.settings.BoolSetting;
@@ -12,10 +11,12 @@ import meteordevelopment.meteorclient.settings.Setting;
 import meteordevelopment.meteorclient.settings.SettingGroup;
 import meteordevelopment.meteorclient.systems.modules.combat.KillAura;
 import meteordevelopment.meteorclient.utils.entity.Target;
+import meteordevelopment.meteorclient.utils.player.ChatUtils;
 import meteordevelopment.meteorclient.utils.player.PlayerUtils;
 import meteordevelopment.meteorclient.utils.player.Rotations;
 import meteordevelopment.meteorclient.utils.render.color.Color;
 import meteordevelopment.meteorclient.utils.render.color.SettingColor;
+import meteordevelopment.meteorclient.utils.world.TickRate;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.client.multiplayer.MultiPlayerGameMode;
 import net.minecraft.client.player.LocalPlayer;
@@ -61,17 +62,17 @@ public abstract class MixinKillAura {
     @Shadow
     private Setting<Double> range;
 
+    @Shadow
+    private Setting<Boolean> tpsSync;
+
+    @Shadow
+    private SettingGroup sgTiming;
+
     @Unique
     private Setting<MovementCorrection.Mode> movementCorrectionMode;
 
     @Unique
     private Setting<Integer> onHitHoldTicks;
-
-    @Unique
-    private Setting<Boolean> smoothLook;
-
-    @Unique
-    private Setting<Integer> smoothSpeed;
 
     @Unique
     private Setting<Boolean> aimAndRangeOptimization;
@@ -82,11 +83,13 @@ public abstract class MixinKillAura {
     @Unique
     private Setting<SettingColor> rangeColor;
 
+    /** TPS 为 0 时聊天栏警告开关（插在 TPS-sync 下面） */
     @Unique
-    private float smoothYaw;
+    private Setting<Boolean> chatWarn;
 
+    /** 上次检测 TPS 是否为 0（边沿触发警告，避免刷屏） */
     @Unique
-    private float smoothPitch;
+    private boolean lastTpsZero;
 
     /** 延迟到移动包发送后执行的目标（攻击包必须晚于旋转包发出，服务器视角到位后才能命中） */
     @Unique
@@ -120,24 +123,6 @@ public abstract class MixinKillAura {
             .build()
         );
 
-        smoothLook = sg.add(new BoolSetting.Builder()
-            .name("平滑转头")
-            .description("平滑旋转到目标角度")
-            .defaultValue(false)
-            .visible(() -> rotation.get() != KillAura.RotationMode.None)
-            .build()
-        );
-
-        smoothSpeed = sg.add(new IntSetting.Builder()
-            .name("转动速度")
-            .description("平滑转头开启时，每 tick 最多转动的角度（°/tick）")
-            .defaultValue(60)
-            .min(1)
-            .max(180)
-            .visible(() -> rotation.get() != KillAura.RotationMode.None && smoothLook.get())
-            .build()
-        );
-
         // 瞄准点与范围优化：插到默认分组的「旋转」(rotate) 下面，改的是瞄准角度与范围判定
         aimAndRangeOptimization = new BoolSetting.Builder()
             .name("瞄准点与范围优化")
@@ -161,15 +146,15 @@ public abstract class MixinKillAura {
             .visible(rangeRender::get)
             .build()
         );
-    }
 
-    // ====== 激活时初始化平滑视角状态 ======
-
-    @Inject(method = "onActivate", at = @At("TAIL"))
-    private void onActivate(CallbackInfo ci) {
-        // 平滑视角从玩家当前视角开始，避免从 0 开始逼近导致大跳变/绕远路
-        smoothYaw = MeteorClient.mc.player != null ? MeteorClient.mc.player.getYRot() : 0;
-        smoothPitch = MeteorClient.mc.player != null ? MeteorClient.mc.player.getXRot() : 0;
+        // TPS 为 0 时聊天栏警告：插到官方「TPS-sync」下面，仅 TPS 同步开启时显示
+        chatWarn = new BoolSetting.Builder()
+            .name("聊天栏输出")
+            .description("TPS为0时聊天栏警告")
+            .defaultValue(true)
+            .visible(tpsSync::get)
+            .build();
+        insertAfter(sgTiming, "TPS-sync", chatWarn);
     }
 
     // ====== Always 模式：在 onTick 中拦截 Rotations.rotate(DD) ======
@@ -184,8 +169,7 @@ public abstract class MixinKillAura {
     private void redirectRotateAlways(double yaw, double pitch) {
         MovementCorrection.Mode mode = movementCorrectionMode.get();
         if (mode == MovementCorrection.Mode.SEVERE || mode == MovementCorrection.Mode.QUIET) {
-            applySmooth(yaw, pitch);
-            MovementCorrection.rotate(smoothYaw, smoothPitch, mode);
+            MovementCorrection.rotate(yaw, pitch, mode);
         } else {
             // 关闭 / 停止移动（未实现）：回退原版静默旋转
             Rotations.rotate(yaw, pitch);
@@ -204,8 +188,7 @@ public abstract class MixinKillAura {
     private void redirectRotateOnHit(double yaw, double pitch) {
         MovementCorrection.Mode mode = movementCorrectionMode.get();
         if (mode == MovementCorrection.Mode.SEVERE || mode == MovementCorrection.Mode.QUIET) {
-            applySmooth(yaw, pitch);
-            MovementCorrection.rotate(smoothYaw, smoothPitch, mode);
+            MovementCorrection.rotate(yaw, pitch, mode);
             // 攻击后保持旋转 N tick 再转回原朝向
             MovementCorrection.setHoldTicks(onHitHoldTicks.get());
         } else {
@@ -343,6 +326,31 @@ public abstract class MixinKillAura {
         hitTimer = 0;
     }
 
+    // ====== TPS 为 0 时聊天栏警告 ======
+    // 服务器 TPS 检测为 0（卡服/采样异常）时，在聊天栏输出一次警告，方便排查「杀戮光环不工作」。
+    // 不改变 TPS 同步的原版行为：返回值原样透传，只在 TPS 从非 0 变 0 的边沿提示一次（避免刷屏）。
+
+    @Redirect(
+        method = "delayCheck",
+        at = @At(
+            value = "INVOKE",
+            target = "Lmeteordevelopment/meteorclient/utils/world/TickRate;getTickRate()F"
+        )
+    )
+    private float redirectGetTickRate(TickRate tickRate) {
+        float rate = tickRate.getTickRate();
+        if (chatWarn.get()) {
+            boolean zero = Float.isNaN(rate) || rate <= 0.0f;
+            if (zero && !lastTpsZero) {
+                ChatUtils.warning("【KillAura】: This server TPS == 0, module stopped working");
+            }
+            lastTpsZero = zero;
+        } else {
+            lastTpsZero = false;
+        }
+        return rate;
+    }
+
     // ====== 范围判定改为眼位距离（对齐服务器攻击判定 / 渲染球） ======
 
     @Inject(method = "entityCheck", at = @At("HEAD"))
@@ -369,29 +377,6 @@ public abstract class MixinKillAura {
             return distSq <= r * r;
         }
         return PlayerUtils.isWithin(x, y, z, r);
-    }
-
-    /** 按「平滑视角」设置处理旋转：开启时按速度渐进，关闭时直接设置目标角度（瞬间到位） */
-    @Unique
-    private void applySmooth(double yaw, double pitch) {
-        if (smoothLook.get()) {
-            smoothYaw = approachAngle(smoothYaw, (float) yaw, smoothSpeed.get());
-            smoothPitch = approachAngle(smoothPitch, (float) pitch, smoothSpeed.get());
-        } else {
-            // 平滑关闭：直接设置目标角度，瞬间到位
-            smoothYaw = (float) yaw;
-            smoothPitch = (float) pitch;
-        }
-    }
-
-    /** 角度平滑逼近（处理 ±180° 环绕），每 tick 最多变化 maxStep 度 */
-    @Unique
-    private static float approachAngle(float current, float target, float maxStep) {
-        float delta = Mth.wrapDegrees(target - current);
-        if (Math.abs(delta) <= maxStep) {
-            return target;
-        }
-        return current + Math.copySign(maxStep, delta);
     }
 
     // ====== 范围渲染：以玩家为中心渲染攻击范围球体（实心半透明，带深度遮挡） ======

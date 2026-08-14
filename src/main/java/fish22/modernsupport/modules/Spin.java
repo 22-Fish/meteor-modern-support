@@ -165,21 +165,6 @@ public class Spin extends Module {
         .defaultValue(MovementCorrection.Mode.OFF)
         .build()
     );
-    private final Setting<Boolean> smoothTurn = sgMovement.add(new BoolSetting.Builder()
-        .name("平滑转头")
-        .description("平滑旋转到目标角度。")
-        .defaultValue(false)
-        .build()
-    );
-    private final Setting<Integer> turnSpeed = sgMovement.add(new IntSetting.Builder()
-        .name("转动速度")
-        .description("平滑转头开启时，每 tick 最多转动的角度")
-        .defaultValue(60)
-        .min(1)
-        .max(180)
-        .visible(() -> smoothTurn.get())
-        .build()
-    );
     private final Setting<Boolean> safePitch = sgGeneral.add(new BoolSetting.Builder()
         .name("安全俯仰")
         .description("把俯仰限制在 -90° ~ 90° 之间，避免视角翻转。")
@@ -202,10 +187,6 @@ public class Spin extends Module {
     // 旋转模式状态
     private float spinYaw = 0;
 
-    // 平滑转头状态（参考 LiquidBounce AngleSmooth）
-    private float smoothYaw = 0;
-    private float smoothPitch = 0;
-
     public Spin() {
         super(Categories.Misc, "转圈", "不断改变服务器视角（客户端视角不动），看起来像在乱转头。");
     }
@@ -215,8 +196,6 @@ public class Spin extends Module {
         jitterTick = 0;
         jitterBackward = false;
         spinYaw = mc.player != null ? mc.player.getYRot() : 0;
-        smoothYaw = mc.player != null ? mc.player.getYRot() : 0;
-        smoothPitch = mc.player != null ? mc.player.getXRot() : 0;
     }
 
     @EventHandler
@@ -246,27 +225,8 @@ public class Spin extends Module {
             pitch = Mth.clamp(pitch, -90, 90);
         }
 
-        // 平滑转头（参考 LiquidBounce AngleSmooth）：开启时每 tick 朝目标最多转 turnSpeed 度，
-        // 服务器视角呈连续轨迹；关闭时瞬间转到目标角度（默认，最快）
-        if (smoothTurn.get()) {
-            smoothYaw = approachAngle(smoothYaw, yaw, turnSpeed.get());
-            smoothPitch = approachAngle(smoothPitch, pitch, turnSpeed.get());
-        } else {
-            smoothYaw = yaw;
-            smoothPitch = pitch;
-        }
-
         // 按模块的移动矫正设置旋转：严格/静默走移动矫正，其余回退原版静默旋转
-        MovementCorrection.rotateWithMode(smoothYaw, smoothPitch, movementCorrection.get());
-    }
-
-    /** 角度平滑逼近（处理 ±180° 环绕），每 tick 最多变化 maxStep 度 */
-    private float approachAngle(float current, float target, float maxStep) {
-        float delta = Mth.wrapDegrees(target - current);
-        if (Math.abs(delta) <= maxStep) {
-            return target;
-        }
-        return current + Math.copySign(maxStep, delta);
+        MovementCorrection.rotateWithMode(yaw, pitch, movementCorrection.get());
     }
 
     /** 抖动模式：朝前 N tick、朝后 N tick 交替 */

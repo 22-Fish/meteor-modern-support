@@ -1,5 +1,6 @@
 package fish22.modernsupport.mixin;
 
+import fish22.modernsupport.utils.BackpackUse;
 import fish22.modernsupport.utils.ElytraFlySupport;
 import meteordevelopment.meteorclient.events.entity.player.PlayerMoveEvent;
 import meteordevelopment.meteorclient.events.packets.PacketEvent;
@@ -70,6 +71,9 @@ public abstract class MixinElytraFly {
 
     @Unique
     private Setting<Boolean> backpackFirework;
+
+    @Unique
+    private Setting<BackpackUse.Mode> backpackMode;
 
     @Unique
     private Setting<Integer> fwPriorityLv1;
@@ -232,6 +236,14 @@ public abstract class MixinElytraFly {
             .build()
         );
 
+        backpackMode = sgLegal.add(new EnumSetting.Builder<BackpackUse.Mode>()
+            .name("背包使用模式")
+            .description("背包烟花的交换发包模式。1p：SWAP 2包;2p：PICKUP 4 包。除特殊原因，请使用2p更稳定")
+            .defaultValue(BackpackUse.Mode.PICKUP)
+            .visible(() -> isLegalMode() && autoFirework.get() && backpackFirework.get())
+            .build()
+        );
+
         fwPriorityLv1 = sgLegal.add(new IntSetting.Builder()
             .name("1级烟花优先级")
             .description("1 级烟花的优先级，优先级高的烟花优先使用")
@@ -383,6 +395,7 @@ public abstract class MixinElytraFly {
         ElytraFlySupport.autoFirework = autoFirework;
         ElytraFlySupport.autoSwapElytra = autoSwapElytra;
         ElytraFlySupport.backpackFirework = backpackFirework;
+        ElytraFlySupport.backpackMode = backpackMode;
         ElytraFlySupport.fwPriorityLv1 = fwPriorityLv1;
         ElytraFlySupport.fwPriorityLv2 = fwPriorityLv2;
         ElytraFlySupport.fwPriorityLv3 = fwPriorityLv3;

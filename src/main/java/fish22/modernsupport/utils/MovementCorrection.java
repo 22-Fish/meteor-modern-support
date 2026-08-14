@@ -177,6 +177,32 @@ public class MovementCorrection {
         holdTicks = Math.max(0, ticks);
     }
 
+    // ====== 方块放置矫正上下文 ======
+    //
+    // Meteor 的 BlockUtils.place 内部调用 Rotations.rotate 静默转向，
+    // SpawnProofer（防止生成）等放置类模块要用移动矫正时，需要把这次旋转换成移动矫正。
+    // 但放置的旋转发生在 BlockUtils.place 内部，模块拿不到旋转调用点，
+    // 因此 MixinSpawnProofer 在调用 BlockUtils.place 前设置此上下文，
+    // MixinBlockUtils 重定向 Rotations.rotate 时读取，其余模块不受影响（默认为关闭）。
+
+    /** 方块放置矫正模式上下文（默认关闭） */
+    private static Mode placeMode = Mode.OFF;
+
+    /** 进入方块放置流程前设置矫正模式（MixinSpawnProofer 调用） */
+    public static void beginPlace(Mode mode) {
+        placeMode = mode;
+    }
+
+    /** 结束方块放置流程，清除矫正模式（MixinSpawnProofer 调用） */
+    public static void endPlace() {
+        placeMode = Mode.OFF;
+    }
+
+    /** 当前方块放置矫正模式（MixinBlockUtils 读取，判断是否用移动矫正替代 Rotations） */
+    public static Mode getPlaceMode() {
+        return placeMode;
+    }
+
     /** 是否存在活跃的矫正（非 OFF 即活跃） */
     public static boolean isActive() {
         return active && currentMode != Mode.OFF;

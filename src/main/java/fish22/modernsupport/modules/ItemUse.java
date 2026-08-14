@@ -3,6 +3,8 @@ package fish22.modernsupport.modules;
 import fish22.modernsupport.settings.ItemUseListSetting;
 import fish22.modernsupport.utils.BackpackUse;
 import meteordevelopment.meteorclient.events.world.TickEvent;
+import meteordevelopment.meteorclient.settings.EnumSetting;
+import meteordevelopment.meteorclient.settings.Setting;
 import meteordevelopment.meteorclient.settings.SettingGroup;
 import meteordevelopment.meteorclient.systems.modules.Categories;
 import meteordevelopment.meteorclient.systems.modules.Module;
@@ -37,8 +39,16 @@ public class ItemUse extends Module {
         null
     ));
 
+    private final Setting<BackpackUse.Mode> mode = sgGeneral.add(new EnumSetting.Builder<BackpackUse.Mode>()
+        .name("背包使用模式")
+        .description("背包使用的发包模式。1p：SWAP 2包;2p：PICKUP 4 包")
+        .defaultValue(BackpackUse.Mode.PICKUP)
+        .visible(() -> itemList.get().stream().anyMatch(e -> e.backpackUse))
+        .build()
+    );
+
     public ItemUse() {
-        super(Categories.Misc, "一键使用物品", "配置物品与快捷键，按下快捷键一键使用对应物品（可勾选背包使用，自动从背包交换到手上）");
+        super(Categories.Misc, "一键使用物品", "配置物品与快捷键，按下快捷键一键使用对应物品（可勾选背包使用，使用背包中的物品）");
     }
 
     @EventHandler
@@ -47,9 +57,6 @@ public class ItemUse extends Module {
 
         // 打开容器/界面时不触发，避免误操作
         if (mc.player.containerMenu.containerId != 0) return;
-
-        // 背包交换使用后的换回确认（每 tick 检查，未换回则重试）
-        BackpackUse.tick();
 
         for (ItemUseListSetting.ItemUseEntry entry : itemList.get()) {
             if (entry.item == null || entry.item == Items.AIR) continue;
@@ -65,8 +72,8 @@ public class ItemUse extends Module {
 
     private void useItem(ItemUseListSetting.ItemUseEntry entry) {
         if (entry.backpackUse) {
-            // 背包使用：背包任意位置交换到手上使用（含换回确认重试）
-            BackpackUse.use(stack -> stack.is(entry.item));
+            // 背包使用：背包任意位置交换到手上使用
+            BackpackUse.use(stack -> stack.is(entry.item), mode.get());
         } else {
             useFromHotbar(entry.item);
         }

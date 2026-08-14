@@ -25,7 +25,9 @@
     "MixinModulesScreen",
     "MixinTextRenderer",
     "MixinVanillaTextRenderer",
-    "MixinWTopBar"
+    "MixinWTopBar",
+    "MixinSpawnProofer",
+    "MixinBlockUtils"
   ],
   "injectors": {
     "defaultRequire": 1
