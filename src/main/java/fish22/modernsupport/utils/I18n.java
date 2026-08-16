@@ -258,7 +258,6 @@ public class I18n {
         }
     }
 
-    /** 加载 mod 内置的翻译资源 (初始化兜底)。
     /**
      * 加载 mod 内置的翻译资源 (初始化兜底)。
      * 用 Fabric 官方 ModContainer API 枚举 jar 内资源, 不依赖 getResource(目录)

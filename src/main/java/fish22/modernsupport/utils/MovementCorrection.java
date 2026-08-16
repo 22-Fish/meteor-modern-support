@@ -110,9 +110,6 @@ public class MovementCorrection {
     /** 本 tick 是否调用过 rotate（烟花加速方向对齐用；TickEvent.Post 时重置） */
     private static boolean rotatedThisTick = false;
 
-    /** 诊断：状态日志计数 */
-    private static int debugTick = 0;
-
     /**
      * 注册一个在移动包发送完毕后执行的动作。
      * 多个调用方（如 KillAura 延迟攻击、鞘翅延迟烟花）可同时注册，互不覆盖，
@@ -269,11 +266,6 @@ public class MovementCorrection {
     private static void onPlayerTickMovement(PlayerTickMovementEvent event) {
         if (!active || mc.player == null) return;
 
-        if (++debugTick % 100 == 0) {
-            ModernSupport.LOG.info("[移动矫正] aiStep前 设置朝向 目标yaw={} 目标pitch={} 原yaw={}",
-                targetYaw, targetPitch, mc.player.getYRot());
-        }
-
         LocalPlayer player = mc.player;
         prevYaw = player.getYRot();
         prevPitch = player.getXRot();
@@ -328,10 +320,6 @@ public class MovementCorrection {
 
         if (!active || mc.player == null) return;
 
-        if (++debugTick % 100 == 0) {
-            ModernSupport.LOG.info("[移动矫正] 发包后 恢复朝向 原yaw={} holdTicks={}",
-                prevYaw, holdTicks);
-        }
         // 服务器视角继续保持在目标方向，等待归零后归位
         if (holdTicks > 0) {
             holdTicks--;

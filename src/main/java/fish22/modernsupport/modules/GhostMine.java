@@ -203,11 +203,11 @@ public class GhostMine extends Module {
     public Setting<Integer> maxBreaks = sgGeneral
         .add(
             new IntSetting.Builder()
-                .name("最大尝试次数")
-                .description("连续破坏失败达到此次数时放弃挖掘")
-                .defaultValue(6)
-                .min(1)
-                .sliderMax(20)
+                .name("放弃等待")
+                .description("方块挖掘完成后，等待服务器确认破坏的 tick 数（20 tick = 1 秒），超时仍未确认则放弃该方块")
+                .defaultValue(60)
+                .min(10)
+                .sliderRange(10, 300)
                 .build()
         );
 
@@ -302,6 +302,22 @@ public class GhostMine extends Module {
     private boolean allowSwingPacket = false;
     private boolean blockSwingPacket = false;
 
+    /** 双挖延迟 STOP 队列（tick 驱动，替代 java.util.Timer：避免每次挖掘新建线程） */
+    private static final List<DelayedStop> delayedStops = new ArrayList<>();
+
+    /** 延迟 STOP 条目：到期后向服务器发送 STOP_DESTROY_BLOCK */
+    private static class DelayedStop {
+        final BlockPos pos;
+        final Direction direction;
+        int ticksLeft;
+
+        DelayedStop(BlockPos pos, Direction direction, int ticksLeft) {
+            this.pos = pos;
+            this.direction = direction;
+            this.ticksLeft = ticksLeft;
+        }
+    }
+
     public static final List<Block> unbreakableBlocks = Arrays.asList(
         Blocks.COMMAND_BLOCK,
         Blocks.LAVA_CAULDRON,
@@ -348,6 +364,7 @@ public class GhostMine extends Module {
         tempBlockDate = null;
         rebreakTicks = 0;
         breakAttempts = 0;
+        delayedStops.clear();
 
         // 恢复工具栏
         if (hasSwitch) {
@@ -361,6 +378,7 @@ public class GhostMine extends Module {
     @EventHandler
     public void onTick(TickEvent.Pre event) {
         rangeCheck();
+        handleDelayedStops();
         rebreakTicks++;
 
         if (!doubleBreak.get()) {
@@ -573,7 +591,7 @@ public class GhostMine extends Module {
         if (block == null || !block.done) return;
 
         breakAttempts++;
-        if (breakAttempts >= maxBreaks.get() * 10) {
+        if (breakAttempts >= maxBreaks.get()) {
             firstBlockDate = null;
             secondBlockDate = null;
             rebreakBlockDate = null;
@@ -711,19 +729,23 @@ public class GhostMine extends Module {
 
         // 3. 双挖模式：对每个方块都发送延迟 STOP（对齐 PacketMine 的 sendStart）
         //    延迟 STOP 的作用：告诉服务器"我开始并停止了挖掘"，满足反作弊检查
-        //    实际的方块破坏由客户端进度追踪决定
+        //    实际的方块破坏由客户端进度追踪决定。
+        //    用 tick 队列实现（1 tick = 50ms，与原 java.util.Timer 延迟一致），避免每次挖掘新建 Timer 线程
         if (doubleBreak.get()) {
-            new java.util.Timer().schedule(new java.util.TimerTask() {
-                @Override
-                public void run() {
-                    mc.execute(() -> {
-                        if (!mc.player.isRemoved() && mc.level != null) {
-                            mc.getConnection().send(
-                                new ServerboundPlayerActionPacket(ServerboundPlayerActionPacket.Action.STOP_DESTROY_BLOCK, pos, direction));
-                        }
-                    });
-                }
-            }, 50);
+            delayedStops.add(new DelayedStop(pos, direction, 1));
+        }
+    }
+
+    /** 处理双挖延迟 STOP 队列（主线程 tick 驱动，替代 java.util.Timer） */
+    private static void handleDelayedStops() {
+        for (int i = delayedStops.size() - 1; i >= 0; i--) {
+            DelayedStop stop = delayedStops.get(i);
+            if (--stop.ticksLeft > 0) continue;
+            if (MeteorClient.mc.player != null && !MeteorClient.mc.player.isRemoved() && MeteorClient.mc.level != null) {
+                MeteorClient.mc.getConnection().send(
+                    new ServerboundPlayerActionPacket(ServerboundPlayerActionPacket.Action.STOP_DESTROY_BLOCK, stop.pos, stop.direction));
+            }
+            delayedStops.remove(i);
         }
     }
 

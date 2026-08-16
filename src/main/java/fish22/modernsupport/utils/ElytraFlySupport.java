@@ -1,27 +1,24 @@
 package fish22.modernsupport.utils;
 
 import fish22.modernsupport.modules.Freeze;
-import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap;
 import meteordevelopment.meteorclient.MeteorClient;
 import meteordevelopment.meteorclient.events.packets.PacketEvent;
 import meteordevelopment.meteorclient.events.world.PlaySoundEvent;
 import meteordevelopment.meteorclient.settings.Setting;
 import meteordevelopment.meteorclient.systems.modules.movement.elytrafly.ElytraFlightModes;
+import meteordevelopment.meteorclient.utils.misc.Keybind;
 import meteordevelopment.meteorclient.utils.player.FindItemResult;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
 import meteordevelopment.meteorclient.utils.player.PlayerUtils;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.core.component.DataComponents;
-import net.minecraft.network.HashedStack;
-import net.minecraft.network.protocol.game.ClientboundPlayerPositionPacket;
-import net.minecraft.network.protocol.game.ServerboundContainerClickPacket;
 import net.minecraft.network.protocol.game.ServerboundContainerClosePacket;
 import net.minecraft.network.protocol.game.ServerboundMovePlayerPacket;
 import net.minecraft.network.protocol.game.ServerboundPlayerCommandPacket;
+import net.minecraft.network.protocol.game.ServerboundUseItemPacket;
 import net.minecraft.util.Mth;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.EquipmentSlot;
-import net.minecraft.world.inventory.ContainerInput;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.item.component.Fireworks;
@@ -77,10 +74,18 @@ public class ElytraFlySupport {
         return isArmorMode() || isLegalMode();
     }
 
+    /** 当前是否处于甲飞状态（甲飞模块，或合法平飞开启了甲飞模式） */
+    public static boolean isArmorFlyActive() {
+        return isArmorMode()
+            || (isLegalMode() && legalArmorMode != null && legalArmorMode.get() != LegalArmorMode.Off);
+    }
+
     /** 甲飞方式 */
     public enum ArmorMode {
         Normal("普通"),
-        Grim("Grim");
+        Lazy("懒换"),
+        TickLegacy("来回闪换"),
+        Tick("每tick闪换");
 
         private final String displayName;
 
@@ -111,17 +116,32 @@ public class ElytraFlySupport {
         }
     }
 
+    /** 合法平飞的甲飞模式（关闭/普通/懒换/来回闪换/每tick闪换） */
+    public enum LegalArmorMode {
+        Off("关闭"),
+        Normal("普通"),
+        Lazy("懒换"),
+        TickLegacy("来回闪换"),
+        Tick("每tick闪换");
+
+        private final String displayName;
+
+        LegalArmorMode(String displayName) {
+            this.displayName = displayName;
+        }
+
+        @Override
+        public String toString() {
+            return displayName;
+        }
+    }
+
     // ====== 设置引用（MixinElytraFly 创建设置后注入） ======
 
     /** 官方模式设置（甲飞/合法平飞为 MixinElytraFlightModes 追加的枚举值，用 name 判断） */
     public static Setting<ElytraFlightModes> flightMode;
     public static Setting<ArmorMode> armorMode;
     public static Setting<Boolean> muteSounds;
-    public static Setting<Boolean> moveToHotbar;
-    public static Setting<Boolean> firework;
-    public static Setting<Integer> fireworkDelay;
-    public static Setting<Integer> grimDelay;
-    public static Setting<Integer> correctionBackoff;
     public static Setting<Boolean> autoFirework;
     public static Setting<Integer> fwIntervalLv1;
     public static Setting<Integer> fwIntervalLv2;
@@ -141,6 +161,15 @@ public class ElytraFlySupport {
     public static Setting<Boolean> discardMomentum;
     public static Setting<Boolean> freezeFirework;
 
+    /** 合法平飞甲飞模式（关闭/普通/懒换/来回闪换/每tick闪换） */
+    public static Setting<LegalArmorMode> legalArmorMode;
+    /** 合法平飞甲飞的静音开关 */
+    public static Setting<Boolean> legalMuteSounds;
+    /** 一键烟花快捷键 */
+    public static Setting<Keybind> oneKeyFirework;
+    /** 一键烟花是否允许使用背包中的烟花 */
+    public static Setting<Boolean> oneKeyBackpackFirework;
+
     // ====== 常量 ======
 
     /** 胸甲槽容器坐标（玩家容器） */
@@ -148,12 +177,6 @@ public class ElytraFlySupport {
 
     /** 热栏第 9 格（挪背包鞘翅时的目标格，热栏索引 8） */
     private static final int MOVE_TO_HOTBAR = 8;
-
-    /** fastRecover 触发的最低下落速度（向下超过此值才认为滑翔掉了） */
-    private static final double RECOVER_MIN_DOWN_VEL = 0.03;
-
-    /** 放烟花后鞘翅保持的 tick 数（覆盖烟花寿命 ~1.5 秒，让烟花每 tick 持续加速） */
-    private static final int FIREWORK_HOLD_TICKS = 25;
 
     // ====== 状态 ======
 
@@ -172,23 +195,26 @@ public class ElytraFlySupport {
     /** 上一 tick 是否滑翔（检测滑翔状态转变，起飞成功瞬间放烟花） */
     private static boolean prevFlying = false;
 
-    /** 距下次换装起飞链的剩余 tick 数（Grim） */
-    private static int packetDelayCount = 0;
+    /** 来回闪换（TICK_LEGACY）当前胸甲槽是否鞘翅：true=鞘翅在上待换回，false=胸甲在上待换鞘翅 */
+    private static boolean legacyElytraOn = false;
 
-    /** 回弹退避剩余 tick 数（Grim，期间不执行换装链） */
-    private static int suppressTicks = 0;
+    /** 来回闪换记住的热栏鞘翅槽位（换鞘翅后鞘翅跑到胸甲槽，换回必须用此槽位而非重新查找） */
+    private static int legacyElytraSlot = -1;
 
-    /** 放烟花后鞘翅保持剩余 tick 数（Grim，期间不换装） */
-    private static int holdElytraTicks = 0;
+    /** 被拦截待重发的烟花使用包（手动右键烟花时拦截，延迟到换鞘翅+起飞后重发） */
+    private static ServerboundUseItemPacket pendingFireworkPacket = null;
 
-    /** 上次使用烟花的时间戳（Grim，毫秒） */
-    private static long lastFireworkMs = 0;
+    /** 正在重发烟花使用包（重发会再次触发 onPacketSend，置此标志避免重复拦截） */
+    private static boolean flushingFirework = false;
 
     /** 距下次自动烟花的剩余 tick 数（合法平飞，飞行/悬停共用） */
     private static int legalFwCooldown = 0;
 
     /** 起飞烟花已排队标志：同一 tick 的飞行/悬停自动烟花检查到此标志直接跳过，避免一次起飞双放烟花 */
     private static boolean takeoffFireworkPending = false;
+
+    /** 一键烟花待释放：甲飞开启且按下快捷键时不在滑翔，延后到下次滑翔再释放 */
+    private static boolean oneKeyPending = false;
 
     /** 音效屏蔽监听器（甲飞换装音效） */
     private static final SoundListener SOUND_LISTENER = new SoundListener();
@@ -200,12 +226,12 @@ public class ElytraFlySupport {
 
     public static void onActivate() {
         wasFlying = false;
-        packetDelayCount = 0;
-        suppressTicks = 0;
-        holdElytraTicks = 0;
-        lastFireworkMs = 0;
+        legacyElytraOn = false;
+        legacyElytraSlot = -1;
+        pendingFireworkPacket = null;
         legalFwCooldown = 0;
         takeoffFireworkPending = false;
+        oneKeyPending = false;
         jumpWasDown = false;
         takeoffRequested = false;
         takeoffRetryTicks = 0;
@@ -229,10 +255,24 @@ public class ElytraFlySupport {
         } else if (isLegalMode()) {
             legalTick();
         }
+
+        // 一键烟花：甲飞开启时按下快捷键不在滑翔，延后到下次滑翔再释放
+        checkOneKeyPending();
     }
 
     /** 发包监听（由 MixinElytraFly 拦截官方 onPacketSend 后调用） */
     public static void onPacketSend(PacketEvent.Send event) {
+        // 甲飞：拦截手动烟花使用包，延迟到换鞘翅+起飞后重发。
+        // 手动右键烟花时客户端已因本地强制滑翔（isFallFlying=true）发出使用包，
+        // 但此时服务器可能已停飞（穿胸甲），直接发出去服务器不发射；卡到滑翔窗口再发。
+        if (isArmorFlyActive() && event.packet instanceof ServerboundUseItemPacket useItem) {
+            if (!flushingFirework && isFireworkInHand(useItem.getHand())) {
+                pendingFireworkPacket = useItem;
+                event.cancel();
+            }
+            return;
+        }
+
         // 合法平飞悬停冻结时拦截位置移动包（旋转包照发，可正常转头）
         if (!isLegalMode() || hoverMode.get() != HoverMode.Freeze) return;
         if (!Freeze.isFrozen()) return;
@@ -243,11 +283,7 @@ public class ElytraFlySupport {
 
     /** 收包监听（由 MixinElytraFly 拦截官方 onPacketReceive 后调用） */
     public static void onPacketReceive(PacketEvent.Receive event) {
-        // 服务器位置纠正（回弹）后暂停换装，避免继续震荡（仅甲飞 Grim）
-        if (!isArmorMode() || armorMode.get() != ArmorMode.Grim) return;
-        if (event.packet instanceof ClientboundPlayerPositionPacket) {
-            suppressTicks = correctionBackoff.get();
-        }
+        // 甲飞不再有 Grim 回弹退避逻辑，收包无需处理
     }
 
     // ====== 甲飞逻辑 ======
@@ -258,166 +294,123 @@ public class ElytraFlySupport {
 
         // 落地/进水：恢复正常状态（胸甲槽若还是鞘翅则换回胸甲）
         if (mc.player.onGround() || mc.player.isInWater()) {
-            if (isElytraInChest()) {
-                FindItemResult elytra = InvUtils.findInHotbar(Items.ELYTRA);
-                if (elytra.found()) {
-                    sendSwapPacket(elytra.slot());
-                }
-            }
+            swapBackChestplate();
             wasFlying = false;
-            packetDelayCount = 0;
-            suppressTicks = 0;
-            holdElytraTicks = 0;
+            legacyElytraOn = false;
+            legacyElytraSlot = -1;
             return;
         }
 
-        // Grim 模式走独立逻辑
-        if (armorMode.get() == ArmorMode.Grim) {
-            grimTick();
-            return;
+        armorFlySwap(armorMode.get());
+    }
+
+    /** 按甲飞方式分派换装逻辑（甲飞模块与合法平飞甲飞共用） */
+    private static void armorFlySwap(ArmorMode mode) {
+        switch (mode) {
+            case Lazy -> lazyTick();
+            case TickLegacy -> tickLegacyTick();
+            case Tick -> tickTick();
+            default -> normalTick();
         }
+    }
 
-        // ====== 普通模式 ======
+    // ====== 普通模式 ======
 
-        // 服务器当前滑翔状态：onTick 时本地 flag 是网络同步后的值，反映服务器状态
-        boolean serverFlying = mc.player.isFallFlying();
-
-        // 初始起飞需要按跳跃键（避免走路、下台阶误起飞）；
-        // 已在飞行中（wasFlying）则无论按键状态都自动重启/维持
-        if (!serverFlying && !wasFlying && !mc.options.keyJump.isDown()) {
-            return;
-        }
-
-        // 本地强制滑翔：客户端始终按滑翔物理计算（服务器同步的取消会被下一 tick 覆盖）
+    /** 普通：每 tick 闪换 + 本地强制滑翔（适合原版服务器） */
+    private static void normalTick() {
+        // 空中（onGround=false，armorTick 已判）自动强制滑翔 + 换装，无需按跳跃
         if (!mc.player.isFallFlying()) {
             mc.player.startFallFlying();
         }
         wasFlying = true;
 
-        // 确保鞘翅在热栏（必要时从背包挪）
-        FindItemResult elytra = ensureElytraInHotbar();
+        FindItemResult elytra = findElytra();
         if (elytra == null) return;
 
-        // 每 tick 闪换：鞘翅上位 → 起飞包 → 换回胸甲。
-        // 服务器处理顺序保证移动包处理时处于滑翔状态（详见类注释），
-        // 起飞失败（如服务器还认为在地面）下一 tick 自动重试。
-        sendSwapPacket(elytra.slot());
+        // 每 tick 闪换：鞘翅上位 → 起飞包 → 换回胸甲（PICKUP 移动交换，鞘翅可在背包）
+        swapElytra(elytra.slot());
         sendStartFlying();
-        sendSwapPacket(elytra.slot());
+        flushPendingFirework();
+        swapElytra(elytra.slot());
     }
 
-    // ====== Grim 模式 ======
+    // ====== 懒换（LAZY）======
 
-    private static void grimTick() {
-        if (suppressTicks > 0) suppressTicks--;
-
-        // 放烟花后的鞘翅保持期：保持服务器滑翔状态，让烟花实体每 tick 持续加速；
-        // 若期间发生回弹（服务器位置纠正）则立即中断保持，避免加速-回弹死循环
-        if (suppressTicks > 0 && holdElytraTicks > 0) {
-            holdElytraTicks = 0;
-            FindItemResult elytra = InvUtils.findInHotbar(Items.ELYTRA);
-            if (elytra.found()) {
-                sendSwapPacket(elytra.slot());
-            }
-        }
-        if (holdElytraTicks > 0) {
-            holdElytraTicks--;
-            if (holdElytraTicks == 0) {
-                // 保持结束：换回胸甲
-                FindItemResult elytra = InvUtils.findInHotbar(Items.ELYTRA);
-                if (elytra.found()) {
-                    sendSwapPacket(elytra.slot());
-                }
-            }
+    /** 懒换：滑翔中不动，只在服务器判定停飞时才做一次「换鞘翅 → 起飞 → 换回」 */
+    private static void lazyTick() {
+        // 已在滑翔：什么都不做（懒）
+        if (mc.player.isFallFlying()) {
+            wasFlying = true;
             return;
         }
 
-        // 服务器真实滑翔状态（网络同步后的值）
-        boolean realFlying = mc.player.isFallFlying();
-
-        // 初始起飞需要按跳跃键；已在飞行中（wasFlying）自动维持/恢复
-        if (!realFlying && !wasFlying && !mc.options.keyJump.isDown()) {
-            return;
-        }
+        // 空中停飞：自动换装（无需按跳跃）
         wasFlying = true;
 
-        // fastRecover：滑翔状态掉了且在下落 → 立即执行换装起飞链（不等延迟）
-        if (!realFlying && mc.player.getDeltaMovement().y < -RECOVER_MIN_DOWN_VEL) {
-            grimChain();
-            return;
-        }
-
-        // 按设置间隔执行换装起飞链，减少服务器状态震荡
-        packetDelayCount++;
-        if (packetDelayCount <= grimDelay.get()) return;
-        packetDelayCount = 0;
-
-        if (suppressTicks <= 0) {
-            grimChain();
-        }
-    }
-
-    /** 换装起飞链：换鞘翅 → 起飞包 + 本地滑翔 →（烟花）→ 换回胸甲 */
-    private static void grimChain() {
-        FindItemResult elytra = ensureElytraInHotbar();
+        FindItemResult elytra = findElytra();
         if (elytra == null) return;
 
-        sendSwapPacket(elytra.slot());
+        swapElytra(elytra.slot());
         sendStartFlying();
-        if (!mc.player.isFallFlying()) {
-            mc.player.startFallFlying();
+        flushPendingFirework();
+        swapElytra(elytra.slot());
+    }
+
+    // ====== 来回闪换（TICK_LEGACY）======
+
+    /** 来回闪换：每 tick 交替换鞘翅/换回胸甲，配合起飞包维持服务器滑翔状态 */
+    private static void tickLegacyTick() {
+        wasFlying = true;
+
+        // 首次找鞘翅并记住槽位；PICKUP 互换两次回到原位，后续都用这个固定槽位，
+        // 不能每 tick 重新查找——换鞘翅后鞘翅已跑到胸甲槽，背包里找不到鞘翅会导致换回失败
+        if (legacyElytraSlot == -1) {
+            FindItemResult elytra = findElytra();
+            if (elytra == null) return;
+            legacyElytraSlot = elytra.slot();
         }
 
-        // 烟花使用包在起飞包之后发出（服务器处理顺序保证 useItem 时处于滑翔）。
-        // 原版烟花加速是持续的（附着期间每 tick 检查滑翔并加速），烟花寿命约 1.5 秒，
-        // 因此放烟花后鞘翅保持 FIREWORK_HOLD_TICKS tick（覆盖烟花寿命），
-        // 期间服务器持续滑翔、烟花每 tick 加速；保持结束换回胸甲。
-        // 没放烟花（冷却中/没烟花）则立即换回胸甲。
-        if (firework.get() && canUseFirework()) {
-            useFirework();
-            lastFireworkMs = System.currentTimeMillis();
-            holdElytraTicks = FIREWORK_HOLD_TICKS;
+        if (!legacyElytraOn) {
+            // 胸甲在上：换鞘翅并起飞
+            swapElytra(legacyElytraSlot);
+            sendStartFlying();
+            flushPendingFirework();
+            legacyElytraOn = true;
         } else {
-            sendSwapPacket(elytra.slot());
+            // 鞘翅在上：换回胸甲
+            swapElytra(legacyElytraSlot);
+            legacyElytraOn = false;
         }
     }
 
-    /** 能否使用烟花：不在使用物品且冷却结束 */
-    private static boolean canUseFirework() {
-        return !mc.player.isUsingItem()
-            && System.currentTimeMillis() - lastFireworkMs >= fireworkDelay.get();
-    }
+    // ====== 每 tick 闪换（TICK）======
 
-    /** 使用烟花（Grim）：主手/副手优先，其次热栏静默切换，背包烟花自动挪到主手（用后不换回） */
-    private static void useFirework() {
-        if (mc.player.getMainHandItem().is(Items.FIREWORK_ROCKET)) {
-            mc.gameMode.useItem(mc.player, InteractionHand.MAIN_HAND);
-            return;
-        }
-        if (mc.player.getOffhandItem().is(Items.FIREWORK_ROCKET)) {
-            mc.gameMode.useItem(mc.player, InteractionHand.OFF_HAND);
-            return;
-        }
+    /** 每 tick 闪换：换鞘翅 → 起飞 → 换回 */
+    private static void tickTick() {
+        wasFlying = true;
 
-        FindItemResult firework = InvUtils.findInHotbar(Items.FIREWORK_ROCKET);
-        if (firework.found()) {
-            InvUtils.swap(firework.slot(), true);
-            mc.gameMode.useItem(mc.player, InteractionHand.MAIN_HAND);
-            InvUtils.swapBack();
-            return;
-        }
+        FindItemResult elytra = findElytra();
+        if (elytra == null) return;
 
-        // 热栏没有：从背包挪到主手槽（与原物品互换）再使用
-        FindItemResult inv = InvUtils.find(Items.FIREWORK_ROCKET);
-        if (!inv.found()) return;
-        int invSlot = inv.slot() < 9 ? inv.slot() + 36 : inv.slot();
-        sendSwapPacket(invSlot, mc.player.getInventory().getSelectedSlot());
-        mc.gameMode.useItem(mc.player, InteractionHand.MAIN_HAND);
+        swapElytra(elytra.slot());
+        sendStartFlying();
+        flushPendingFirework();
+        swapElytra(elytra.slot());
     }
 
     // ====== 合法平飞逻辑（参考 Epsilon ElytraFly Control 模式） ======
 
     private static void legalTick() {
+        // 合法平飞开启了甲飞模式：走甲飞换装 + 方向控制
+        if (legalArmorMode != null && legalArmorMode.get() != LegalArmorMode.Off) {
+            legalArmorTick();
+            return;
+        }
+        legalNormalTick();
+    }
+
+    /** 合法平飞（真鞘翅） */
+    private static void legalNormalTick() {
         // 打开容器/界面时不动手
         if (mc.player.containerMenu.containerId != 0) return;
 
@@ -517,6 +510,51 @@ public class ElytraFlySupport {
             return;
         }
 
+        legalFlightControl(forward, back, left, right);
+    }
+
+    /** 合法平飞 + 甲飞：用甲飞换装维持滑翔，叠加合法平飞方向控制 */
+    private static void legalArmorTick() {
+        if (mc.player.containerMenu.containerId != 0) return;
+
+        if (mc.player.isDeadOrDying()) {
+            Freeze.setExternalFrozen(false);
+            return;
+        }
+
+        boolean forward = mc.options.keyUp.isDown();
+        boolean back = mc.options.keyDown.isDown();
+        boolean left = mc.options.keyLeft.isDown();
+        boolean right = mc.options.keyRight.isDown();
+
+        // 滑翔状态转变（起飞成功瞬间）放一次烟花
+        boolean flying = mc.player.isFallFlying();
+        if (flying && !prevFlying && autoFirework.get()) {
+            tryFireworkOnce();
+        }
+        prevFlying = flying;
+
+        // 落地/进水：解除冻结并换回胸甲
+        if (mc.player.onGround() || mc.player.isInWater()) {
+            Freeze.setExternalFrozen(false);
+            if (mc.player.isFallFlying()) return;
+            swapBackChestplate();
+            legacyElytraOn = false;
+            legacyElytraSlot = -1;
+            return;
+        }
+
+        // 甲飞换装维持滑翔（按甲飞模式）
+        armorFlySwap(toArmorMode(legalArmorMode.get()));
+
+        // 滑翔中应用方向控制
+        if (mc.player.isFallFlying()) {
+            legalFlightControl(forward, back, left, right);
+        }
+    }
+
+    /** 合法平飞飞行/悬停方向控制（真鞘翅与甲飞模式共用） */
+    private static void legalFlightControl(boolean forward, boolean back, boolean left, boolean right) {
         boolean jump = mc.options.keyJump.isDown();
         boolean sneak = mc.options.keyShift.isDown();
 
@@ -709,17 +747,22 @@ public class ElytraFlySupport {
         };
     }
 
+    /** 自动烟花用：按「背包烟花」设置决定是否查背包 */
+    private static int selectFireworkLevel() {
+        return selectFireworkLevel(backpackFirework.get());
+    }
+
     /**
      * 按优先级选择要使用的烟花等级；没有可用烟花返回 -1。
-     * 同时存在多个等级时用优先级高的；多个等级同优先级时遵循原逻辑
-     * （快捷栏第一个烟花的等级）。
+     * searchBackpack 决定是否把背包中的烟花也纳入考虑。
+     * 同时存在多个等级时用优先级高的；多个等级同优先级时遵循原逻辑（快捷栏第一个烟花的等级）。
      */
-    private static int selectFireworkLevel() {
+    private static int selectFireworkLevel(boolean searchBackpack) {
         int bestPriority = -1;
         int bestLevel = -1;
         int tieCount = 0;
         for (int level = 1; level <= 3; level++) {
-            if (!hasFireworkOfLevel(level)) continue;
+            if (!hasFireworkOfLevel(level, searchBackpack)) continue;
             int priority = priorityOf(level);
             if (priority > bestPriority) {
                 bestPriority = priority;
@@ -730,8 +773,13 @@ public class ElytraFlySupport {
             }
         }
         if (bestLevel == -1) return -1;
-        // 多个等级同优先级 → 原逻辑（快捷栏第一个烟花的等级）
-        return tieCount > 1 ? getHotbarFireworkLevel() : bestLevel;
+        // 多个等级同优先级 → 原逻辑（快捷栏第一个烟花的等级）；
+        // 快捷栏没有可用烟花时回退优先级最高的等级（否则背包 2/3 级烟花永远选不中）
+        if (tieCount > 1) {
+            int hotbarLevel = getHotbarFireworkLevel();
+            if (hasFireworkOfLevel(hotbarLevel, searchBackpack)) return hotbarLevel;
+        }
+        return bestLevel;
     }
 
     /** 指定等级的烟花优先级 */
@@ -743,10 +791,10 @@ public class ElytraFlySupport {
         };
     }
 
-    /** 是否存在指定等级的烟花（背包烟花开启时查全背包，否则只查快捷栏） */
-    private static boolean hasFireworkOfLevel(int level) {
+    /** 是否存在指定等级的烟花（searchBackpack 为 true 查全背包，否则只查快捷栏） */
+    private static boolean hasFireworkOfLevel(int level, boolean searchBackpack) {
         Predicate<ItemStack> pred = fireworkOfLevel(level);
-        if (backpackFirework.get()) {
+        if (searchBackpack) {
             return pred.test(mc.player.getOffhandItem())
                 || pred.test(mc.player.getMainHandItem())
                 || InvUtils.find(pred).found();
@@ -766,15 +814,18 @@ public class ElytraFlySupport {
     }
 
     /**
-     * 按指定等级释放烟花：背包烟花开启走背包交换使用（含换回确认重试），
-     * 否则快捷栏静默使用（副手优先，其次热栏静默切换释放后换回）。返回是否成功。
+     * 按指定等级释放烟花：背包烟花开启走背包交换使用，否则快捷栏静默使用。返回是否成功。
      */
     private static boolean tryUseFireworkOfLevel(int level) {
         Predicate<ItemStack> pred = fireworkOfLevel(level);
         if (backpackFirework.get()) {
             return BackpackUse.use(pred, backpackMode.get());
         }
+        return useFireworkFromHotbar(pred);
+    }
 
+    /** 快捷栏静默使用烟花（副手优先，其次热栏静默切换释放后换回） */
+    private static boolean useFireworkFromHotbar(Predicate<ItemStack> pred) {
         if (pred.test(mc.player.getOffhandItem())) {
             mc.gameMode.useItem(mc.player, InteractionHand.OFF_HAND);
             mc.player.swing(InteractionHand.OFF_HAND);
@@ -792,6 +843,38 @@ public class ElytraFlySupport {
         mc.player.swing(InteractionHand.MAIN_HAND);
         InvUtils.swapBack();
         return true;
+    }
+
+    // ====== 一键烟花 ======
+
+    /** 一键烟花快捷键触发：甲飞开启且不在滑翔时延后到下次滑翔，否则立即释放 */
+    public static void fireworkOnce() {
+        if (mc.player == null) return;
+        if (isArmorFlyActive() && !mc.player.isFallFlying()) {
+            oneKeyPending = true;
+            return;
+        }
+        releaseFireworkOnce();
+    }
+
+    /** 每 tick 末尾检查：甲飞开启时按下快捷键不在滑翔，滑翔后立即补放 */
+    private static void checkOneKeyPending() {
+        if (oneKeyPending && mc.player.isFallFlying()) {
+            oneKeyPending = false;
+            releaseFireworkOnce();
+        }
+    }
+
+    /** 释放一次烟花（一键烟花专用，可选背包，按一键烟花的背包开关） */
+    private static void releaseFireworkOnce() {
+        int level = selectFireworkLevel(oneKeyBackpackFirework.get());
+        if (level == -1) return;
+        Predicate<ItemStack> pred = fireworkOfLevel(level);
+        if (oneKeyBackpackFirework.get()) {
+            BackpackUse.use(pred, backpackMode.get());
+        } else {
+            useFireworkFromHotbar(pred);
+        }
     }
 
     /** 读取快捷栏第一个烟花的等级（飞行时间 1/2/3，默认 1）；没有烟花返回 1 */
@@ -846,7 +929,12 @@ public class ElytraFlySupport {
     private static class SoundListener {
         @EventHandler
         private void onPlaySound(PlaySoundEvent event) {
-            if (!isArmorMode() || !muteSounds.get()) return;
+            // 甲飞模块看「静音」，合法平飞甲飞看自己的「静音」开关
+            boolean mute;
+            if (isArmorMode()) mute = muteSounds.get();
+            else if (isLegalMode()) mute = legalMuteSounds != null && legalMuteSounds.get();
+            else return;
+            if (!mute) return;
 
             // 屏蔽盔甲装备音效与鞘翅飞行音效
             String path = event.sound.getIdentifier().getPath();
@@ -858,18 +946,27 @@ public class ElytraFlySupport {
 
     // ====== 甲飞辅助（换装） ======
 
-    /** 确保鞘翅在热栏；返回热栏鞘翅位置，找不到返回 null */
-    private static FindItemResult ensureElytraInHotbar() {
-        FindItemResult elytra = InvUtils.findInHotbar(Items.ELYTRA);
-        if (elytra.found()) return elytra;
+    /** 找鞘翅（热栏/背包任意位置）；找不到返回 null */
+    private static FindItemResult findElytra() {
+        FindItemResult elytra = InvUtils.find(Items.ELYTRA);
+        return elytra.found() ? elytra : null;
+    }
 
-        if (!moveToHotbar.get()) return null;
-        FindItemResult inv = InvUtils.find(Items.ELYTRA);
-        if (!inv.found()) return null;
-        // 玩家库存索引转容器坐标：热栏 0-8 → 36-44，主背包 9-35 不变
-        int invSlot = inv.slot() < 9 ? inv.slot() + 36 : inv.slot();
-        sendSwapPacket(invSlot, MOVE_TO_HOTBAR);
-        return new FindItemResult(MOVE_TO_HOTBAR, 1);
+    /** PICKUP（2p 模式）换甲：把指定槽位物品与胸甲槽互换（Meteor ChestSwap 同款，
+     *  本地同步执行点击 + close 包，鞘翅在背包也能直接换） */
+    private static void swapElytra(int slot) {
+        InvUtils.move().from(slot).toArmor(2);
+        mc.getConnection().send(new ServerboundContainerClosePacket(0));
+    }
+
+    /** 合法平飞甲飞模式 → 甲飞方式（Off 兜底普通） */
+    private static ArmorMode toArmorMode(LegalArmorMode mode) {
+        return switch (mode) {
+            case Lazy -> ArmorMode.Lazy;
+            case TickLegacy -> ArmorMode.TickLegacy;
+            case Tick -> ArmorMode.Tick;
+            default -> ArmorMode.Normal;
+        };
     }
 
     /** 胸甲槽当前是否穿着鞘翅（读本地玩家容器） */
@@ -877,28 +974,27 @@ public class ElytraFlySupport {
         return mc.player.containerMenu.getSlot(CHEST_SLOT).getItem().is(Items.ELYTRA);
     }
 
-    /** SWAP 单包：热栏槽 hotbarSlot 与胸甲槽互换 */
-    private static void sendSwapPacket(int hotbarSlot) {
-        sendSwapPacket(CHEST_SLOT, hotbarSlot);
-    }
-
-    /** SWAP 点击包（直接构造发送，本地不执行容器点击，避免与服务器广播互相覆盖）：
-     *  目标槽 slotIndex 与热栏槽 buttonNum 互换，服务器自己执行交换。
-     *  changedSlots / carriedItem 传空，服务器按自己状态执行后广播同步。 */
-    private static void sendSwapPacket(int slotIndex, int hotbarSlot) {
-        mc.getConnection().send(new ServerboundContainerClickPacket(
-            mc.player.containerMenu.containerId,
-            mc.player.containerMenu.getStateId(),
-            (short) slotIndex,
-            (byte) hotbarSlot,
-            ContainerInput.SWAP,
-            new Int2ObjectOpenHashMap<>(),
-            HashedStack.EMPTY
-        ));
-    }
-
     /** 直接发起飞包（不经过 tryToStartFallFlying，本地不检查 canGlide） */
     private static void sendStartFlying() {
         mc.getConnection().send(new ServerboundPlayerCommandPacket(mc.player, ServerboundPlayerCommandPacket.Action.START_FALL_FLYING));
+    }
+
+    /** 指定手是否手持烟花 */
+    private static boolean isFireworkInHand(InteractionHand hand) {
+        return mc.player.getItemInHand(hand).is(Items.FIREWORK_ROCKET);
+    }
+
+    /** 重发被拦截的烟花使用包（在换鞘翅 + 起飞后调用，卡服务器滑翔窗口） */
+    private static void flushPendingFirework() {
+        if (pendingFireworkPacket != null) {
+            // 重发的包会再次触发 onPacketSend，置标志避免再次被拦截造成死循环
+            flushingFirework = true;
+            try {
+                mc.getConnection().send(pendingFireworkPacket);
+            } finally {
+                flushingFirework = false;
+            }
+            pendingFireworkPacket = null;
+        }
     }
 }

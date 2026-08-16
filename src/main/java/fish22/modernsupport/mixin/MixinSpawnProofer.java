@@ -28,7 +28,6 @@ import meteordevelopment.meteorclient.settings.SettingGroup;
 import meteordevelopment.meteorclient.systems.modules.world.SpawnProofer;
 import meteordevelopment.meteorclient.utils.player.FindItemResult;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
-import meteordevelopment.meteorclient.utils.player.PlayerUtils;
 import meteordevelopment.meteorclient.utils.player.Rotations;
 import meteordevelopment.meteorclient.utils.world.BlockUtils;
 import net.minecraft.core.BlockPos;
@@ -39,13 +38,13 @@ import net.minecraft.world.level.block.Block;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.Vec3;
 import org.spongepowered.asm.mixin.Mixin;
-import org.spongepowered.asm.mixin.Overwrite;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.Redirect;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 import java.util.List;
 import java.util.function.Predicate;
@@ -231,36 +230,34 @@ public abstract class MixinSpawnProofer {
 
     // ====== 瞄准点与范围优化 ======
 
-    @Overwrite
-    private boolean isOutOfRange(BlockPos blockPos) {
-        if (aimOptimization.get()) {
-            // 瞄准点 = 支撑方块表面中心，范围按眼睛距离算
-            BlockHitResult hit = calcPlaceHitResult(blockPos);
-            Vec3 aimPos = hit.getLocation();
-            BlockPos supportBlock = hit.getBlockPos();
+    /**
+     * 瞄准点与范围优化开启时短路返回自定义判定，关闭时回退官方原版逻辑。
+     * 用 @Inject 而非 @Overwrite：官方方法体始终保留，避免与其他 mod 混入同一方法时
+     * 发生 Overwrite 冲突崩溃，Meteor 升级改逻辑时也不会被静默覆盖。
+     */
+    @Inject(method = "isOutOfRange", at = @At("HEAD"), cancellable = true)
+    private void onIsOutOfRange(BlockPos blockPos, CallbackInfoReturnable<Boolean> cir) {
+        if (!aimOptimization.get()) return; // 未开启：不取消，走官方原版逻辑
 
-            double eyeDistSq = mc.player.getEyePosition().distanceToSqr(aimPos);
-            if (eyeDistSq > placeRange.get() * placeRange.get()) return true;
+        // 瞄准点 = 支撑方块表面中心，范围按眼睛距离算
+        BlockHitResult hit = calcPlaceHitResult(blockPos);
+        Vec3 aimPos = hit.getLocation();
+        BlockPos supportBlock = hit.getBlockPos();
 
-            ClipContext raycast = new ClipContext(mc.player.getEyePosition(), aimPos, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, mc.player);
-            BlockHitResult result = mc.level.clip(raycast);
-            // 射线命中支撑方块 = 支撑面直接可见，否则按墙后范围
-            if (result == null || !result.getBlockPos().equals(supportBlock)) {
-                return eyeDistSq > wallsRange.get() * wallsRange.get();
-            }
-            return false;
+        double eyeDistSq = mc.player.getEyePosition().distanceToSqr(aimPos);
+        if (eyeDistSq > placeRange.get() * placeRange.get()) {
+            cir.setReturnValue(true);
+            return;
         }
 
-        // 原版逻辑
-        Vec3 pos = blockPos.getCenter();
-        if (!PlayerUtils.isWithin(pos, placeRange.get())) return true;
-
-        ClipContext raycastContext = new ClipContext(mc.player.getEyePosition(), pos, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, mc.player);
-        BlockHitResult result = mc.level.clip(raycastContext);
-        if (result == null || !result.getBlockPos().equals(blockPos))
-            return !PlayerUtils.isWithin(pos, wallsRange.get());
-
-        return false;
+        ClipContext raycast = new ClipContext(mc.player.getEyePosition(), aimPos, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, mc.player);
+        BlockHitResult result = mc.level.clip(raycast);
+        // 射线命中支撑方块 = 支撑面直接可见，否则按墙后范围
+        if (result == null || !result.getBlockPos().equals(supportBlock)) {
+            cir.setReturnValue(eyeDistSq > wallsRange.get() * wallsRange.get());
+            return;
+        }
+        cir.setReturnValue(false);
     }
 
     /** 计算放置目标的 BlockHitResult（复用 BlockUtils.place 的 hitPos/side/neighbour 逻辑） */

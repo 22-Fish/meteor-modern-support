@@ -1,5 +1,6 @@
 package fish22.modernsupport.mixin;
 
+import fish22.modernsupport.ModernSupport;
 import fish22.modernsupport.utils.BackpackUse;
 import fish22.modernsupport.utils.ElytraFlySupport;
 import meteordevelopment.meteorclient.events.entity.player.PlayerMoveEvent;
@@ -9,10 +10,12 @@ import meteordevelopment.meteorclient.settings.BoolSetting;
 import meteordevelopment.meteorclient.settings.EnumSetting;
 import meteordevelopment.meteorclient.settings.IVisible;
 import meteordevelopment.meteorclient.settings.IntSetting;
+import meteordevelopment.meteorclient.settings.KeybindSetting;
 import meteordevelopment.meteorclient.settings.Setting;
 import meteordevelopment.meteorclient.settings.SettingGroup;
 import meteordevelopment.meteorclient.systems.modules.movement.elytrafly.ElytraFly;
 import meteordevelopment.meteorclient.systems.modules.movement.elytrafly.ElytraFlightModes;
+import meteordevelopment.meteorclient.utils.misc.Keybind;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.Unique;
@@ -47,21 +50,6 @@ public abstract class MixinElytraFly {
 
     @Unique
     private Setting<Boolean> muteSounds;
-
-    @Unique
-    private Setting<Boolean> moveToHotbar;
-
-    @Unique
-    private Setting<Boolean> firework;
-
-    @Unique
-    private Setting<Integer> fireworkDelay;
-
-    @Unique
-    private Setting<Integer> grimDelay;
-
-    @Unique
-    private Setting<Integer> correctionBackoff;
 
     @Unique
     private Setting<Boolean> autoFirework;
@@ -117,6 +105,18 @@ public abstract class MixinElytraFly {
     @Unique
     private Setting<Integer> hoverFwIntervalLv3;
 
+    @Unique
+    private Setting<ElytraFlySupport.LegalArmorMode> legalArmorMode;
+
+    @Unique
+    private Setting<Boolean> legalMuteSounds;
+
+    @Unique
+    private Setting<Keybind> oneKeyFirework;
+
+    @Unique
+    private Setting<Boolean> oneKeyBackpackFirework;
+
     // ====== 模式判断（追加的枚举值在编译期不可见，用 name 判断） ======
 
     @Unique
@@ -146,7 +146,7 @@ public abstract class MixinElytraFly {
 
         armorMode = sgArmor.add(new EnumSetting.Builder<ElytraFlySupport.ArmorMode>()
             .name("甲飞方式")
-            .description("普通：每 tick 闪换 + 本地强制滑翔，适合原版服务器")
+            .description("普通：每 tick 闪换 + 本地强制滑翔（原版服务器）｜懒换：停飞才闪换｜来回闪换：交替换装｜每tick闪换：纯发包")
             .defaultValue(ElytraFlySupport.ArmorMode.Normal)
             .visible(this::isArmorMode)
             .build()
@@ -157,55 +157,6 @@ public abstract class MixinElytraFly {
             .description("屏蔽换装音效")
             .defaultValue(true)
             .visible(this::isArmorMode)
-            .build()
-        );
-
-        moveToHotbar = sgArmor.add(new BoolSetting.Builder()
-            .name("背包鞘翅自动挪热栏")
-            .description("鞘翅不在热栏时，自动把背包里的鞘翅挪到热栏第 9 格（与原物品互换）。")
-            .defaultValue(true)
-            .visible(this::isArmorMode)
-            .build()
-        );
-
-        // ====== Grim 设置 ======
-        SettingGroup sgGrim = self.settings.createGroup("Grim");
-
-        firework = sgGrim.add(new BoolSetting.Builder()
-            .name("烟花")
-            .description("Grim 模式：每次换装起飞后立即使用烟花加速")
-            .defaultValue(true)
-            .visible(() -> isArmorMode() && armorMode.get() == ElytraFlySupport.ArmorMode.Grim)
-            .build()
-        );
-
-        fireworkDelay = sgGrim.add(new IntSetting.Builder()
-            .name("烟花间隔")
-            .description("Grim 模式：两次烟花之间的最小间隔（毫秒）。")
-            .defaultValue(1000)
-            .min(0)
-            .max(20000)
-            .visible(() -> isArmorMode() && armorMode.get() == ElytraFlySupport.ArmorMode.Grim && firework.get())
-            .build()
-        );
-
-        grimDelay = sgGrim.add(new IntSetting.Builder()
-            .name("换装间隔")
-            .description("Grim 模式：每隔多少 tick 执行一次换装起飞链（0 = 每 tick）。减少服务器状态震荡，回弹时调大。")
-            .defaultValue(0)
-            .min(0)
-            .max(20)
-            .visible(() -> isArmorMode() && armorMode.get() == ElytraFlySupport.ArmorMode.Grim)
-            .build()
-        );
-
-        correctionBackoff = sgGrim.add(new IntSetting.Builder()
-            .name("回弹退避")
-            .description("Grim 模式：收到服务器位置纠正（回弹）后暂停换装多少 tick，避免继续震荡。")
-            .defaultValue(6)
-            .min(0)
-            .max(40)
-            .visible(() -> isArmorMode() && armorMode.get() == ElytraFlySupport.ArmorMode.Grim)
             .build()
         );
 
@@ -307,6 +258,22 @@ public abstract class MixinElytraFly {
             .build()
         );
 
+        legalArmorMode = sgLegal.add(new EnumSetting.Builder<ElytraFlySupport.LegalArmorMode>()
+            .name("甲飞模式")
+            .description("关闭：穿真鞘翅飞行。其余：用甲飞换装（假鞘翅）维持滑翔，可穿胸甲飞行。")
+            .defaultValue(ElytraFlySupport.LegalArmorMode.Off)
+            .visible(this::isLegalMode)
+            .build()
+        );
+
+        legalMuteSounds = sgLegal.add(new BoolSetting.Builder()
+            .name("静音")
+            .description("屏蔽甲飞换装音效")
+            .defaultValue(true)
+            .visible(() -> isLegalMode() && legalArmorMode.get() != ElytraFlySupport.LegalArmorMode.Off)
+            .build()
+        );
+
         // ====== 合法平飞：悬停配置 ======
         SettingGroup sgHover = self.settings.createGroup("悬停");
 
@@ -383,15 +350,28 @@ public abstract class MixinElytraFly {
             .build()
         );
 
+        // ====== 一键烟花（所有模式通用） ======
+        SettingGroup sgFirework = self.settings.createGroup("一键烟花");
+
+        oneKeyFirework = sgFirework.add(new KeybindSetting.Builder()
+            .name("一键烟花")
+            .description("按下快捷键释放一次烟花；甲飞开启且不在滑翔时延后到下次滑翔。")
+            .defaultValue(Keybind.none())
+            .action(ElytraFlySupport::fireworkOnce)
+            .build()
+        );
+
+        oneKeyBackpackFirework = sgFirework.add(new BoolSetting.Builder()
+            .name("背包烟花")
+            .description("一键烟花允许使用背包中的烟花")
+            .defaultValue(false)
+            .build()
+        );
+
         // 注入设置引用到支持类
         ElytraFlySupport.flightMode = flightMode;
         ElytraFlySupport.armorMode = armorMode;
         ElytraFlySupport.muteSounds = muteSounds;
-        ElytraFlySupport.moveToHotbar = moveToHotbar;
-        ElytraFlySupport.firework = firework;
-        ElytraFlySupport.fireworkDelay = fireworkDelay;
-        ElytraFlySupport.grimDelay = grimDelay;
-        ElytraFlySupport.correctionBackoff = correctionBackoff;
         ElytraFlySupport.autoFirework = autoFirework;
         ElytraFlySupport.autoSwapElytra = autoSwapElytra;
         ElytraFlySupport.backpackFirework = backpackFirework;
@@ -410,6 +390,10 @@ public abstract class MixinElytraFly {
         ElytraFlySupport.hoverFwIntervalLv1 = hoverFwIntervalLv1;
         ElytraFlySupport.hoverFwIntervalLv2 = hoverFwIntervalLv2;
         ElytraFlySupport.hoverFwIntervalLv3 = hoverFwIntervalLv3;
+        ElytraFlySupport.legalArmorMode = legalArmorMode;
+        ElytraFlySupport.legalMuteSounds = legalMuteSounds;
+        ElytraFlySupport.oneKeyFirework = oneKeyFirework;
+        ElytraFlySupport.oneKeyBackpackFirework = oneKeyBackpackFirework;
     }
 
     /**
@@ -433,7 +417,8 @@ public abstract class MixinElytraFly {
                 }
             }
         } catch (Exception e) {
-            // 隐藏失败不影响主功能
+            // 隐藏失败不影响主功能，但设置界面会显示官方设置，记录日志便于排查
+            ModernSupport.LOG.warn("隐藏 ElytraFly 官方设置失败", e);
         }
     }
 

@@ -19,7 +19,6 @@
 
 package fish22.modernsupport.gui;
 
-import fish22.modernsupport.ModernSupport;
 import fish22.modernsupport.utils.ModulePages;
 import meteordevelopment.meteorclient.gui.GuiTheme;
 import meteordevelopment.meteorclient.gui.GuiThemes;
@@ -56,7 +55,6 @@ public class PageConfigSection extends WVerticalList {
      * 由 MixinConfigScreen / MixinSettings 在创建设置列表时调用。
      */
     public static void addToSettings(WContainer settingsContainer, GuiTheme theme) {
-        ModernSupport.LOG.info("[模块分页] 向设置列表追加页面配置分组");
         WSection section = settingsContainer.add(theme.section("页面配置", true)).expandX().widget();
         section.add(new PageConfigSection()).expandX();
     }

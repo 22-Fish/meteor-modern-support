@@ -24,6 +24,12 @@ public class AutoSave {
     /** 是否处于配置加载中（加载期间禁止保存，避免覆盖磁盘配置） */
     private static volatile boolean loading = false;
 
+    /** 配置加载开始时间戳（超时保护：Modules.load 抛异常时 RETURN 注入不执行，防止 loading 永久为 true） */
+    private static volatile long loadingSince = 0;
+
+    /** 配置加载超时时间（毫秒）：超过视为加载结束，恢复自动保存 */
+    private static final long LOAD_TIMEOUT_MS = 5000;
+
     /** 是否有待保存的修改 */
     private static volatile boolean dirty = false;
 
@@ -36,12 +42,25 @@ public class AutoSave {
     /** 设置配置加载状态（Meteor 加载模块配置期间禁止保存） */
     public static void setLoading(boolean value) {
         loading = value;
+        loadingSince = value ? System.currentTimeMillis() : 0;
+    }
+
+    /** 是否处于配置加载中（含超时保护：加载标志异常残留时自动失效） */
+    private static boolean isLoading() {
+        if (!loading) return false;
+        // 加载超过时限仍没结束 → 视为加载异常中断（如配置损坏抛异常），自动复位，恢复自动保存
+        if (System.currentTimeMillis() - loadingSince > LOAD_TIMEOUT_MS) {
+            loading = false;
+            loadingSince = 0;
+            return false;
+        }
+        return true;
     }
 
     /** 配置发生变化，安排异步保存（可被高频调用，自动合并） */
     public static void onChanged() {
         // 配置加载期间不保存：此时保存会把加载中的默认值覆盖到磁盘，导致配置丢失
-        if (loading) return;
+        if (isLoading()) return;
 
         dirty = true;
         if (scheduled) return;

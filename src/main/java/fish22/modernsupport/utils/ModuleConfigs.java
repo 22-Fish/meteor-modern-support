@@ -55,14 +55,12 @@ public class ModuleConfigs {
             if (!names.isEmpty()) {
                 meta.putString("selected", names.get(0));
                 saveMeta();
-                ModernSupport.LOG.info("[配置分块] 未勾选配置，自动勾选第一个: {}", names.get(0));
             }
         }
 
         // 启动加载：从 config 文件夹里勾选的配置读取，而不是 modules.nbt（旧配置）
         if (selected() != null) {
             applyFrom(selected());
-            ModernSupport.LOG.info("[配置分块] 启动加载配置: {}", selected());
         }
     }
 
@@ -97,7 +95,6 @@ public class ModuleConfigs {
         applyFrom(name);
         meta.putString("selected", name);
         saveMeta();
-        ModernSupport.LOG.info("[配置分块] 已勾选/应用配置: {}", name);
     }
 
     /** 兼容旧调用：勾选即应用 */
@@ -216,17 +213,15 @@ public class ModuleConfigs {
 
     // ====== 服务器自动应用 ======
 
-    /** 进入世界/服务器后：匹配各配置的服务器列表，命中则自动切换（主机名包含输入 url 即匹配） */
+    /** 进入世界/服务器后：匹配各配置的服务器列表，命中则自动切换（服务器地址包含配置的 url 即匹配） */
     public static void onGameJoin() {
         if (MeteorClient.mc.getCurrentServer() == null) return;
         String host = MeteorClient.mc.getCurrentServer().ip;
-        ModernSupport.LOG.info("[配置分块] 进入服务器: {}", host);
         for (String name : list()) {
             if (!autoApplyEnabled(name)) continue;
             for (String url : servers(name)) {
                 if (url.isEmpty()) continue;
-                ModernSupport.LOG.info("[配置分块] 配置 {} 的服务器列表项: {} 匹配 {}", name, url, host.contains(url) || url.contains(host));
-                if (host.contains(url) || url.contains(host)) {
+                if (host.contains(url)) {
                     if (!name.equals(selected())) {
                         select(name);
                     }
@@ -234,7 +229,6 @@ public class ModuleConfigs {
                 }
             }
         }
-        ModernSupport.LOG.info("[配置分块] 没有配置匹配当前服务器");
     }
 
     // ====== 内部：meta 读写 ======

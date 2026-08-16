@@ -16,6 +16,7 @@ import net.minecraft.nbt.ListTag;
 import net.minecraft.nbt.Tag;
 import net.minecraft.resources.Identifier;
 import net.minecraft.world.item.Item;
+import net.minecraft.world.item.Items;
 import org.lwjgl.glfw.GLFW;
 
 import java.util.ArrayList;
@@ -97,7 +98,14 @@ public class ItemUseListSetting extends Setting<List<ItemUseListSetting.ItemUseE
         value.clear();
         for (Tag element : tag.getListOrEmpty("value")) {
             CompoundTag entryTag = (CompoundTag) element;
-            Item item = BuiltInRegistries.ITEM.getValue(Identifier.parse(entryTag.getStringOr("item", "")));
+            Item item;
+            try {
+                item = BuiltInRegistries.ITEM.getValue(Identifier.parse(entryTag.getStringOr("item", "")));
+            } catch (Exception e) {
+                // 配置损坏/物品 ID 非法：该条目重置为默认值（空气），
+                // 不丢条目也不影响其余配置加载（界面里可重新选择物品）
+                item = Items.AIR;
+            }
             ItemUseEntry entry = new ItemUseEntry(item, entryTag.getBooleanOr("backpackUse", false), Keybind.none());
             entry.keybind.fromTag(entryTag.getCompoundOrEmpty("keybind"));
             value.add(entry);
