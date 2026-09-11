@@ -66,7 +66,7 @@ import static meteordevelopment.meteorclient.MeteorClient.mc;
  * <p>核心机制：
  * 1. 进度模拟：使用 BlockUtils.getBreakDelta 真实模拟原版挖掘时间
  * 2. 发包顺序：START → 等待进度 → STOP（不再发送多余的 STOP/ABORT）
- * 3. 双挖：副挖只发 START，完成时客户端清除不发 STOP
+ * 3. 双挖：主挖用「START + 立即 STOP」让服务端延迟破坏，副挖在进度完成时补真实 STOP
  * 4. 绕过技术：高空包、滞空挖掘微调、sequenced packet（startPrediction）
  * 5. 工具切换：在进度达到阈值时自动切换最佳工具
  * 6. 失败计数：连续失败达到阈值自动放弃
@@ -302,22 +302,6 @@ public class GhostMine extends Module {
     private boolean allowSwingPacket = false;
     private boolean blockSwingPacket = false;
 
-    /** 双挖延迟 STOP 队列（tick 驱动，替代 java.util.Timer：避免每次挖掘新建线程） */
-    private static final List<DelayedStop> delayedStops = new ArrayList<>();
-
-    /** 延迟 STOP 条目：到期后向服务器发送 STOP_DESTROY_BLOCK */
-    private static class DelayedStop {
-        final BlockPos pos;
-        final Direction direction;
-        int ticksLeft;
-
-        DelayedStop(BlockPos pos, Direction direction, int ticksLeft) {
-            this.pos = pos;
-            this.direction = direction;
-            this.ticksLeft = ticksLeft;
-        }
-    }
-
     public static final List<Block> unbreakableBlocks = Arrays.asList(
         Blocks.COMMAND_BLOCK,
         Blocks.LAVA_CAULDRON,
@@ -364,7 +348,6 @@ public class GhostMine extends Module {
         tempBlockDate = null;
         rebreakTicks = 0;
         breakAttempts = 0;
-        delayedStops.clear();
 
         // 恢复工具栏
         if (hasSwitch) {
@@ -378,7 +361,6 @@ public class GhostMine extends Module {
     @EventHandler
     public void onTick(TickEvent.Pre event) {
         rangeCheck();
-        handleDelayedStops();
         rebreakTicks++;
 
         if (!doubleBreak.get()) {
@@ -555,16 +537,38 @@ public class GhostMine extends Module {
             }
         }
 
-        // 5. 副挖完成 → 客户端清除（延迟 STOP 已在 mineBlock 中发送，不需要再发 STOP）
-        if (secondBlockDate != null && secondBlockDate.done) {
+        // 5. 副挖完成 → 补真实 STOP 触发服务端破坏
+        //    服务端挖掘槽位只有一个，最后发过 START 的副挖才是当前 destroyPos（主挖的 STOP 会被忽略），
+        //    副挖不补这个 STOP 服务端就永远不会破坏它 —— 这正是「双挖只能挖掉一个方块」的原因
+        if (secondBlockDate != null && !secondBlockDate.isBreaked && secondBlockDate.isMining && secondBlockDate.done) {
+            // 工具切换：服务端收到 STOP 时用「当前手持工具」重算进度，先切到最佳工具保证进度达标(≥0.7)
+            if (swapModeSetting.get() == SwapMode.SILENT) {
+                int secondSlot = getBestTool(mc.level.getBlockState(secondBlockDate.pos));
+                if (secondSlot != -1) InvUtils.swap(secondSlot, true);
+            } else if (!hasSwitch) {
+                int secondSlot = getBestTool(mc.level.getBlockState(secondBlockDate.pos));
+                if (secondSlot != -1 && secondSlot != mc.player.getInventory().getSelectedSlot()) {
+                    InvUtils.swap(secondSlot, true);
+                    hasSwitch = true;
+                    switchTicks = 0;
+                }
+            }
+
+            sendStop(secondBlockDate.pos, secondBlockDate.direction);
+
             // 记录重挖信息
             if (secondBlockDate.rebreak) {
                 rebreakBlockDate = new BlockDate(secondBlockDate.pos, secondBlockDate.direction);
             }
 
-            // 客户端直接清除，不发 STOP 给服务器
-            // （mineBlock 中的延迟 STOP 已经告诉服务器"停止挖掘该方块"）
             secondBlockDate = null;
+            breakAttempts = 0;
+
+            if (swapModeSetting.get() == SwapMode.SILENT) {
+                InvUtils.swapBack();
+                hasSwitch = false;
+                switchTicks = 0;
+            }
         }
 
         // 6. 失败计数
@@ -700,15 +704,14 @@ public class GhostMine extends Module {
     // ==================== 发包方法 ====================
 
     /**
-     * 开始挖掘
-     * 单挖：只发 START，等进度完成后发真实 STOP
-     * 双挖：发 START + 延迟 STOP（对齐 PacketMine 的 sendStart 机制）
+     * 开始挖掘（发 START；双挖模式下紧接着补一个 STOP）
      * <p>
-     * 双挖原理：
-     * - 每个方块都会收到 START + 延迟 STOP
-     * - 延迟 STOP 告诉服务器"我停止了对该方块的挖掘"，满足反作弊的包序列检查
-     * - 客户端独立追踪进度，副挖完成后只做客户端清除（不发真实 STOP）
-     * - 主挖完成后发真实 STOP + 绕过技术
+     * 双挖原理（对应 26.1 原版服务端 ServerPlayerGameMode.handleBlockBreakAction）：
+     * - 服务端只有「一个」挖掘槽位：收到 START 就记录 destroyPos，并中止上一个方块
+     * - 收到 STOP 时用当前手持工具重算进度 = 单tick进度 * (gameTicks - destroyProgressStart + 1)：
+     * - 进度 ≥ 0.7 → 立即破坏；进度 < 0.7 → 交给服务端 hasDelayedDestroy 自己走完
+     * - 延迟破坏槽位同样只有一个，先占者得：所以 START 之后必须立刻补 STOP，
+     * - 先挖的方块占住延迟破坏槽位（服务端自己会破坏它），后挖的方块留在挖掘槽位上等待真实 STOP
      */
     public void mineBlock(BlockPos pos, Direction direction) {
         // 开始挖掘挥手：勾选「挖掘开始挥手」时 swing 包强制放行（服务器可见），不勾选强制拦截（只有本地动画）
@@ -727,25 +730,14 @@ public class GhostMine extends Module {
                 new ServerboundPlayerActionPacket(ServerboundPlayerActionPacket.Action.START_DESTROY_BLOCK, bypassPos, Direction.DOWN, id));
         }
 
-        // 3. 双挖模式：对每个方块都发送延迟 STOP（对齐 PacketMine 的 sendStart）
-        //    延迟 STOP 的作用：告诉服务器"我开始并停止了挖掘"，满足反作弊检查
-        //    实际的方块破坏由客户端进度追踪决定。
-        //    用 tick 队列实现（1 tick = 50ms，与原 java.util.Timer 延迟一致），避免每次挖掘新建 Timer 线程
+        // 3. 双挖模式：紧接着补一个 STOP，让服务端接管这个方块
+        //    - 进度 < 0.7 时：服务端记录 hasDelayedDestroy，之后按原版进度自己把方块破坏掉
+        //    - 进度 ≥ 0.7 时（软方块）：服务端直接破坏
+        //    必须在 START 的同一 tick 发出：延迟破坏槽位只有一个，晚发会被另一个方块的 STOP 抢占，
+        //    结果就是其中一个方块永远挖不掉（双挖只能挖掉一个方块的根因）
         if (doubleBreak.get()) {
-            delayedStops.add(new DelayedStop(pos, direction, 1));
-        }
-    }
-
-    /** 处理双挖延迟 STOP 队列（主线程 tick 驱动，替代 java.util.Timer） */
-    private static void handleDelayedStops() {
-        for (int i = delayedStops.size() - 1; i >= 0; i--) {
-            DelayedStop stop = delayedStops.get(i);
-            if (--stop.ticksLeft > 0) continue;
-            if (MeteorClient.mc.player != null && !MeteorClient.mc.player.isRemoved() && MeteorClient.mc.level != null) {
-                MeteorClient.mc.getConnection().send(
-                    new ServerboundPlayerActionPacket(ServerboundPlayerActionPacket.Action.STOP_DESTROY_BLOCK, stop.pos, stop.direction));
-            }
-            delayedStops.remove(i);
+            mc.gameMode.startPrediction(mc.level, id ->
+                new ServerboundPlayerActionPacket(ServerboundPlayerActionPacket.Action.STOP_DESTROY_BLOCK, pos, direction, id));
         }
     }
 
