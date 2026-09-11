@@ -67,8 +67,10 @@ import static meteordevelopment.meteorclient.MeteorClient.mc;
  * 1. 进度模拟：用 BlockUtils.getBreakDelta 按原版挖掘速度累加进度（含工具/附魔/药水/空中惩罚）
  * 2. 触发破坏：进度达到「切换工具阈值」时切到最佳工具并发 STOP 包；服务端收到 STOP 会用
  *    当前手持工具重算进度，进度 ≥ 0.7 立即破坏，&lt; 0.7 则交给服务端的延迟破坏补完
- * 3. 双挖：服务端的「挖掘槽位」和「延迟破坏槽位」各只有一个，所以主挖在 START 后补一个 STOP
- *    占住延迟破坏槽位（服务端自己会把它挖掉），副挖占住挖掘槽位并靠阈值 STOP 破坏
+ * 3. 双挖：服务端的「挖掘槽位」和「延迟破坏槽位」各只有一个。
+ *    后点的方块占着挖掘槽位 → 进度到阈值时切工具 + STOP，服务端立即破坏；
+ *    先点的方块占着延迟破坏槽位 → 它的进度每次都用「当前手持工具」重算，
+ *    所以要等它进度走完，再拿住最佳工具一两 tick，让服务端自己把它补完
  * 4. 绕过技术：高空包、滞空挖掘微调、sequenced packet（startPrediction）
  * 5. 挖掘冷却：开始一个挖掘后的一段时间内忽略其他方块，适配反作弊的挖掘延迟检查
  * 6. 超时放弃：进度走完后等待服务端确认破坏，超时仍未被破坏则放弃该方块
@@ -113,7 +115,7 @@ public class GhostMine extends Module {
         .add(
             new IntSetting.Builder()
                 .name("挖掘冷却")
-                .description("开始一个挖掘后，多少 tick 内点击其他方块直接忽略（适配反作弊的挖掘延迟检查，0 = 关闭）。开始新方块前还要先把在挖的方块收尾，否则服务端槽位被抢走、旧方块挖不掉")
+                .description("开始一个挖掘后，多少 tick 内点击其他方块直接忽略（适配反作弊的挖掘延迟检查，0 = 关闭）")
                 .defaultValue(6)
                 .min(0)
                 .sliderRange(0, 20)
@@ -384,8 +386,7 @@ public class GhostMine extends Module {
 
         // 2. 开始挖掘（发 START）
         if (firstBlockDate != null && !firstBlockDate.isMining) {
-            mineBlock(firstBlockDate.pos, firstBlockDate.direction);
-            firstBlockDate.isMining = true;
+            startTarget(firstBlockDate);
         }
 
         // 3. 进度累加 + 达到阈值切工具/发 STOP
@@ -411,12 +412,10 @@ public class GhostMine extends Module {
         // 2. 开始挖掘：主挖先发 START，副挖后发
         //    服务端的挖掘槽位最后停在副挖上：副挖靠阈值 STOP 破坏，主挖靠 START 时占住的延迟破坏槽位破坏
         if (firstBlockDate != null && !firstBlockDate.isMining) {
-            mineBlock(firstBlockDate.pos, firstBlockDate.direction);
-            firstBlockDate.isMining = true;
+            startTarget(firstBlockDate);
         }
         if (secondBlockDate != null && !secondBlockDate.isMining) {
-            mineBlock(secondBlockDate.pos, secondBlockDate.direction);
-            secondBlockDate.isMining = true;
+            startTarget(secondBlockDate);
         }
 
         // 3. 进度累加 + 达到阈值切工具/发 STOP
@@ -461,34 +460,14 @@ public class GhostMine extends Module {
 
         if (isBroken(block.pos)) return;
 
+        // 服务端现在记的不是这个方块（它只占着服务端的「延迟破坏」名额）→ 发 STOP 也会被忽略，
+        // 它靠进度算完后短暂拿最佳工具让服务端自己补完（见 handleSwitchBack）
+        if (!block.serverTracked) return;
+
         switchToBestTool(block);
         sendStop(block.pos, block.direction);
 
         if (switchBackMode.get() == SwitchBackMode.IMMEDIATE) switchBackNow();
-    }
-
-    /**
-     * 开始新方块之前，把在挖的方块收尾掉
-     * <p>
-     * 服务端只有一个挖掘槽位：新方块的 START 会把旧方块从槽位上挤下去，旧方块就再也挖不掉了。
-     * 所以要先给旧方块发 STOP（此时服务端槽位还是它，进度够就能立即破坏），再发新方块的 START。
-     *
-     * @return 是否可以开始新方块；false 表示旧方块还没到能收尾的进度，这一下点击先忽略
-     */
-    private boolean finishPendingTargets() {
-        return finishPending(firstBlockDate) && finishPending(secondBlockDate);
-    }
-
-    private boolean finishPending(BlockDate block) {
-        if (block == null || !block.isMining) return true;
-
-        // 已经发过 STOP：等它被破坏；进度都走完了还在，说明服务端没接受 STOP（交给卡住保护处理）
-        if (block.switched) return !block.done;
-
-        if (block.progress * 100.0 < stopPercent()) return false;
-
-        finishTarget(block);
-        return true;
     }
 
     /** 进度走完后等待服务端确认破坏，等待超过「放弃等待」则放弃该方块 */
@@ -541,39 +520,29 @@ public class GhostMine extends Module {
     }
 
     /**
-     * 切工具后的处理（延迟切回）
+     * 切工具后的处理
      * <p>
-     * - 循环发包：等待切回期间每 tick 给还没被破坏的方块补 STOP 包（方块被破坏后停发）
-     * - 方块破坏切回：方块被破坏后不等延迟直接切回
-     * - 到达「延迟」后切回
+     * 1. 有方块「客户端进度已经走完、服务端还没破坏」→ 必须拿着最佳工具并继续补 STOP。
+     * 服务端的进度是用「当前手持工具」重算的，手上不拿挖得动的工具，这个方块永远走不完
+     * （手动切一下工具就能挖掉也是这个原因，这里只是把它自动化）。
+     * 2. 正常情况 → 按「切工具模式」切回原槽位（切回时机由 延迟 / 方块破坏切回 决定）。
      */
     private void handleSwitchBack() {
-        // 已经发过 STOP、但服务端还没破坏掉的方块
-        List<BlockDate> pending = new ArrayList<>(2);
-        if (firstBlockDate != null && firstBlockDate.switched && !isBroken(firstBlockDate.pos)) pending.add(firstBlockDate);
-        if (secondBlockDate != null && secondBlockDate.switched && !isBroken(secondBlockDate.pos)) pending.add(secondBlockDate);
-
-        // 进度走完了方块还在 → 服务端没接受 STOP（延迟/网络），这时必须继续拿着最佳工具：
-        // 服务端的延迟破坏每 tick 都用「当前手持工具」重算进度，切回工具会让进度缩水、方块永远挖不掉
         BlockDate stalled = null;
-        for (BlockDate block : pending) {
-            if (block.done) { stalled = block; break; }
-        }
+        if (needsHelp(firstBlockDate)) stalled = firstBlockDate;
+        else if (needsHelp(secondBlockDate)) stalled = secondBlockDate;
 
         if (stalled != null) {
-            // 立即切回：每 tick 重来一次「切工具 → STOP → 切回」，进度一够服务端就会破坏，
-            // 手持槽位只在发包那一刻被占用（不占着手持工具，剑照样能用）
-            if (switchBackMode.get() == SwitchBackMode.IMMEDIATE) {
-                switchToBestTool(stalled);
-                sendStopPacket(stalled.pos, stalled.direction);
-                switchBackNow();
-                return;
-            }
-
-            // 延迟切回 / 不切回：按设置拿着最佳工具并行重发 STOP
             switchToBestTool(stalled);
+
             if (loopStop.get()) {
-                for (BlockDate block : pending) sendStopPacket(block.pos, block.direction);
+                // 服务端当前记着谁就给谁补 STOP（另一个发过去也会被忽略）
+                if (needsHelp(firstBlockDate) && firstBlockDate.serverTracked) {
+                    sendStopPacket(firstBlockDate.pos, firstBlockDate.direction);
+                }
+                if (needsHelp(secondBlockDate) && secondBlockDate.serverTracked) {
+                    sendStopPacket(secondBlockDate.pos, secondBlockDate.direction);
+                }
             }
             return;
         }
@@ -581,10 +550,10 @@ public class GhostMine extends Module {
         if (!hasSwitch) return;
 
         switch (switchBackMode.get()) {
-            // 立即切回在切工具时已经同 tick 完成
+            // 立即切回在发 STOP 的那一 tick 已经切回了
             case IMMEDIATE -> switchBackNow();
             case DELAYED -> {
-                if (switchBackOnBreak.get() && pending.isEmpty()) {
+                if (switchBackOnBreak.get() && !hasLiveStopTarget()) {
                     switchBackNow();
                     return;
                 }
@@ -596,12 +565,27 @@ public class GhostMine extends Module {
                 }
 
                 if (loopStop.get()) {
-                    for (BlockDate block : pending) sendStopPacket(block.pos, block.direction);
+                    if (isLiveStopTarget(firstBlockDate)) sendStopPacket(firstBlockDate.pos, firstBlockDate.direction);
+                    if (isLiveStopTarget(secondBlockDate)) sendStopPacket(secondBlockDate.pos, secondBlockDate.direction);
                 }
             }
             // 不切回：保持最佳工具
             case NONE -> { }
         }
+    }
+
+    /** 方块进度已经走完、但服务端还没把它破坏掉 → 需要拿着最佳工具让服务端把进度补完 */
+    private boolean needsHelp(BlockDate block) {
+        return block != null && block.isMining && block.done && !isBroken(block.pos);
+    }
+
+    /** 发过 STOP 但还没被破坏的方块（服务端当前记着的那个才有意义） */
+    private boolean isLiveStopTarget(BlockDate block) {
+        return block != null && block.switched && block.serverTracked && !isBroken(block.pos);
+    }
+
+    private boolean hasLiveStopTarget() {
+        return isLiveStopTarget(firstBlockDate) || isLiveStopTarget(secondBlockDate);
     }
 
     // ==================== 辅助方法 ====================
@@ -664,6 +648,23 @@ public class GhostMine extends Module {
     }
 
     // ==================== 发包方法 ====================
+
+    /**
+     * 开始一个目标：发 START（双挖模式下 {@link #mineBlock} 会紧跟着补一个 STOP，
+     * 让这个方块占住服务端的「延迟破坏」名额），并把它标成服务端当前记着的挖掘方块。
+     * <p>
+     * 服务端只会认「最后发过 START 的那个方块」为目标，另一个方块只能靠延迟破坏名额被服务端补完。
+     */
+    private void startTarget(BlockDate block) {
+        mineBlock(block.pos, block.direction);
+        block.isMining = true;
+        block.serverTracked = true;
+
+        if (firstBlockDate != null && firstBlockDate != block) firstBlockDate.serverTracked = false;
+        if (secondBlockDate != null && secondBlockDate != block) secondBlockDate.serverTracked = false;
+
+        mineCooldownTicks = mineCooldown.get();
+    }
 
     /**
      * 开始挖掘（发 START；双挖模式下紧接着补一个 STOP）
@@ -821,10 +822,6 @@ public class GhostMine extends Module {
         // 挖掘冷却：开始一个挖掘后的一段时间内忽略其他方块，适配反作弊的挖掘延迟检查
         if (mineCooldownTicks > 0) return;
 
-        // 开始新方块前先把在挖的方块收尾：服务端只有一个挖掘槽位，
-        // 旧方块没收尾就被新方块的 START 挤下去的话，旧方块永远挖不掉
-        if (!finishPendingTargets()) return;
-
         BlockDate target;
         if (firstBlockDate == null) {
             firstBlockDate = new BlockDate(pos, direction);
@@ -839,9 +836,7 @@ public class GhostMine extends Module {
             target = firstBlockDate;
         }
 
-        mineBlock(target.pos, target.direction);
-        target.isMining = true;
-        mineCooldownTicks = mineCooldown.get();
+        startTarget(target);
     }
 
     // ==================== 渲染 ====================
@@ -951,6 +946,8 @@ public class GhostMine extends Module {
         public double progress;
         public BlockState blockState;
         public boolean isMining = false;
+        /** 服务端当前记着的挖掘方块（最后发过 START 的那一个）；另一个方块只占着服务端的「延迟破坏」名额 */
+        public boolean serverTracked = false;
         /** 是否已经达到切换工具阈值（切过工具、发过 STOP） */
         public boolean switched = false;
         /** 进度走完后等待服务端确认破坏的 tick 数 */
