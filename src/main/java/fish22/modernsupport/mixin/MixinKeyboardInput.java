@@ -19,7 +19,7 @@
 
 package fish22.modernsupport.mixin;
 
-import fish22.modernsupport.utils.MovementCorrection;
+import fish22.modernsupport.utils.LegalRotation;
 import net.minecraft.client.player.ClientInput;
 import net.minecraft.client.player.KeyboardInput;
 import net.minecraft.world.entity.player.Input;
@@ -47,7 +47,7 @@ public abstract class MixinKeyboardInput extends ClientInput {
     @Inject(method = "tick", at = @At("TAIL"))
     private void onTickTail(CallbackInfo ci) {
         // 仅静默模式生效
-        if (!MovementCorrection.isActive() || MovementCorrection.getMode() != MovementCorrection.Mode.QUIET) {
+        if (!LegalRotation.isActive() || LegalRotation.getMode() != LegalRotation.Mode.QUIET) {
             return;
         }
 
@@ -60,7 +60,7 @@ public abstract class MixinKeyboardInput extends ClientInput {
         }
 
         // 客户端视觉朝向与服务器朝向的差值
-        float deltaYaw = MovementCorrection.getVisualYaw() - MovementCorrection.getTargetYaw();
+        float deltaYaw = LegalRotation.getVisualYaw() - LegalRotation.getTargetYaw();
         double rad = Math.toRadians(deltaYaw);
 
         // 输入向量旋转（LiquidBounce 同款公式）

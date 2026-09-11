@@ -1,6 +1,6 @@
 package fish22.modernsupport.mixin;
 
-import fish22.modernsupport.utils.MovementCorrection;
+import fish22.modernsupport.utils.LegalRotation;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.renderer.Renderer3D;
 import meteordevelopment.meteorclient.settings.BoolSetting;
@@ -41,11 +41,11 @@ import java.util.List;
 import static meteordevelopment.meteorclient.MeteorClient.mc;
 
 /**
- * KillAura 移动矫正集成 mixin
+ * KillAura 合法转头集成 mixin
  *
- * 为 Meteor 的 KillAura 添加移动矫正模式设置项 "movement-correction"，
+ * 为 Meteor 的 KillAura 添加合法转头模式设置项 "legal-rotation"，
  * 并通过 {@code @Redirect} 精确拦截 {@link Rotations#rotate(double, double)}
- * 的两个调用点，替换为 {@link MovementCorrection#rotate(double, double, MovementCorrection.Mode)}。
+ * 的两个调用点，替换为 {@link LegalRotation#rotate(double, double, LegalRotation.Mode)}。
  *
  * <p>SEVERE：旋转时客户端显示实际朝向（视角跟随）；NO_MOVE：旋转时客户端静默。
  * 设置项仅在 KillAura 旋转模式非 None 时可见。
@@ -69,7 +69,7 @@ public abstract class MixinKillAura {
     private SettingGroup sgTiming;
 
     @Unique
-    private Setting<MovementCorrection.Mode> movementCorrectionMode;
+    private Setting<LegalRotation.Mode> legalRotationMode;
 
     @Unique
     private Setting<Integer> onHitHoldTicks;
@@ -103,12 +103,12 @@ public abstract class MixinKillAura {
     private void onInit(CallbackInfo ci) {
         KillAura self = (KillAura) (Object) this;
 
-        SettingGroup sg = self.settings.createGroup("移动矫正");
+        SettingGroup sg = self.settings.createGroup("合法转头");
 
-        movementCorrectionMode = sg.add(new EnumSetting.Builder<MovementCorrection.Mode>()
-            .name("移动矫正")
-            .description("移动矫正模式。严格：移动方向为真实旋转。静默：在严格基础上映射 WASD 按键,尝试让移动方向与视觉朝向一致。")
-            .defaultValue(MovementCorrection.Mode.OFF)
+        legalRotationMode = sg.add(new EnumSetting.Builder<LegalRotation.Mode>()
+            .name("合法转头")
+            .description("合法转头模式。严格：移动方向为真实旋转。静默：在严格基础上映射 WASD 按键,尝试让移动方向与视觉朝向一致。")
+            .defaultValue(LegalRotation.Mode.OFF)
             .visible(() -> rotation.get() != KillAura.RotationMode.None)
             .build()
         );
@@ -167,9 +167,9 @@ public abstract class MixinKillAura {
         )
     )
     private void redirectRotateAlways(double yaw, double pitch) {
-        MovementCorrection.Mode mode = movementCorrectionMode.get();
-        if (mode == MovementCorrection.Mode.SEVERE || mode == MovementCorrection.Mode.QUIET) {
-            MovementCorrection.rotate(yaw, pitch, mode);
+        LegalRotation.Mode mode = legalRotationMode.get();
+        if (mode == LegalRotation.Mode.SEVERE || mode == LegalRotation.Mode.QUIET) {
+            LegalRotation.rotate(yaw, pitch, mode);
         } else {
             // 关闭 / 停止移动（未实现）：回退原版静默旋转
             Rotations.rotate(yaw, pitch);
@@ -186,11 +186,11 @@ public abstract class MixinKillAura {
         )
     )
     private void redirectRotateOnHit(double yaw, double pitch) {
-        MovementCorrection.Mode mode = movementCorrectionMode.get();
-        if (mode == MovementCorrection.Mode.SEVERE || mode == MovementCorrection.Mode.QUIET) {
-            MovementCorrection.rotate(yaw, pitch, mode);
+        LegalRotation.Mode mode = legalRotationMode.get();
+        if (mode == LegalRotation.Mode.SEVERE || mode == LegalRotation.Mode.QUIET) {
+            LegalRotation.rotate(yaw, pitch, mode);
             // 攻击后保持旋转 N tick 再转回原朝向
-            MovementCorrection.setHoldTicks(onHitHoldTicks.get());
+            LegalRotation.setHoldTicks(onHitHoldTicks.get());
         } else {
             // 关闭 / 停止移动（未实现）：回退原版静默旋转
             Rotations.rotate(yaw, pitch);
@@ -292,7 +292,7 @@ public abstract class MixinKillAura {
     private void redirectGameModeAttack(MultiPlayerGameMode gameMode, Player player, Entity target) {
         // 不立即发包，记录目标，等移动包发送完毕后统一攻击
         pendingAttacks.add(target);
-        MovementCorrection.runAfterSend(this::doPendingAttacks);
+        LegalRotation.runAfterSend(this::doPendingAttacks);
     }
 
     // ====== swing 延迟：不立即发，等攻击包发出后统一挥动 ======

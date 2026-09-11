@@ -19,7 +19,7 @@
 
 package fish22.modernsupport.mixin;
 
-import fish22.modernsupport.utils.MovementCorrection;
+import fish22.modernsupport.utils.LegalRotation;
 import meteordevelopment.meteorclient.utils.player.Rotations;
 import meteordevelopment.meteorclient.utils.world.BlockUtils;
 import org.spongepowered.asm.mixin.Mixin;
@@ -29,14 +29,9 @@ import org.spongepowered.asm.mixin.injection.Redirect;
 /**
  * BlockUtils.place 的旋转重定向 mixin
  *
- * <p>{@link BlockUtils#place} 内部在 rotate 为 true 时调用
- * {@link Rotations#rotate(double, double, int, Runnable)} 静默转向后再放置方块。
- * 本 mixin 精确拦截这一个调用点，当存在「方块放置矫正上下文」（由 SpawnProofer 等
- * 模块在调用 place 前通过 {@link MovementCorrection#beginPlace} 设置）时，
- * 把这次旋转替换成移动矫正（真实旋转 + 客户端静默），放置回调在移动包发送后执行，
- * 服务器视角正确到位后再发出放置包。
- *
- * <p>没有上下文（默认）时原样回退 {@link Rotations#rotate}，其他模块行为完全不变。
+ * <p>当存在「方块放置转头上下文」时，用合法转头替代原版 Rotations.rotate。
+ * 合法转头会立即同步 yRot+yRotO（渲染瞬间到位，摄像机不卡），
+ * 放置回调立即执行（不等移动包）。
  */
 @Mixin(value = BlockUtils.class, remap = false)
 public abstract class MixinBlockUtils {
@@ -49,12 +44,12 @@ public abstract class MixinBlockUtils {
         )
     )
     private static void redirectRotate(double yaw, double pitch, int priority, Runnable callback) {
-        MovementCorrection.Mode mode = MovementCorrection.getPlaceMode();
-        if (mode == MovementCorrection.Mode.SEVERE || mode == MovementCorrection.Mode.QUIET) {
-            // 用移动矫正替代原版静默旋转，放置动作（swap + interact + swapBack）延后到移动包发送后
-            MovementCorrection.rotate(yaw, pitch, mode, callback);
+        LegalRotation.Mode mode = LegalRotation.getPlaceMode();
+        if (mode == LegalRotation.Mode.SEVERE || mode == LegalRotation.Mode.QUIET) {
+            // 合法转头：立即设 yRot+yRotO + 立即执行放置回调
+            LegalRotation.rotate(yaw, pitch, mode);
+            callback.run();
         } else {
-            // 关闭 / 未设置上下文：回退原版静默旋转
             Rotations.rotate(yaw, pitch, priority, callback);
         }
     }

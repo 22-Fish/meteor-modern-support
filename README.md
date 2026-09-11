@@ -3,14 +3,14 @@
 ## 前言
 
 * **⚠本项目代码由AI生成**
-* 在使用meteor client模组的过程中，经常遇到一些问题。比如现代反作弊对meteor的旋转几乎是百分百拦截。meteor本身也缺少非常多的实用功能。此项目致力于为meteor添加现代化的功能，如加入了移动矫正的杀戮光环，绝不回弹卡脚。
+* 在使用meteor client模组的过程中，经常遇到一些问题。比如现代反作弊对meteor的旋转几乎是百分百拦截。meteor本身也缺少非常多的实用功能。此项目致力于为meteor添加现代化的功能，如加入了合法转头的杀戮光环，绝不回弹卡脚。
 * meteor经常因为非正常关闭丢失配置，我们修改了保存机制，让meteor每次状态变化都进行保存。
 
 
 
 |功能|说明|
 |-|-|
-|移动矫正 API|旋转时修正移动方向：走路、鞘翅移动方向与旋转朝向一致（参考 [Baritone](https://github.com/cabaletta/baritone)，[LiquidBounce](https://github.com/CCBlueX/LiquidBounce)）|
+|合法转头 API|旋转时修正移动方向：走路、鞘翅移动方向与旋转朝向一致（参考 [Baritone](https://github.com/cabaletta/baritone)，[LiquidBounce](https://github.com/CCBlueX/LiquidBounce)）|
 |配置保存修改|设置修改 / 模块开关后异步防抖保存，强退不丢配置|
 |[Meteor-I18n-Support-plugin](https://github.com/dingzhen-vape/Meteor-I18n-Support-plugin) 语言支持|Meteor 全界面多语言：Config 里可设置语言（默认跟随 Minecraft），游戏目录动态加载语言文件|
 |背包使用|已经初步实现。一个tick内交换2次，直接使用背包中的物品。|
@@ -47,7 +47,7 @@
 
 
 
-## 移动矫正 API 使用文档
+## 合法转头 API 使用文档
 
 ### 为什么需要它
 
@@ -58,17 +58,17 @@
 ### 快速开始（两步）
 
 ```java
-// 1. 模块内添加「移动矫正」设置项（显示中文选项：关闭/停止移动/严格/静默）
-private final Setting<MovementCorrection.Mode> movementCorrection =
-    sgGeneral.add(new MovementCorrection.ModeSetting(
-        "移动矫正",                       // 设置名
+// 1. 模块内添加「合法转头」设置项（显示中文选项：关闭/停止移动/严格/静默）
+private final Setting<LegalRotation.Mode> legalRotation =
+    sgGeneral.add(new LegalRotation.ModeSetting(
+        "合法转头",                       // 设置名
         "旋转时如何矫正移动方向。",         // 描述
-        MovementCorrection.Mode.OFF,     // 默认关闭
+        LegalRotation.Mode.OFF,     // 默认关闭
         null, null, null                 // onChanged / onModuleActivated / visible
     ));
 
 // 2. 每次旋转时调用（例如模块 onTick 里）
-MovementCorrection.rotateWithMode(yaw, pitch, movementCorrection.get());
+LegalRotation.rotateWithMode(yaw, pitch, legalRotation.get());
 ```
 
 ### 模式说明
@@ -82,18 +82,18 @@ MovementCorrection.rotateWithMode(yaw, pitch, movementCorrection.get());
 
 ### 时序与生命周期
 
-* 调用方每 tick 调用一次（如 KillAura 的 onTick）；`MovementCorrection.rotateWithMode` 会按模式自动分发（严格/静默走移动矫正，其余回退原版 `Rotations.rotate`）
-* 移动矫正状态**每 tick 自动清除**：停止调用后下一个 tick 自动归位，不会残留锁定
-* 需要回调时用 `MovementCorrection.rotate(yaw, pitch, mode, callback)`，回调在移动包发送完毕后执行
+* 调用方每 tick 调用一次（如 KillAura 的 onTick）；`LegalRotation.rotateWithMode` 会按模式自动分发（严格/静默走合法转头，其余回退原版 `Rotations.rotate`）
+* 合法转头状态**每 tick 自动清除**：停止调用后下一个 tick 自动归位，不会残留锁定
+* 需要回调时用 `LegalRotation.rotate(yaw, pitch, mode, callback)`，回调在移动包发送完毕后执行
 
 ### 注意事项
 
-1. **全局状态**：移动矫正状态是全局静态的，多个模块同时旋转会互相覆盖，避免同时使用
+1. **全局状态**：合法转头状态是全局静态的，多个模块同时旋转会互相覆盖，避免同时使用
 2. **鞘翅飞行**：移动方向跟随服务器朝向，鞘翅方向正确
 
 ### 内置示例
 
-* **KillAura 集成**（`mixin/MixinKillAura.java`）：通过 `@Redirect` 拦截 `Rotations.rotate(DD)` 的两个调用点，替换为移动矫正
+* **KillAura 集成**（`mixin/MixinKillAura.java`）：通过 `@Redirect` 拦截 `Rotations.rotate(DD)` 的两个调用点，替换为合法转头
 * **转圈模块**（`modules/Spin.java`）：完整的"设置项 + rotateWithMode"使用范例
 
 
@@ -192,4 +192,3 @@ Setting.Meteor.<设置内部名>.Description   → 设置描述
 * [Baritone](https://github.com/cabaletta/baritone)（LGPL-3.0）— LookBehavior 真实旋转机制（PRE/POST 时序）
 
 移植的代码文件均带有 GPL-3.0 头注释与来源说明。
-

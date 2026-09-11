@@ -42,7 +42,7 @@ import static meteordevelopment.meteorclient.MeteorClient.mc;
  * <ul>
  *   <li>每 tick 按 WASD 相对当前视角计算目标偏航（8 方向），按空格/潜行计算目标俯仰
  *       （空格看天上升、潜行看地下降、仅移动时微俯 -1.9° 保持滑翔速度）</li>
- *   <li>通过 {@link MovementCorrection}（严格模式）把服务器视角转到目标角度，
+ *   <li>通过 {@link LegalRotation}（严格模式）把服务器视角转到目标角度，
  *       客户端视角不动——原版滑翔物理朝服务器视角方向自然加速</li>
  *   <li>无任何输入时悬停原地：悬停模式 = 每 tick 把速度置 (0, 0.02, 0)（抵消重力），
  *       可同时按间隔静默放烟花（仅为保持滑翔状态正常，防止反作弊拦截，不影响悬停）；
@@ -609,7 +609,7 @@ public class ElytraFlySupport {
         // 先转向再解除冻结（同 tick）：避免解除冻结后先沿旧朝向移动再转头
         float targetYaw = calcLegalYaw(forward, back, left, right);
         float targetPitch = calcLegalPitch(jump, sneak);
-        MovementCorrection.rotate(targetYaw, targetPitch, MovementCorrection.Mode.SEVERE);
+        LegalRotation.rotate(targetYaw, targetPitch, LegalRotation.Mode.SEVERE);
         Freeze.setExternalFrozen(false);
 
         // 飞行中自动烟花（释放延后到移动包发送后，烟花加速方向才能跟随服务器视角）
@@ -688,7 +688,7 @@ public class ElytraFlySupport {
         int level = selectFireworkLevel();
         if (level == -1) return;
         int interval = fwIntervalForLevel(level);
-        MovementCorrection.runAfterSend(() -> {
+        LegalRotation.runAfterSend(() -> {
             if (tryUseFireworkOfLevel(level)) {
                 legalFwCooldown = interval;
             }
@@ -703,7 +703,7 @@ public class ElytraFlySupport {
         // 起飞烟花排队中：本 tick 的自动烟花（飞行/悬停分支）检查到此标志直接跳过，
         // 防止两个回调同 tick 都执行（runAfterSend 队列化后都会执行）导致一次起飞双放
         takeoffFireworkPending = true;
-        MovementCorrection.runAfterSend(() -> {
+        LegalRotation.runAfterSend(() -> {
             takeoffFireworkPending = false;
             if (tryUseFireworkOfLevel(level)) {
                 legalFwCooldown = interval;
@@ -722,7 +722,7 @@ public class ElytraFlySupport {
         int level = selectFireworkLevel();
         if (level == -1) return;
         int interval = hoverFwIntervalForLevel(level);
-        MovementCorrection.runAfterSend(() -> {
+        LegalRotation.runAfterSend(() -> {
             if (tryUseFireworkOfLevel(level)) {
                 legalFwCooldown = interval;
             }

@@ -19,8 +19,7 @@
 
 package fish22.modernsupport.mixin;
 
-import fish22.modernsupport.utils.BackpackUse;
-import fish22.modernsupport.utils.MovementCorrection;
+import fish22.modernsupport.utils.LegalRotation;
 import meteordevelopment.meteorclient.settings.BoolSetting;
 import meteordevelopment.meteorclient.settings.EnumSetting;
 import meteordevelopment.meteorclient.settings.Setting;
@@ -54,7 +53,7 @@ import static meteordevelopment.meteorclient.MeteorClient.mc;
 /**
  * SpawnProofer（防止生成）增强 mixin：
  * <ul>
- *   <li>「移动矫正」：放置旋转走移动矫正 API（严格/静默）</li>
+ *   <li>「合法转头」：放置前直接调 LegalRotation.rotate()，不走 MixinBlockUtils 间接拦截</li>
  *   <li>「背包放置」：方块在背包（主背包）也能放置（走 BackpackUse 4 包 PICKUP）</li>
  *   <li>「瞄准点与范围优化」：范围按眼睛距离算，瞄准点用支撑方块表面中心（而非放置方块中心）</li>
  * </ul>
@@ -75,27 +74,37 @@ public abstract class MixinSpawnProofer {
     private Setting<List<Block>> blocks;
 
     @Unique
-    private Setting<MovementCorrection.Mode> movementCorrectionMode;
+    private Setting<LegalRotation.Mode> legalRotationMode;
 
     @Unique
     private Setting<Boolean> backpackPlace;
 
     @Unique
-    private Setting<BackpackUse.Mode> backpackMode;
+    private Setting<fish22.modernsupport.utils.BackpackUse.Mode> backpackMode;
 
     @Unique
     private Setting<Boolean> aimOptimization;
+
+    @Unique
+    private Setting<Boolean> debugLog;
 
     @Inject(method = "<init>", at = @At("TAIL"))
     private void onInit(CallbackInfo ci) {
         SpawnProofer self = (SpawnProofer) (Object) this;
 
-        SettingGroup sg = self.settings.createGroup("移动矫正");
-        movementCorrectionMode = sg.add(new EnumSetting.Builder<MovementCorrection.Mode>()
-            .name("移动矫正")
-            .description("移动矫正模式。严格：移动方向为真实旋转。静默：在严格基础上映射 WASD 按键,尝试让移动方向与视觉朝向一致。")
-            .defaultValue(MovementCorrection.Mode.OFF)
+        SettingGroup sg = self.settings.createGroup("合法转头");
+        legalRotationMode = sg.add(new EnumSetting.Builder<LegalRotation.Mode>()
+            .name("合法转头")
+            .description("合法转头模式。严格：移动方向为真实旋转。静默：在严格基础上映射 WASD 按键,尝试让移动方向与视觉朝向一致。")
+            .defaultValue(LegalRotation.Mode.OFF)
             .visible(() -> rotate.get())
+            .build()
+        );
+        debugLog = sg.add(new BoolSetting.Builder()
+            .name("调试日志")
+            .description("聊天栏打印旋转和放置时序")
+            .defaultValue(false)
+            .visible(() -> rotate.get() && (legalRotationMode.get() == LegalRotation.Mode.SEVERE || legalRotationMode.get() == LegalRotation.Mode.QUIET))
             .build()
         );
 
@@ -106,10 +115,10 @@ public abstract class MixinSpawnProofer {
             .defaultValue(false)
             .build()
         );
-        backpackMode = sgGeneral.add(new EnumSetting.Builder<BackpackUse.Mode>()
+        backpackMode = sgGeneral.add(new EnumSetting.Builder<fish22.modernsupport.utils.BackpackUse.Mode>()
             .name("背包使用模式")
             .description("背包放置的发包模式。1p：SWAP 2包;2p：PICKUP 4 包。除特殊原因，请使用2p更稳定")
-            .defaultValue(BackpackUse.Mode.PICKUP)
+            .defaultValue(fish22.modernsupport.utils.BackpackUse.Mode.PICKUP)
             .visible(backpackPlace::get)
             .build()
         );
@@ -131,7 +140,6 @@ public abstract class MixinSpawnProofer {
         )
     )
     private void redirectError(SpawnProofer self, String message, Object[] args) {
-        // 不提示（保持模块开启）
     }
 
     @Redirect(
@@ -142,7 +150,6 @@ public abstract class MixinSpawnProofer {
         )
     )
     private void redirectToggle(SpawnProofer self) {
-        // 不关闭模块
     }
 
     // ====== 背包放置：onTickPre 检查方块 ======
@@ -173,11 +180,10 @@ public abstract class MixinSpawnProofer {
     private FindItemResult redirectFindInHotbar(Predicate<ItemStack> predicate) {
         FindItemResult hotbar = InvUtils.findInHotbar(predicate);
         if (hotbar.found() || !backpackPlace.get()) return hotbar;
-        // 快捷栏没有：从全背包找（主背包）
         return InvUtils.find(predicate);
     }
 
-    // ====== 放置：背包放置 + 移动矫正 ======
+    // ====== 放置：直接调合法转头 + 以 rotate=false 调 BlockUtils.place ======
 
     @Redirect(
         method = "onTickPost",
@@ -187,59 +193,56 @@ public abstract class MixinSpawnProofer {
         )
     )
     private boolean redirectPlace(BlockPos blockPos, FindItemResult block, boolean rotate, int rotationPriority, boolean checkEntities) {
-        MovementCorrection.Mode mode = movementCorrectionMode.get();
-        // 背包放置：方块在主背包（9-35）
+        LegalRotation.Mode mode = legalRotationMode.get();
         boolean useBackpack = backpackPlace.get() && block.isMain();
 
+        boolean useCorrection = rotate && (mode == LegalRotation.Mode.SEVERE || mode == LegalRotation.Mode.QUIET);
+
         if (useBackpack) {
-            return placeFromBackpack(blockPos, rotate, rotationPriority, mode);
+            return placeFromBackpack(blockPos, useCorrection, mode);
         }
 
-        // 热栏/副手/主手：原 BlockUtils.place + 移动矫正
-        boolean useCorrection = rotate && (mode == MovementCorrection.Mode.SEVERE || mode == MovementCorrection.Mode.QUIET);
         if (!useCorrection) {
             return BlockUtils.place(blockPos, block, rotate, rotationPriority, checkEntities);
         }
-        MovementCorrection.beginPlace(mode);
-        try {
-            return BlockUtils.place(blockPos, block, rotate, rotationPriority, checkEntities);
-        } finally {
-            MovementCorrection.endPlace();
-        }
+
+        // 直接算旋转 + 调合法转头（不走 MixinBlockUtils 间接拦截）
+        BlockHitResult hitResult = calcPlaceHitResult(blockPos);
+        double yaw = Rotations.getYaw(hitResult.getLocation());
+        double pitch = Rotations.getPitch(hitResult.getLocation());
+
+        if (debugLog.get()) logToChat("旋转");
+        LegalRotation.rotate(yaw, pitch, mode);
+
+        // 以 rotate=false 调 BlockUtils.place，放置立即执行（不经过 Rotations.rotate）
+        boolean result = BlockUtils.place(blockPos, block, false, rotationPriority, checkEntities);
+        if (debugLog.get() && result) logToChat("放置");
+        return result;
     }
 
-    /** 从背包放置：旋转（可选）到位后走 BackpackUse 4 包 PICKUP + useItemOn */
     @Unique
-    private boolean placeFromBackpack(BlockPos blockPos, boolean rotate, int rotationPriority, MovementCorrection.Mode mode) {
+    private boolean placeFromBackpack(BlockPos blockPos, boolean useCorrection, LegalRotation.Mode mode) {
         BlockHitResult hitResult = calcPlaceHitResult(blockPos);
         Predicate<ItemStack> pred = stack -> blocks.get().contains(Block.byItem(stack.getItem()));
 
-        if (!rotate) {
-            return BackpackUse.place(pred, hitResult, backpackMode.get());
+        if (useCorrection) {
+            double yaw = Rotations.getYaw(hitResult.getLocation());
+            double pitch = Rotations.getPitch(hitResult.getLocation());
+            if (debugLog.get()) logToChat("旋转");
+            LegalRotation.rotate(yaw, pitch, mode);
         }
 
-        double yaw = Rotations.getYaw(hitResult.getLocation());
-        double pitch = Rotations.getPitch(hitResult.getLocation());
-        if (mode == MovementCorrection.Mode.SEVERE || mode == MovementCorrection.Mode.QUIET) {
-            MovementCorrection.rotate(yaw, pitch, mode, () -> BackpackUse.place(pred, hitResult, backpackMode.get()));
-        } else {
-            Rotations.rotate(yaw, pitch, rotationPriority, () -> BackpackUse.place(pred, hitResult, backpackMode.get()));
-        }
-        return true;
+        boolean result = fish22.modernsupport.utils.BackpackUse.place(pred, hitResult, backpackMode.get());
+        if (debugLog.get() && result) logToChat("放置");
+        return result;
     }
 
     // ====== 瞄准点与范围优化 ======
 
-    /**
-     * 瞄准点与范围优化开启时短路返回自定义判定，关闭时回退官方原版逻辑。
-     * 用 @Inject 而非 @Overwrite：官方方法体始终保留，避免与其他 mod 混入同一方法时
-     * 发生 Overwrite 冲突崩溃，Meteor 升级改逻辑时也不会被静默覆盖。
-     */
     @Inject(method = "isOutOfRange", at = @At("HEAD"), cancellable = true)
     private void onIsOutOfRange(BlockPos blockPos, CallbackInfoReturnable<Boolean> cir) {
-        if (!aimOptimization.get()) return; // 未开启：不取消，走官方原版逻辑
+        if (!aimOptimization.get()) return;
 
-        // 瞄准点 = 支撑方块表面中心，范围按眼睛距离算
         BlockHitResult hit = calcPlaceHitResult(blockPos);
         Vec3 aimPos = hit.getLocation();
         BlockPos supportBlock = hit.getBlockPos();
@@ -252,7 +255,6 @@ public abstract class MixinSpawnProofer {
 
         ClipContext raycast = new ClipContext(mc.player.getEyePosition(), aimPos, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, mc.player);
         BlockHitResult result = mc.level.clip(raycast);
-        // 射线命中支撑方块 = 支撑面直接可见，否则按墙后范围
         if (result == null || !result.getBlockPos().equals(supportBlock)) {
             cir.setReturnValue(eyeDistSq > wallsRange.get() * wallsRange.get());
             return;
@@ -260,7 +262,6 @@ public abstract class MixinSpawnProofer {
         cir.setReturnValue(false);
     }
 
-    /** 计算放置目标的 BlockHitResult（复用 BlockUtils.place 的 hitPos/side/neighbour 逻辑） */
     @Unique
     private static BlockHitResult calcPlaceHitResult(BlockPos blockPos) {
         Vec3 hitPos = Vec3.atCenterOf(blockPos);
@@ -274,5 +275,12 @@ public abstract class MixinSpawnProofer {
             hitPos = hitPos.add(side.getStepX() * 0.5, side.getStepY() * 0.5, side.getStepZ() * 0.5);
         }
         return new BlockHitResult(hitPos, side.getOpposite(), neighbour, false);
+    }
+
+    @Unique
+    private static void logToChat(String msg) {
+        if (mc.player != null) {
+            mc.player.sendSystemMessage(net.minecraft.network.chat.Component.literal(msg));
+        }
     }
 }

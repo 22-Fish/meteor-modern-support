@@ -19,7 +19,7 @@
 
 package fish22.modernsupport.modules;
 
-import fish22.modernsupport.utils.MovementCorrection;
+import fish22.modernsupport.utils.LegalRotation;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.settings.BoolSetting;
 import meteordevelopment.meteorclient.settings.DoubleSetting;
@@ -83,8 +83,8 @@ public class Spin extends Module {
 
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
 
-    // 移动矫正配置单独分组
-    private final SettingGroup sgMovement = settings.createGroup("移动矫正");
+    // 合法转头配置单独分组
+    private final SettingGroup sgMovement = settings.createGroup("合法转头");
 
     // 偏航
     private final Setting<YawMode> yawMode = sgGeneral.add(new EnumSetting.Builder<YawMode>()
@@ -159,10 +159,10 @@ public class Spin extends Module {
     );
 
     // 其他
-    private final Setting<MovementCorrection.Mode> movementCorrection = sgMovement.add(new EnumSetting.Builder<MovementCorrection.Mode>()
-        .name("移动矫正")
-        .description("移动矫正模式。严格：移动方向为真实旋转。静默：在严格基础上映射 WASD 按键,尝试让移动方向与视觉朝向一致。")
-        .defaultValue(MovementCorrection.Mode.OFF)
+    private final Setting<LegalRotation.Mode> legalRotation = sgMovement.add(new EnumSetting.Builder<LegalRotation.Mode>()
+        .name("合法转头")
+        .description("合法转头模式。严格：移动方向为真实旋转。静默：在严格基础上映射 WASD 按键,尝试让移动方向与视觉朝向一致。")
+        .defaultValue(LegalRotation.Mode.OFF)
         .build()
     );
     private final Setting<Boolean> safePitch = sgGeneral.add(new BoolSetting.Builder()
@@ -225,8 +225,8 @@ public class Spin extends Module {
             pitch = Mth.clamp(pitch, -90, 90);
         }
 
-        // 按模块的移动矫正设置旋转：严格/静默走移动矫正，其余回退原版静默旋转
-        MovementCorrection.rotateWithMode(yaw, pitch, movementCorrection.get());
+        // 按模块的合法转头设置旋转：严格/静默走合法转头，其余回退原版静默旋转
+        LegalRotation.rotateWithMode(yaw, pitch, legalRotation.get());
     }
 
     /** 抖动模式：朝前 N tick、朝后 N tick 交替 */

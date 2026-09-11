@@ -11,7 +11,7 @@ import fish22.modernsupport.utils.AutoSave;
 import fish22.modernsupport.utils.I18n;
 import fish22.modernsupport.utils.ModuleConfigs;
 import fish22.modernsupport.utils.ModulePages;
-import fish22.modernsupport.utils.MovementCorrection;
+import fish22.modernsupport.utils.LegalRotation;
 import com.mojang.logging.LogUtils;
 import meteordevelopment.meteorclient.MeteorClient;
 import meteordevelopment.meteorclient.addons.MeteorAddon;
@@ -36,7 +36,7 @@ import static meteordevelopment.meteorclient.MeteorClient.mc;
 /**
  * meteor现代化支持 — Meteor Client 扩展模组
  *
- * <p>为 Meteor 提供移动矫正 API（{@link MovementCorrection}）：
+ * <p>为 Meteor 提供合法转头 API（{@link LegalRotation}）：
  * 在旋转的基础上修正 WASD 移动方向，附带 KillAura 集成；
  * 以及配置自动保存（防止强退丢配置）。
  */
@@ -102,8 +102,8 @@ public class ModernSupport extends MeteorAddon {
             }
         });
 
-        // 初始化移动矫正 API
-        MovementCorrection.init();
+        // 初始化合法转头 API
+        LegalRotation.init();
 
         // 初始化配置分块（meteor-client/config/ 下的模块配置快照）
         ModuleConfigs.init();
