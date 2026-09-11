@@ -52,6 +52,12 @@ public abstract class MixinElytraFly {
     private Setting<Boolean> muteSounds;
 
     @Unique
+    private Setting<Boolean> spaceBlockInAir;
+
+    @Unique
+    private Setting<Boolean> grimInputSequence;
+
+    @Unique
     private Setting<Boolean> autoFirework;
 
     @Unique
@@ -109,6 +115,9 @@ public abstract class MixinElytraFly {
     private Setting<ElytraFlySupport.LegalArmorMode> legalArmorMode;
 
     @Unique
+    private Setting<Boolean> legalGrimInputSequence;
+
+    @Unique
     private Setting<Boolean> legalMuteSounds;
 
     @Unique
@@ -116,6 +125,9 @@ public abstract class MixinElytraFly {
 
     @Unique
     private Setting<Boolean> oneKeyBackpackFirework;
+
+    @Unique
+    private Setting<BackpackUse.Mode> oneKeyBackpackMode;
 
     // ====== 模式判断（追加的枚举值在编译期不可见，用 name 判断） ======
 
@@ -156,6 +168,25 @@ public abstract class MixinElytraFly {
             .name("静音")
             .description("屏蔽换装音效")
             .defaultValue(true)
+            .visible(this::isArmorMode)
+            .build()
+        );
+
+        spaceBlockInAir = sgArmor.add(new BoolSetting.Builder()
+            .name("空中屏蔽空格")
+            .description("空中把空格当作没按（改本地输入，服务器不知道你按着空格）。"
+                + "服务端会把「按着跳跃启动滑翔」判为异常并取消起飞包（烟花随之中招），开启可避免；地面起跳不受影响。")
+            .defaultValue(false)
+            .visible(this::isArmorMode)
+            .build()
+        );
+
+        grimInputSequence = sgArmor.add(new BoolSetting.Builder()
+            .name("兼容grim输入检测")
+            .description("起飞包配一对跳跃输入包：起飞包之后这一 tick 的输入包带跳跃按下，下一 tick 再松开。"
+                + "让服务端在收到起飞包时看到跳跃松开（Grim 的 no release 会取消起飞包），随后又看到按下（不报 no jump）。"
+                + "开启后起飞包隔 tick 发一次。")
+            .defaultValue(false)
             .visible(this::isArmorMode)
             .build()
         );
@@ -266,6 +297,16 @@ public abstract class MixinElytraFly {
             .build()
         );
 
+        legalGrimInputSequence = sgLegal.add(new BoolSetting.Builder()
+            .name("兼容grim输入检测")
+            .description("甲飞起飞包配一对跳跃输入包：起飞包之后这一 tick 的输入包带跳跃按下，下一 tick 再松开。"
+                + "让服务端在收到起飞包时看到跳跃松开（Grim 的 no release 会取消起飞包），随后又看到按下（不报 no jump）。"
+                + "开启后起飞包隔 tick 发一次。")
+            .defaultValue(false)
+            .visible(() -> isLegalMode() && legalArmorMode.get() != ElytraFlySupport.LegalArmorMode.Off)
+            .build()
+        );
+
         legalMuteSounds = sgLegal.add(new BoolSetting.Builder()
             .name("静音")
             .description("屏蔽甲飞换装音效")
@@ -355,7 +396,7 @@ public abstract class MixinElytraFly {
 
         oneKeyFirework = sgFirework.add(new KeybindSetting.Builder()
             .name("一键烟花")
-            .description("按下快捷键释放一次烟花；甲飞开启且不在滑翔时延后到下次滑翔。")
+            .description("按下快捷键释放一次烟花。甲飞：延后到换装窗口（服务器认滑翔的那一刻）释放；合法平飞：延后到移动包发送后释放。")
             .defaultValue(Keybind.none())
             .action(ElytraFlySupport::fireworkOnce)
             .build()
@@ -368,10 +409,20 @@ public abstract class MixinElytraFly {
             .build()
         );
 
+        oneKeyBackpackMode = sgFirework.add(new EnumSetting.Builder<BackpackUse.Mode>()
+            .name("背包使用模式")
+            .description("一键烟花背包烟花的交换发包模式。1p：SWAP 2包;2p：PICKUP 4 包。除特殊原因，请使用2p更稳定")
+            .defaultValue(BackpackUse.Mode.PICKUP)
+            .visible(() -> oneKeyBackpackFirework.get())
+            .build()
+        );
+
         // 注入设置引用到支持类
         ElytraFlySupport.flightMode = flightMode;
         ElytraFlySupport.armorMode = armorMode;
         ElytraFlySupport.muteSounds = muteSounds;
+        ElytraFlySupport.spaceBlockInAir = spaceBlockInAir;
+        ElytraFlySupport.grimInputSequence = grimInputSequence;
         ElytraFlySupport.autoFirework = autoFirework;
         ElytraFlySupport.autoSwapElytra = autoSwapElytra;
         ElytraFlySupport.backpackFirework = backpackFirework;
@@ -391,9 +442,11 @@ public abstract class MixinElytraFly {
         ElytraFlySupport.hoverFwIntervalLv2 = hoverFwIntervalLv2;
         ElytraFlySupport.hoverFwIntervalLv3 = hoverFwIntervalLv3;
         ElytraFlySupport.legalArmorMode = legalArmorMode;
+        ElytraFlySupport.legalGrimInputSequence = legalGrimInputSequence;
         ElytraFlySupport.legalMuteSounds = legalMuteSounds;
         ElytraFlySupport.oneKeyFirework = oneKeyFirework;
         ElytraFlySupport.oneKeyBackpackFirework = oneKeyBackpackFirework;
+        ElytraFlySupport.oneKeyBackpackMode = oneKeyBackpackMode;
     }
 
     /**
@@ -437,6 +490,8 @@ public abstract class MixinElytraFly {
 
     @Inject(method = "onPreTick", at = @At("HEAD"), cancellable = true)
     private void onPreTick(TickEvent.Pre event, CallbackInfo ci) {
+        // 空中屏蔽空格的收尾：模式切走/关掉选项时也要把真实输入补发回服务器
+        ElytraFlySupport.onPreTickAlways();
         if (!isCustomMode()) return;
         ElytraFlySupport.onTick();
         ci.cancel();

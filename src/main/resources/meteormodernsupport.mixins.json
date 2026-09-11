@@ -5,6 +5,10 @@
   "client": [
     "MixinElytraFly",
     "MixinElytraFlightModes",
+    "MixinElytraPoseLock",
+    "MixinElytraTravel",
+    "LivingEntityGlideInvoker",
+    "MixinElytraKeyboardInput",
     "MixinFireworkRocketEntity",
     "MixinFireworkRocketItem",
     "EntityRotationAccessor",
