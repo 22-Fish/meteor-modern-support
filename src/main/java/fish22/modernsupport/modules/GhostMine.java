@@ -28,7 +28,6 @@ import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.settings.BoolSetting;
 import meteordevelopment.meteorclient.settings.ColorSetting;
-import meteordevelopment.meteorclient.settings.DoubleSetting;
 import meteordevelopment.meteorclient.settings.EnumSetting;
 import meteordevelopment.meteorclient.settings.IntSetting;
 import meteordevelopment.meteorclient.settings.Setting;
@@ -42,6 +41,7 @@ import meteordevelopment.meteorclient.utils.world.BlockUtils;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.util.Mth;
 import net.minecraft.network.protocol.game.ServerboundMovePlayerPacket;
 import net.minecraft.network.protocol.game.ServerboundPlayerActionPacket;
 import net.minecraft.network.protocol.game.ServerboundSwingPacket;
@@ -63,19 +63,26 @@ import static meteordevelopment.meteorclient.MeteorClient.mc;
 /**
  * 发包挖掘（GhostMine）— 从 meteor-miku 移植（26.1 Mojmap 适配）
  *
- * <p>核心机制：
- * 1. 进度模拟：使用 BlockUtils.getBreakDelta 真实模拟原版挖掘时间
- * 2. 发包顺序：START → 等待进度 → STOP（不再发送多余的 STOP/ABORT）
- * 3. 双挖：主挖用「START + 立即 STOP」让服务端延迟破坏，副挖在进度完成时补真实 STOP
+ * <p>核心机制（对应 26.1 原版服务端 {@code ServerPlayerGameMode.handleBlockBreakAction}）：
+ * 1. 进度模拟：用 BlockUtils.getBreakDelta 按原版挖掘速度累加进度（含工具/附魔/药水/空中惩罚）
+ * 2. 触发破坏：进度达到「切换工具阈值」时切到最佳工具并发 STOP 包；服务端收到 STOP 会用
+ *    当前手持工具重算进度，进度 ≥ 0.7 立即破坏，&lt; 0.7 则交给服务端的延迟破坏补完
+ * 3. 双挖：服务端的「挖掘槽位」和「延迟破坏槽位」各只有一个，所以主挖在 START 后补一个 STOP
+ *    占住延迟破坏槽位（服务端自己会把它挖掉），副挖占住挖掘槽位并靠阈值 STOP 破坏
  * 4. 绕过技术：高空包、滞空挖掘微调、sequenced packet（startPrediction）
- * 5. 工具切换：在进度达到阈值时自动切换最佳工具
- * 6. 失败计数：连续失败达到阈值自动放弃
+ * 5. 挖掘冷却：开始一个挖掘后的一段时间内忽略其他方块，适配反作弊的挖掘延迟检查
+ * 6. 超时放弃：进度走完后等待服务端确认破坏，超时仍未被破坏则放弃该方块
  */
 public class GhostMine extends Module {
-    private final SettingGroup sgGeneral = settings.getDefaultGroup();
+    private final SettingGroup sgGeneral = settings.getDefaultGroup();   // 挖掘（Meteor 默认组）
+    private final SettingGroup sgBypass = settings.createGroup("绕过");
+    private final SettingGroup sgSwing = settings.createGroup("挥手");
+    private final SettingGroup sgSwitch = settings.createGroup("切换");
+    private final SettingGroup sgRebreak = settings.createGroup("重挖");
+    private final SettingGroup sgRender = settings.createGroup("渲染设置");
     public static GhostMine INSTANCE;
 
-    // ==================== 基本设置 ====================
+    // ==================== 挖掘 ====================
 
     public Setting<Integer> range = sgGeneral
         .add(
@@ -94,15 +101,6 @@ public class GhostMine extends Module {
                 .defaultValue(true)
                 .build()
         );
-    public Setting<Double> speed = sgGeneral
-        .add(
-            new DoubleSetting.Builder()
-                .name("挖掘速度")
-                .description("控制挖掘方块的速度倍率")
-                .sliderRange(0.65, 1.0)
-                .defaultValue(0.85)
-                .build()
-        );
     public Setting<Boolean> doubleBreak = sgGeneral
         .add(
             new BoolSetting.Builder()
@@ -111,9 +109,108 @@ public class GhostMine extends Module {
                 .defaultValue(true)
                 .build()
         );
-    public Setting<Boolean> rebreak = sgGeneral
-        .add(new BoolSetting.Builder().name("自动重挖").description("自动重新挖掘已破坏的方块").defaultValue(true).build());
-    public Setting<Integer> rebreakDelay = sgGeneral
+    public Setting<Integer> mineCooldown = sgGeneral
+        .add(
+            new IntSetting.Builder()
+                .name("挖掘冷却")
+                .description("开始一个挖掘后，多少 tick 内点击其他方块直接忽略（适配反作弊的挖掘延迟检查，0 = 关闭）")
+                .defaultValue(6)
+                .min(0)
+                .sliderRange(0, 20)
+                .build()
+        );
+
+    // ==================== 绕过 ====================
+
+    public Setting<Boolean> fastBypass = sgBypass
+        .add(
+            new BoolSetting.Builder()
+                .name("高空包绕过")
+                .description("发送 START 时额外向高空发送一个相同的包")
+                .defaultValue(true)
+                .build()
+        );
+    public Setting<Boolean> bypassGround = sgBypass
+        .add(
+            new BoolSetting.Builder()
+                .name("滞空挖掘绕过")
+                .description("在发送 STOP 前微调 Y 坐标")
+                .defaultValue(false)
+                .build()
+        );
+
+    // ==================== 挥手 ====================
+
+    public Setting<Boolean> swingStart = sgSwing
+        .add(
+            new BoolSetting.Builder()
+                .name("挖掘开始挥手")
+                .description("挖掘开始时挥手。勾选：挥手动画+swing 包发给服务器（其他玩家可见）；不勾选：只有本地挥手动画，不发包")
+                .defaultValue(true)
+                .build()
+        );
+    public Setting<Boolean> swingEnd = sgSwing
+        .add(
+            new BoolSetting.Builder()
+                .name("挖掘结束挥手")
+                .description("挖掘结束时挥手。勾选：挥手动画+swing 包发给服务器（其他玩家可见）；不勾选：只有本地挥手动画，不发包")
+                .defaultValue(true)
+                .build()
+        );
+
+    // ==================== 切换 ====================
+
+    public Setting<Integer> switchDamage = sgSwitch
+        .add(
+            new IntSetting.Builder()
+                .name("切换工具阈值")
+                .description("方块挖掘进度达到此百分比时切到最佳工具，并发 STOP 包尝试挖掉方块")
+                .defaultValue(95)
+                .min(1)
+                .sliderMax(100)
+                .build()
+        );
+    public Setting<SwitchBackMode> switchBackMode = sgSwitch
+        .add(new EnumSetting.Builder<SwitchBackMode>()
+            .name("切工具模式")
+            .description("切到最佳工具后如何切回原来的槽位")
+            .defaultValue(SwitchBackMode.DELAYED)
+            .build()
+        );
+    public Setting<Integer> switchBackDelay = sgSwitch
+        .add(
+            new IntSetting.Builder()
+                .name("延迟")
+                .description("延迟切回：切工具后多少 tick 切回原来的槽位")
+                .defaultValue(1)
+                .sliderRange(1, 10)
+                .visible(() -> switchBackMode.get() == SwitchBackMode.DELAYED)
+                .build()
+        );
+    public Setting<Boolean> switchBackOnBreak = sgSwitch
+        .add(
+            new BoolSetting.Builder()
+                .name("方块破坏切回")
+                .description("延迟切回：方块被破坏后不等延迟，立即切回原来的槽位")
+                .defaultValue(false)
+                .visible(() -> switchBackMode.get() == SwitchBackMode.DELAYED)
+                .build()
+        );
+    public Setting<Boolean> loopStop = sgSwitch
+        .add(
+            new BoolSetting.Builder()
+                .name("循环发包")
+                .description("延迟切回：等待切回期间每 tick 都发 STOP 包尝试挖掘（方块被破坏后停发）")
+                .defaultValue(true)
+                .visible(() -> switchBackMode.get() == SwitchBackMode.DELAYED)
+                .build()
+        );
+
+    // ==================== 重挖 ====================
+
+    public Setting<Boolean> rebreak = sgRebreak
+        .add(new BoolSetting.Builder().name("自动重挖").description("方块被破坏后，该位置再次出现方块时自动重新挖掘").defaultValue(true).build());
+    public Setting<Integer> rebreakDelay = sgRebreak
         .add(
             new IntSetting.Builder()
                 .name("重挖延迟")
@@ -123,119 +220,19 @@ public class GhostMine extends Module {
                 .visible(rebreak::get)
                 .build()
         );
-    public Setting<SwapMode> swapModeSetting = sgGeneral
-        .add(new EnumSetting.Builder<SwapMode>()
-            .name("切换模式")
-            .description("选择工具切换的方式")
-            .defaultValue(SwapMode.NORMAL)
-            .visible(() -> false)
-            .build()
-        );
-
-    // ==================== 绕过设置 ====================
-
-    public Setting<Boolean> fastBypass = sgGeneral
-        .add(
-            new BoolSetting.Builder()
-                .name("高空包绕过")
-                .description("发送 START 时额外向高空发送一个相同的包")
-                .defaultValue(true)
-                .build()
-        );
-    public Setting<Boolean> bypassGround = sgGeneral
-        .add(
-            new BoolSetting.Builder()
-                .name("滞空挖掘绕过")
-                .description("在发送 STOP 前微调 Y 坐标")
-                .defaultValue(false)
-                .build()
-        );
-    public Setting<Boolean> swingStart = sgGeneral
-        .add(
-            new BoolSetting.Builder()
-                .name("挖掘开始挥手")
-                .description("挖掘开始时挥手。勾选：挥手动画+swing 包发给服务器（其他玩家可见）；不勾选：只有本地挥手动画，不发包")
-                .defaultValue(true)
-                .build()
-        );
-    public Setting<Boolean> swingEnd = sgGeneral
-        .add(
-            new BoolSetting.Builder()
-                .name("挖掘结束挥手")
-                .description("挖掘结束时挥手。勾选：挥手动画+swing 包发给服务器（其他玩家可见）；不勾选：只有本地挥手动画，不发包")
-                .defaultValue(true)
-                .build()
-        );
-
-    // ==================== 工具切换设置 ====================
-
-    public Setting<Integer> switchDamage = sgGeneral
-        .add(
-            new IntSetting.Builder()
-                .name("切换工具阈值")
-                .description("挖掘进度达到此百分比时切换最佳工具")
-                .defaultValue(95)
-                .min(0)
-                .sliderMax(100)
-                .build()
-        );
-    public Setting<Boolean> switchBack = sgGeneral
-        .add(
-            new BoolSetting.Builder()
-                .name("切回工具")
-                .description("切换工具后自动切回原来的槽位")
-                .defaultValue(true)
-                .build()
-        );
-    public Setting<Integer> switchBackDelay = sgGeneral
-        .add(
-            new IntSetting.Builder()
-                .name("切回延迟")
-                .description("切换工具后延迟多少 tick 再切回原来的槽位")
-                .defaultValue(1)
-                .sliderRange(1, 10)
-                .visible(switchBack::get)
-                .build()
-        );
-
-    // ==================== 失败保护设置 ====================
-
-    public Setting<Integer> maxBreaks = sgGeneral
+    public Setting<Integer> maxBreaks = sgRebreak
         .add(
             new IntSetting.Builder()
                 .name("放弃等待")
-                .description("方块挖掘完成后，等待服务器确认破坏的 tick 数（20 tick = 1 秒），超时仍未确认则放弃该方块")
+                .description("进度走完后，等待服务器确认破坏的 tick 数（20 tick = 1 秒），超时仍未确认则放弃该方块")
                 .defaultValue(60)
                 .min(10)
                 .sliderRange(10, 300)
                 .build()
         );
 
-    // ==================== 秒挖设置 ====================
-
-    public Setting<Boolean> instantMine = sgGeneral
-        .add(
-            new BoolSetting.Builder()
-                .name("秒挖")
-                .description("完成后持续发送 STOP 触发服务端破坏")
-                .defaultValue(false)
-                .build()
-        );
-    public Setting<Integer> instantDelay = sgGeneral
-        .add(
-            new IntSetting.Builder()
-                .name("秒挖间隔")
-                .description("秒挖模式下 STOP 包的发送间隔(ms)")
-                .defaultValue(50)
-                .min(0)
-                .sliderMax(500)
-                .visible(instantMine::get)
-                .build()
-        );
-
     // ==================== 渲染设置 ====================
 
-    private final SettingGroup sgRender = settings.createGroup("渲染设置");
     private final Setting<Boolean> render = sgRender
         .add(
             new BoolSetting.Builder()
@@ -287,16 +284,16 @@ public class GhostMine extends Module {
 
     // ==================== 内部状态 ====================
 
-    private final List<BlockPos> breakBlocks = new ArrayList<>();
     public static BlockDate firstBlockDate = null;
     public static BlockDate secondBlockDate = null;
     private BlockDate rebreakBlockDate = null;
-    public static BlockDate tempBlockDate = null;
     private int rebreakTicks = 0;
-    private int breakAttempts = 0;
+    /** 挖掘冷却剩余 tick（>0 时忽略对其他方块的点击） */
+    private int mineCooldownTicks = 0;
+    /** 工具切换状态：是否已切到最佳工具等待切回、等待了多少 tick、本次切换要破坏的方块 */
     private boolean hasSwitch = false;
     private int switchTicks = 0;
-    private long lastInstantTime = 0;
+    private final List<BlockDate> switchTargets = new ArrayList<>();
     // 挖掘挥手包控制：allow=放行下一个 swing 包，block=拦截下一个 swing 包（由「挖掘开始/结束挥手」设置决定，
     // 不依赖瞄准状态，避免挖掘开始/结束瞬间没瞄准方块时包漏拦/漏放）
     private boolean allowSwingPacket = false;
@@ -332,12 +329,11 @@ public class GhostMine extends Module {
         firstBlockDate = null;
         secondBlockDate = null;
         rebreakBlockDate = null;
-        tempBlockDate = null;
         rebreakTicks = 0;
-        breakAttempts = 0;
+        mineCooldownTicks = 0;
         hasSwitch = false;
         switchTicks = 0;
-        lastInstantTime = 0;
+        switchTargets.clear();
     }
 
     @Override
@@ -345,9 +341,9 @@ public class GhostMine extends Module {
         firstBlockDate = null;
         secondBlockDate = null;
         rebreakBlockDate = null;
-        tempBlockDate = null;
         rebreakTicks = 0;
-        breakAttempts = 0;
+        mineCooldownTicks = 0;
+        switchTargets.clear();
 
         // 恢复工具栏
         if (hasSwitch) {
@@ -360,8 +356,12 @@ public class GhostMine extends Module {
 
     @EventHandler
     public void onTick(TickEvent.Pre event) {
+        if (mineCooldownTicks > 0) mineCooldownTicks--;
         rangeCheck();
         rebreakTicks++;
+
+        // 切工具后的切回/循环发包。放在挖掘逻辑之前：切回计时不包含切换发生的那个 tick
+        handleSwitchBack();
 
         if (!doubleBreak.get()) {
             tickSingle();
@@ -369,282 +369,181 @@ public class GhostMine extends Module {
             tickDouble();
         }
 
-        // 工具切回计时（不依赖当前挖掘目标，挖掘结束后也能切回）
-        handleToolSwitchBack();
+        // 重挖逻辑
+        handleRebreak();
     }
 
     // ==================== 单挖模式 ====================
 
     private void tickSingle() {
-        // 1. 清除已变为空气的方块
-        if (firstBlockDate != null && mc.level.getBlockState(firstBlockDate.pos).getBlock() == Blocks.AIR) {
+        // 1. 已被服务端破坏 → 清理并记录重挖位置
+        if (firstBlockDate != null && isBroken(firstBlockDate.pos)) {
+            recordRebreak(firstBlockDate);
             firstBlockDate = null;
         }
 
-        // 2. 开始挖掘（只发 START）
+        // 2. 开始挖掘（发 START）
         if (firstBlockDate != null && !firstBlockDate.isMining) {
             mineBlock(firstBlockDate.pos, firstBlockDate.direction);
             firstBlockDate.isMining = true;
         }
 
-        // 3. 检测方块是否已被服务端破坏（自动重挖）
-        if (firstBlockDate != null
-            && firstBlockDate.isMining
-            && mc.level.getBlockState(firstBlockDate.pos).getBlock() == Blocks.AIR
-            && rebreak.get()) {
-            firstBlockDate.isBreaked = true;
-        }
+        // 3. 进度累加 + 达到阈值切工具/发 STOP
+        tickTarget(firstBlockDate);
 
-        // 4. 累加进度
-        if (firstBlockDate != null && firstBlockDate.isMining && !firstBlockDate.done) {
-            firstBlockDate.freshProgress();
-        }
-
-        // 5. 完成挖掘 → 发送 STOP（带绕过）
-        if (firstBlockDate != null && !firstBlockDate.isBreaked && firstBlockDate.isMining && firstBlockDate.done) {
-            // 工具切换：发送 STOP 前切换到最佳工具
-            if (swapModeSetting.get() == SwapMode.SILENT) {
-                int slot = getBestTool(mc.level.getBlockState(firstBlockDate.pos));
-                if (slot != -1) {
-                    InvUtils.swap(slot, true);
-                }
-            }
-
-            sendStop(firstBlockDate.pos, firstBlockDate.direction);
-
-            if (swapModeSetting.get() == SwapMode.SILENT) {
-                InvUtils.swapBack();
-                hasSwitch = false;
-                switchTicks = 0;
-            }
-
-            if (firstBlockDate.rebreak) {
-                rebreakBlockDate = firstBlockDate;
-            } else {
-                rebreakBlockDate = null;
-            }
-
-            firstBlockDate = null;
-            breakAttempts = 0;
-        }
-
-        // 6. 失败计数
-        handleBreakAttempts();
-
-        // 7. 工具切换时机优化
-        handleToolSwitch(firstBlockDate);
-
-        // 8. 秒挖模式
-        handleInstantMine(firstBlockDate);
-
-        // 9. 重挖逻辑
-        handleRebreak();
+        // 4. 超时未确认破坏 → 放弃
+        if (firstBlockDate != null && giveUp(firstBlockDate)) firstBlockDate = null;
     }
 
     // ==================== 双挖模式 ====================
 
     private void tickDouble() {
-        // 1. 清除已变为空气的方块
-        if (firstBlockDate != null && mc.level.getBlockState(firstBlockDate.pos).getBlock() == Blocks.AIR) {
+        // 1. 已被服务端破坏 → 清理并记录重挖位置
+        if (firstBlockDate != null && isBroken(firstBlockDate.pos)) {
+            recordRebreak(firstBlockDate);
             firstBlockDate = null;
         }
-        if (secondBlockDate != null && mc.level.getBlockState(secondBlockDate.pos).getBlock() == Blocks.AIR) {
+        if (secondBlockDate != null && isBroken(secondBlockDate.pos)) {
+            recordRebreak(secondBlockDate);
             secondBlockDate = null;
         }
 
-        // 2. 开始挖掘（mineBlock 内部会发 START + 延迟 STOP）
-        if (firstBlockDate != null && !firstBlockDate.isMining && secondBlockDate == null) {
+        // 2. 开始挖掘：主挖先发 START，副挖后发
+        //    服务端的挖掘槽位最后停在副挖上：副挖靠阈值 STOP 破坏，主挖靠 START 时占住的延迟破坏槽位破坏
+        if (firstBlockDate != null && !firstBlockDate.isMining) {
             mineBlock(firstBlockDate.pos, firstBlockDate.direction);
             firstBlockDate.isMining = true;
         }
-
         if (secondBlockDate != null && !secondBlockDate.isMining) {
-            // 确保 first 也在挖掘
-            if (firstBlockDate != null && !firstBlockDate.isMining) {
-                mineBlock(firstBlockDate.pos, firstBlockDate.direction);
-                firstBlockDate.isMining = true;
-            }
-
             mineBlock(secondBlockDate.pos, secondBlockDate.direction);
             secondBlockDate.isMining = true;
         }
 
-        // 3. 累加进度
-        if (firstBlockDate != null && firstBlockDate.isMining && !firstBlockDate.done) {
-            firstBlockDate.freshProgress();
+        // 3. 进度累加 + 达到阈值切工具/发 STOP
+        tickTarget(firstBlockDate);
+        tickTarget(secondBlockDate);
+
+        // 4. 超时未确认破坏 → 放弃
+        if (firstBlockDate != null && giveUp(firstBlockDate)) firstBlockDate = null;
+        if (secondBlockDate != null && giveUp(secondBlockDate)) secondBlockDate = null;
+    }
+
+    // ==================== 挖掘目标处理 ====================
+
+    /**
+     * 单个目标的每 tick 处理
+     * <p>
+     * 进度按原版挖掘速度累加；进度达到「切换工具阈值」时切到最佳工具并发 STOP 尝试破坏：
+     * 服务端收到 STOP 会用「当前手持工具」重算进度，工具越好进度越高，
+     * 进度 ≥ 0.7 服务端立即破坏，否则由服务端的延迟破坏补完。
+     */
+    private void tickTarget(BlockDate block) {
+        if (block == null || !block.isMining) return;
+
+        if (!block.done) block.freshProgress();
+
+        if (!block.switched && block.progress * 100.0 >= switchDamage.get()) {
+            block.switched = true;
+
+            // 方块已经不在了：不用切工具/发包
+            if (isBroken(block.pos)) return;
+
+            switchToBestTool(block);
+            sendStop(block.pos, block.direction);
+
+            // 立即切回：同一 tick 内按 切工具 → STOP → 切回 的顺序发完，这样不重置攻击冷却
+            if (switchBackMode.get() == SwitchBackMode.IMMEDIATE) switchBackNow();
         }
-        if (secondBlockDate != null && secondBlockDate.isMining && !secondBlockDate.done) {
-            secondBlockDate.freshProgress();
-        }
-        if (tempBlockDate != null && tempBlockDate.isMining && !tempBlockDate.done) {
-            tempBlockDate.freshProgress();
-        }
-        if (tempBlockDate != null && tempBlockDate.done) {
-            tempBlockDate = null;
+    }
+
+    /** 进度走完后等待服务端确认破坏，等待超过「放弃等待」则放弃该方块 */
+    private boolean giveUp(BlockDate block) {
+        if (!block.done) return false;
+
+        block.timeoutTicks++;
+        if (block.timeoutTicks < maxBreaks.get()) return false;
+
+        recordRebreak(block);
+        return true;
+    }
+
+    /** 记录重挖位置（自动重挖开启时） */
+    private void recordRebreak(BlockDate block) {
+        if (!rebreak.get() || !block.rebreak) return;
+        rebreakBlockDate = new BlockDate(block.pos, block.direction);
+    }
+
+    /** 方块是否已被破坏（变成空气） */
+    private boolean isBroken(BlockPos pos) {
+        return mc.level.getBlockState(pos).getBlock() == Blocks.AIR;
+    }
+
+    // ==================== 工具切换 ====================
+
+    /** 切到该方块的最佳工具（热栏里没有合适的工具时不切） */
+    private void switchToBestTool(BlockDate block) {
+        int slot = getBestTool(mc.level.getBlockState(block.pos));
+        if (slot == -1 || slot == mc.player.getInventory().getSelectedSlot()) return;
+
+        // 不切回：不需要记录原槽位
+        if (switchBackMode.get() == SwitchBackMode.NONE) {
+            InvUtils.swap(slot, false);
+            return;
         }
 
-        // 4. 主挖完成（无论副挖是否完成）→ 发送真实 STOP
-        if (firstBlockDate != null && !firstBlockDate.isBreaked && firstBlockDate.isMining && firstBlockDate.done) {
-            // 工具切换
-            if (swapModeSetting.get() == SwapMode.SILENT) {
-                int slotx = getBestTool(mc.level.getBlockState(firstBlockDate.pos));
-                if (slotx != -1) InvUtils.swap(slotx, true);
-            }
-            if (swapModeSetting.get() == SwapMode.NORMAL) {
-                int firstSlot = getBestTool(mc.level.getBlockState(firstBlockDate.pos));
-                int secondSlot = secondBlockDate != null
-                    ? getBestTool(mc.level.getBlockState(secondBlockDate.pos)) : -1;
+        InvUtils.swap(slot, true);
+        hasSwitch = true;
+        switchTicks = 0;
+        switchTargets.add(block);
+    }
 
-                // 选择要切到的目标槽位（优先主挖，两把工具时优先镐）
-                int targetSlot = -1;
-                if (firstSlot == -1 && secondSlot != -1) {
-                    targetSlot = secondSlot;
-                } else if (firstSlot != -1 && secondSlot == -1) {
-                    targetSlot = firstSlot;
-                } else if (firstSlot != -1 && secondSlot != -1) {
-                    if (firstSlot == secondSlot) {
-                        targetSlot = firstSlot;
-                    } else if (mc.player.getInventory().getItem(firstSlot).is(ItemTags.PICKAXES)) {
-                        targetSlot = firstSlot;
-                    } else if (mc.player.getInventory().getItem(secondSlot).is(ItemTags.PICKAXES)) {
-                        targetSlot = secondSlot;
-                    }
+    /** 切回原来的槽位 */
+    private void switchBackNow() {
+        if (!hasSwitch) return;
+
+        InvUtils.swapBack();
+        hasSwitch = false;
+        switchTicks = 0;
+        switchTargets.clear();
+    }
+
+    /**
+     * 切工具后的处理（延迟切回）
+     * <p>
+     * - 循环发包：等待切回期间每 tick 给还没被破坏的方块补 STOP 包（方块被破坏后停发）
+     * - 方块破坏切回：方块被破坏后不等延迟直接切回
+     * - 到达「延迟」后切回
+     */
+    private void handleSwitchBack() {
+        if (!hasSwitch) return;
+
+        switchTargets.removeIf(block -> isBroken(block.pos));
+
+        switch (switchBackMode.get()) {
+            // 立即切回在切工具时已经同 tick 完成
+            case IMMEDIATE -> switchBackNow();
+            case DELAYED -> {
+                if (switchBackOnBreak.get() && switchTargets.isEmpty()) {
+                    switchBackNow();
+                    return;
                 }
 
-                // 切到目标工具；用 swap(true) 保留旧槽位记录，稍后由 handleToolSwitchBack 延迟切回
-                if (targetSlot != -1 && targetSlot != mc.player.getInventory().getSelectedSlot()) {
-                    InvUtils.swap(targetSlot, true);
-                    hasSwitch = true;
-                    switchTicks = 0;
+                switchTicks++;
+                if (switchTicks >= switchBackDelay.get()) {
+                    switchBackNow();
+                    return;
+                }
+
+                if (loopStop.get()) {
+                    for (BlockDate block : switchTargets) sendStopPacket(block.pos, block.direction);
                 }
             }
-
-            // 主挖发真实 STOP（带绕过）
-            sendStop(firstBlockDate.pos, firstBlockDate.direction);
-
-            if (firstBlockDate.rebreak) {
-                rebreakBlockDate = new BlockDate(firstBlockDate.pos, firstBlockDate.direction);
-            } else {
-                rebreakBlockDate = null;
-            }
-
-            firstBlockDate = null;
-            breakAttempts = 0;
-            if (swapModeSetting.get() == SwapMode.SILENT) {
-                InvUtils.swapBack();
-                hasSwitch = false;
-                switchTicks = 0;
-            }
+            // 不切回：保持最佳工具
+            case NONE -> { }
         }
-
-        // 5. 副挖完成 → 补真实 STOP 触发服务端破坏
-        //    服务端挖掘槽位只有一个，最后发过 START 的副挖才是当前 destroyPos（主挖的 STOP 会被忽略），
-        //    副挖不补这个 STOP 服务端就永远不会破坏它 —— 这正是「双挖只能挖掉一个方块」的原因
-        if (secondBlockDate != null && !secondBlockDate.isBreaked && secondBlockDate.isMining && secondBlockDate.done) {
-            // 工具切换：服务端收到 STOP 时用「当前手持工具」重算进度，先切到最佳工具保证进度达标(≥0.7)
-            if (swapModeSetting.get() == SwapMode.SILENT) {
-                int secondSlot = getBestTool(mc.level.getBlockState(secondBlockDate.pos));
-                if (secondSlot != -1) InvUtils.swap(secondSlot, true);
-            } else if (!hasSwitch) {
-                int secondSlot = getBestTool(mc.level.getBlockState(secondBlockDate.pos));
-                if (secondSlot != -1 && secondSlot != mc.player.getInventory().getSelectedSlot()) {
-                    InvUtils.swap(secondSlot, true);
-                    hasSwitch = true;
-                    switchTicks = 0;
-                }
-            }
-
-            sendStop(secondBlockDate.pos, secondBlockDate.direction);
-
-            // 记录重挖信息
-            if (secondBlockDate.rebreak) {
-                rebreakBlockDate = new BlockDate(secondBlockDate.pos, secondBlockDate.direction);
-            }
-
-            secondBlockDate = null;
-            breakAttempts = 0;
-
-            if (swapModeSetting.get() == SwapMode.SILENT) {
-                InvUtils.swapBack();
-                hasSwitch = false;
-                switchTicks = 0;
-            }
-        }
-
-        // 6. 失败计数
-        handleBreakAttempts();
-
-        // 7. 工具切换时机优化
-        handleToolSwitch(firstBlockDate);
-
-        // 8. 秒挖模式
-        handleInstantMine(firstBlockDate);
-
-        // 9. 重挖逻辑
-        handleRebreak();
     }
 
     // ==================== 辅助方法 ====================
-
-    /**
-     * 失败计数与自动放弃
-     * 当方块完成多次但仍未被服务端破坏时，放弃挖掘
-     */
-    private void handleBreakAttempts() {
-        BlockDate block = firstBlockDate != null ? firstBlockDate : secondBlockDate;
-        if (block == null || !block.done) return;
-
-        breakAttempts++;
-        if (breakAttempts >= maxBreaks.get()) {
-            firstBlockDate = null;
-            secondBlockDate = null;
-            rebreakBlockDate = null;
-            breakAttempts = 0;
-        }
-    }
-
-    /**
-     * 工具切换：进度达到阈值时切换最佳工具
-     */
-    private void handleToolSwitch(BlockDate blockDate) {
-        if (blockDate == null || !blockDate.isMining || blockDate.done) return;
-
-        double progressPercent = blockDate.progress * (1.0 / speed.get()) * 100;
-        if (progressPercent >= switchDamage.get() && !hasSwitch) {
-            int bestSlot = getBestTool(mc.level.getBlockState(blockDate.pos));
-            if (bestSlot != -1) {
-                InvUtils.swap(bestSlot, true);
-                hasSwitch = true;
-                switchTicks = 0;
-            }
-        }
-    }
-
-    /**
-     * 工具切回：切换工具后延迟「切回延迟」tick 恢复原来的槽位
-     */
-    private void handleToolSwitchBack() {
-        if (!hasSwitch) return;
-        if (!switchBack.get()) return;
-
-        switchTicks++;
-        if (switchTicks >= switchBackDelay.get()) {
-            InvUtils.swapBack();
-            hasSwitch = false;
-        }
-    }
-
-    /**
-     * 秒挖模式：完成后持续发送 STOP 触发服务端破坏
-     */
-    private void handleInstantMine(BlockDate blockDate) {
-        if (!instantMine.get() || blockDate == null || !blockDate.done) return;
-        if (System.currentTimeMillis() - lastInstantTime < instantDelay.get()) return;
-        if (!mc.level.isEmptyBlock(blockDate.pos)) {
-            sendStop(blockDate.pos, blockDate.direction);
-            lastInstantTime = System.currentTimeMillis();
-        }
-    }
 
     /**
      * 停止挖掘指定位置（高空包抵消）
@@ -679,26 +578,29 @@ public class GhostMine extends Module {
      */
     private void handleRebreak() {
         if (rebreakBlockDate == null || firstBlockDate != null || secondBlockDate != null) return;
+        if (hasSwitch) return;   // 切工具还没切回，等切回再重挖（避免换槽位互相干扰）
         if (!rebreak.get() || rebreakTicks < rebreakDelay.get() * 4) return;
 
         BlockState state = mc.level.getBlockState(rebreakBlockDate.pos);
         if (state.getBlock() == Blocks.AIR || state.getBlock() == Blocks.WATER || state.getBlock() == Blocks.LAVA)
             return;
 
+        // 切到最佳工具并沿用「切工具模式」处理切回：服务端收到 STOP 用当前手持工具重算进度
         int slotx = getBestTool(state);
-        if (slotx != -1 && slotx != mc.player.getInventory().getSelectedSlot() && swapModeSetting.get() == SwapMode.SILENT) {
-            InvUtils.swap(slotx, true);
-        }
-        if (slotx != -1 && slotx != mc.player.getInventory().getSelectedSlot() && swapModeSetting.get() == SwapMode.NORMAL) {
-            InvUtils.swap(slotx, false);
+        if (slotx != -1 && slotx != mc.player.getInventory().getSelectedSlot()) {
+            if (switchBackMode.get() == SwitchBackMode.NONE) {
+                InvUtils.swap(slotx, false);
+            } else {
+                InvUtils.swap(slotx, true);
+                hasSwitch = true;
+                switchTicks = 0;
+                switchTargets.add(rebreakBlockDate);
+                if (switchBackMode.get() == SwitchBackMode.IMMEDIATE) switchBackNow();
+            }
         }
 
-        mc.getConnection().send(new ServerboundPlayerActionPacket(ServerboundPlayerActionPacket.Action.STOP_DESTROY_BLOCK, rebreakBlockDate.pos, rebreakBlockDate.direction));
+        sendStopPacket(rebreakBlockDate.pos, rebreakBlockDate.direction);
         rebreakTicks = 0;
-
-        if (slotx != -1 && swapModeSetting.get() == SwapMode.SILENT) {
-            InvUtils.swapBack();
-        }
     }
 
     // ==================== 发包方法 ====================
@@ -742,6 +644,14 @@ public class GhostMine extends Module {
     }
 
     /**
+     * 只发一个 STOP 包（循环发包 / 重挖用，不带挥手与绕过）
+     */
+    private void sendStopPacket(BlockPos pos, Direction direction) {
+        mc.gameMode.startPrediction(mc.level, id ->
+            new ServerboundPlayerActionPacket(ServerboundPlayerActionPacket.Action.STOP_DESTROY_BLOCK, pos, direction, id));
+    }
+
+    /**
      * 发送 STOP 包 - 带绕过技术
      * 1. 滞空挖掘绕过：微调 Y 坐标
      * 2. 高空 STOP 抵消
@@ -765,8 +675,7 @@ public class GhostMine extends Module {
         }
 
         // 主 STOP 包（使用 sequenced packet 保证顺序正确）
-        mc.gameMode.startPrediction(mc.level, id ->
-            new ServerboundPlayerActionPacket(ServerboundPlayerActionPacket.Action.STOP_DESTROY_BLOCK, pos, direction, id));
+        sendStopPacket(pos, direction);
 
         // 挖掘结束挥手：勾选「挖掘结束挥手」时 swing 包强制放行（服务器可见），不勾选强制拦截（只有本地动画）
         if (swingEnd.get()) allowSwingPacket = true;
@@ -839,28 +748,36 @@ public class GhostMine extends Module {
         event.cancel();
 
         if (unbreakableBlocks.contains(mc.level.getBlockState(pos).getBlock())
-            || breakBlocks.contains(pos)
             || PlayerUtils.distanceTo(pos) > range.get().intValue()) {
             return;
         }
 
-        if ((firstBlockDate == null || !pos.equals(firstBlockDate.pos))
-            && (secondBlockDate == null || !pos.equals(secondBlockDate.pos))) {
-
-            if (firstBlockDate != null && !pos.equals(firstBlockDate.pos) && doubleBreak.get()) {
-                if (secondBlockDate == null || !pos.equals(secondBlockDate.pos)) {
-                    secondBlockDate = new BlockDate(pos, direction);
-                    firstBlockDate.progress = firstBlockDate.progress - (1.0 - speed.get()) * 0.7;
-                }
-            } else if (firstBlockDate == null || !pos.equals(firstBlockDate.pos)) {
-                firstBlockDate = new BlockDate(pos, direction);
-            }
-
-            // 双挖时立即发 START 给新方块
-            if (doubleBreak.get()) {
-                mineBlock(pos, direction);
-            }
+        // 已经在挖这个方块
+        if ((firstBlockDate != null && pos.equals(firstBlockDate.pos))
+            || (secondBlockDate != null && pos.equals(secondBlockDate.pos))) {
+            return;
         }
+
+        // 挖掘冷却：开始一个挖掘后的一段时间内忽略其他方块，适配反作弊的挖掘延迟检查
+        if (mineCooldownTicks > 0) return;
+
+        BlockDate target;
+        if (firstBlockDate == null) {
+            firstBlockDate = new BlockDate(pos, direction);
+            target = firstBlockDate;
+        } else if (doubleBreak.get()) {
+            // 双挖：放到副挖槽位（原来有副挖则直接替换）
+            secondBlockDate = new BlockDate(pos, direction);
+            target = secondBlockDate;
+        } else {
+            // 单挖：换成新方块
+            firstBlockDate = new BlockDate(pos, direction);
+            target = firstBlockDate;
+        }
+
+        mineBlock(target.pos, target.direction);
+        target.isMining = true;
+        mineCooldownTicks = mineCooldown.get();
     }
 
     // ==================== 渲染 ====================
@@ -875,10 +792,6 @@ public class GhostMine extends Module {
 
         if (secondBlockDate != null && mc.level.getBlockState(secondBlockDate.pos).getBlock() != Blocks.AIR) {
             renderBlock(event, secondBlockDate.pos, secondBlockDate.progress);
-        }
-
-        if (tempBlockDate != null && mc.level.getBlockState(tempBlockDate.pos).getBlock() != Blocks.AIR) {
-            renderBlock(event, tempBlockDate.pos, tempBlockDate.progress);
         }
 
         if (rebreak.get()
@@ -897,9 +810,7 @@ public class GhostMine extends Module {
     }
 
     private void renderBlock(Render3DEvent event, BlockPos blockPos, double rawProgress) {
-        double progress = rawProgress * (1.0 / speed.get());
-        if (progress > 1.0) progress = 1.0;
-        if (progress < 0.0) progress = 0.0;
+        double progress = Mth.clamp(rawProgress, 0.0, 1.0);
 
         double x1 = blockPos.getX() + (0.5 - 0.5 * progress);
         double y1 = blockPos.getY() + (0.5 - 0.5 * progress);
@@ -976,7 +887,10 @@ public class GhostMine extends Module {
         public double progress;
         public BlockState blockState;
         public boolean isMining = false;
-        public boolean isBreaked = false;
+        /** 是否已经达到切换工具阈值（切过工具、发过 STOP） */
+        public boolean switched = false;
+        /** 进度走完后等待服务端确认破坏的 tick 数 */
+        public int timeoutTicks = 0;
         public boolean rebreak = true;
 
         public BlockDate(BlockPos pos, Direction direction) {
@@ -999,7 +913,7 @@ public class GhostMine extends Module {
         /**
          * 真实进度模拟
          * 使用 BlockUtils.getBreakDelta 累加进度（已含工具、附魔、药水效果）
-         * 额外处理：空中挖掘惩罚
+         * 额外处理：空中挖掘惩罚（原版在空中挖掘速度降到 1/5）
          */
         public void freshProgress() {
             // 瞬间破坏的方块（硬度为0）
@@ -1020,17 +934,30 @@ public class GhostMine extends Module {
                 delta *= 0.2;
             }
 
-            if (progress <= 1.0 * GhostMine.this.speed.get()) {
-                progress += delta;
-            } else {
+            // 原版挖掘速度：进度累加到 1.0 表示挖完
+            progress += delta;
+            if (progress >= 1.0) {
                 done = true;
                 progress = 1.0;
             }
         }
     }
 
-    public static enum SwapMode {
-        SILENT,
-        NORMAL;
+    /** 切工具后如何切回原来的槽位 */
+    public enum SwitchBackMode {
+        IMMEDIATE("立即切回"),
+        DELAYED("延迟切回"),
+        NONE("不切回");
+
+        private final String displayName;
+
+        SwitchBackMode(String displayName) {
+            this.displayName = displayName;
+        }
+
+        @Override
+        public String toString() {
+            return displayName;
+        }
     }
 }
