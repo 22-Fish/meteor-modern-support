@@ -74,6 +74,9 @@ import static meteordevelopment.meteorclient.MeteorClient.mc;
  * 4. 绕过技术：高空包、滞空挖掘微调、sequenced packet（startPrediction）
  * 5. 挖掘冷却：开始一个挖掘后的一段时间内忽略其他方块，适配反作弊的挖掘延迟检查
  * 6. 超时放弃：进度走完后等待服务端确认破坏，超时仍未被破坏则放弃该方块
+ * 7. 自动重挖：服务端破坏方块后 destroyPos 仍然指着那个位置（只有新的 START 才会改），而进度是
+ *    「当前手持工具速度 × (gameTicks - destroyProgressStart + 1)」，已经过了很久再补 STOP 会直接 ≥ 0.7，
+ *    所以重挖位置再次出现方块时不需要 START，切最佳工具补一个 STOP 就能瞬间破坏
  */
 public class GhostMine extends Module {
     private final SettingGroup sgGeneral = settings.getDefaultGroup();   // 挖掘（Meteor 默认组）
@@ -226,7 +229,8 @@ public class GhostMine extends Module {
         .add(
             new IntSetting.Builder()
                 .name("放弃等待")
-                .description("进度走完后，等待服务器确认破坏的 tick 数（20 tick = 1 秒），超时仍未确认则放弃该方块")
+                .description("超过这么多 tick 还没挖掉就放弃（20 tick = 1 秒）：重挖位置出现方块后这么久仍未挖掉则删除该重挖位置；"
+                    + "正在挖的方块在进度走完后等不到服务端确认也会放弃")
                 .defaultValue(60)
                 .min(10)
                 .sliderRange(10, 300)
@@ -283,13 +287,32 @@ public class GhostMine extends Module {
                 .defaultValue(new SettingColor(255, 192, 203, 255))
                 .build()
         );
+    private final Setting<SettingColor> rebreakSideColor = sgRender
+        .add(
+            new ColorSetting.Builder()
+                .name("重挖侧面颜色")
+                .description("重挖位置半透明框的侧面颜色")
+                .defaultValue(new SettingColor(255, 192, 203, 80))
+                .build()
+        );
+    private final Setting<SettingColor> rebreakLineColor = sgRender
+        .add(
+            new ColorSetting.Builder()
+                .name("重挖边框颜色")
+                .description("重挖位置半透明框的边框颜色")
+                .defaultValue(new SettingColor(255, 192, 203, 255))
+                .build()
+        );
 
     // ==================== 内部状态 ====================
 
     public static BlockDate firstBlockDate = null;
     public static BlockDate secondBlockDate = null;
     private BlockDate rebreakBlockDate = null;
+    /** 重挖位置上的方块已经连续出现了多少 tick（方块消失/换新位置时清零） */
     private int rebreakTicks = 0;
+    /** 本轮重挖是否已经发过 STOP（方块消失后重置，避免每 tick 重复切工具/重复发包） */
+    private boolean rebreakTried = false;
     /** 挖掘冷却剩余 tick（>0 时忽略对其他方块的点击） */
     private int mineCooldownTicks = 0;
     /** 工具切换状态：是否已切到最佳工具等切回、已等待 tick 数 */
@@ -334,6 +357,7 @@ public class GhostMine extends Module {
         secondBlockDate = null;
         rebreakBlockDate = null;
         rebreakTicks = 0;
+        rebreakTried = false;
         mineCooldownTicks = 0;
         hasSwitch = false;
         switchTicks = 0;
@@ -345,6 +369,7 @@ public class GhostMine extends Module {
         secondBlockDate = null;
         rebreakBlockDate = null;
         rebreakTicks = 0;
+        rebreakTried = false;
         mineCooldownTicks = 0;
 
         // 恢复工具栏
@@ -360,7 +385,6 @@ public class GhostMine extends Module {
     public void onTick(TickEvent.Pre event) {
         if (mineCooldownTicks > 0) mineCooldownTicks--;
         rangeCheck();
-        rebreakTicks++;
 
         // 切工具后的切回/循环发包。放在挖掘逻辑之前：切回计时不包含切换发生的那个 tick
         handleSwitchBack();
@@ -485,6 +509,8 @@ public class GhostMine extends Module {
     private void recordRebreak(BlockDate block) {
         if (!rebreak.get() || !block.rebreak) return;
         rebreakBlockDate = new BlockDate(block.pos, block.direction);
+        rebreakTicks = 0;
+        rebreakTried = false;
     }
 
     /** 方块是否已被破坏（变成空气） */
@@ -620,31 +646,55 @@ public class GhostMine extends Module {
 
     /**
      * 重挖处理
+     * <p>
+     * 原理：服务端破坏方块后 {@code destroyPos} 仍然指着那个位置，而进度是按「当前手持工具速度 ×
+     * (gameTicks - destroyProgressStart + 1)」重算的，时间过去越久越大 —— 所以位置再次出现方块时
+     * 不需要 START，切最佳工具补一个 STOP 就能瞬间挖掉（进度 ≥ 0.7 服务端立即破坏）。
+     * <p>
+     * 时机：方块一出现就立刻收尾（受「重挖延迟」限制，0 = 本 tick）。无条件执行，正在挖别的方块也照样收尾，
+     * 不会去动那些方块的目标/进度，只是额外补一个 STOP。
+     * <p>
+     * 方块出现后超过「放弃等待」这么久仍未挖掉，说明服务端已经不认这个位置了，直接放弃并删除该重挖位置。
      */
     private void handleRebreak() {
-        if (rebreakBlockDate == null || firstBlockDate != null || secondBlockDate != null) return;
-        if (hasSwitch) return;   // 切工具还没切回，等切回再重挖（避免换槽位互相干扰）
-        if (!rebreak.get() || rebreakTicks < rebreakDelay.get() * 4) return;
+        if (!rebreak.get() || rebreakBlockDate == null) return;
 
         BlockState state = mc.level.getBlockState(rebreakBlockDate.pos);
-        if (state.getBlock() == Blocks.AIR || state.getBlock() == Blocks.WATER || state.getBlock() == Blocks.LAVA)
+        if (state.getBlock() == Blocks.AIR || state.getBlock() == Blocks.WATER || state.getBlock() == Blocks.LAVA) {
+            // 方块还没（重新）出现：等待期间不计时，也不重复收尾
+            rebreakTicks = 0;
+            rebreakTried = false;
             return;
-
-        // 切到最佳工具并沿用「切工具模式」处理切回：服务端收到 STOP 用当前手持工具重算进度
-        int slotx = getBestTool(state);
-        if (slotx != -1 && slotx != mc.player.getInventory().getSelectedSlot()) {
-            if (switchBackMode.get() == SwitchBackMode.NONE) {
-                InvUtils.swap(slotx, false);
-            } else {
-                InvUtils.swap(slotx, true);
-                hasSwitch = true;
-                switchTicks = 0;
-                if (switchBackMode.get() == SwitchBackMode.IMMEDIATE) switchBackNow();
-            }
         }
 
+        rebreakTicks++;
+
+        // 方块出现太久都没能挖掉 → 放弃这个重挖位置，避免永远卡着
+        if (rebreakTicks > maxBreaks.get()) {
+            rebreakBlockDate = null;
+            return;
+        }
+
+        if (rebreakTried) return;   // 本轮已经发过 STOP，等方块被破坏
+        if (rebreakTicks <= rebreakDelay.get()) return;   // 重挖延迟
+
+        rebreakTried = true;
+        rebreakNow();
+    }
+
+    /**
+     * 重挖收尾：切到最佳工具 → 发 STOP →（立即切回模式）切回
+     * <p>
+     * 必须和正常收尾一个顺序：STOP 是在服务端处理包的那一刻用「当前手持工具」重算进度的，
+     * 所以切回不能赶在 STOP 前面。延迟切回 / 不切回沿用「切工具模式」，由 {@link #handleSwitchBack()} 处理。
+     * <p>
+     * 这里只切槽位和补 STOP，不碰 {@code firstBlockDate} / {@code secondBlockDate}，所以正在挖的方块不受影响；
+     * {@link InvUtils#swap(int, boolean)} 也不会覆盖已经记下的「切回槽位」，正常挖掘待处理的切回仍然有效。
+     */
+    private void rebreakNow() {
+        switchToBestTool(rebreakBlockDate);
         sendStopPacket(rebreakBlockDate.pos, rebreakBlockDate.direction);
-        rebreakTicks = 0;
+        if (switchBackMode.get() == SwitchBackMode.IMMEDIATE) switchBackNow();
     }
 
     // ==================== 发包方法 ====================
@@ -853,18 +903,13 @@ public class GhostMine extends Module {
             renderBlock(event, secondBlockDate.pos, secondBlockDate.progress);
         }
 
-        if (rebreak.get()
-            && rebreakBlockDate != null
-            && mc.level.getBlockState(rebreakBlockDate.pos).getBlock() != Blocks.AIR
-            && mc.level.getBlockState(rebreakBlockDate.pos).getBlock() != Blocks.WATER
-            && mc.level.getBlockState(rebreakBlockDate.pos).getBlock() != Blocks.LAVA
-            && firstBlockDate == null
-            && secondBlockDate == null) {
+        // 重挖位置始终显示（方块被破坏、还没重新出现的等待期也显示）
+        if (rebreak.get() && rebreakBlockDate != null) {
             BlockPos blockPos = rebreakBlockDate.pos;
             event.renderer.box(
                 blockPos.getX(), blockPos.getY(), blockPos.getZ(),
                 blockPos.getX() + 1, blockPos.getY() + 1, blockPos.getZ() + 1,
-                readySideColor.get(), readyLineColor.get(), shapeMode.get(), 0);
+                rebreakSideColor.get(), rebreakLineColor.get(), shapeMode.get(), 0);
         }
     }
 
@@ -973,8 +1018,7 @@ public class GhostMine extends Module {
 
         /**
          * 真实进度模拟
-         * 使用 BlockUtils.getBreakDelta 累加进度（已含工具、附魔、药水效果）
-         * 额外处理：空中挖掘惩罚（原版在空中挖掘速度降到 1/5）
+         * 使用 BlockUtils.getBreakDelta 累加进度（已含工具、附魔、药水效果、水中速度、空中 1/5 惩罚）
          */
         public void freshProgress() {
             // 瞬间破坏的方块（硬度为0）
@@ -985,15 +1029,10 @@ public class GhostMine extends Module {
             }
 
             // 使用 BlockUtils 获取每 tick 的进度增量
-            // 该方法已考虑：工具类型、效率附魔、急迫/挖掘疲劳效果
+            // 该方法已考虑：工具类型、效率附魔、急迫/挖掘疲劳效果、水中速度、空中惩罚（getDestroySpeed 里 speed /= 5）
             int slot = getBestTool(blockState);
             double delta = BlockUtils.getBreakDelta(
                 slot != -1 ? slot : mc.player.getInventory().getSelectedSlot(), blockState);
-
-            // 空中挖掘惩罚：原版在空中挖掘速度大幅降低
-            if (!mc.player.onGround()) {
-                delta *= 0.2;
-            }
 
             // 原版挖掘速度：进度累加到 1.0 表示挖完
             progress += delta;
