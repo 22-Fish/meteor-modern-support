@@ -854,6 +854,8 @@ public class ElytraFlySupport {
             legacyElytraOn = false;
             legacyElytraSlot = -1;
             windowFwPendingLevel = -1;
+            // 落地重置冷却：下一次真正起飞时立刻补一发烟花（起飞烟花本身受冷却约束，见 tryFireworkOnce）
+            legalFwCooldown = 0;
             return;
         }
 
@@ -1024,6 +1026,12 @@ public class ElytraFlySupport {
         if (level == -1) return;
         int interval = fwIntervalForLevel(level);
         if (isArmorFlyActive()) {
+            // 甲飞的「滑翔窗口」本来就随换装反复开合（懒换模式里本地滑翔为真时当 tick 不换装，
+            // 服务器随即停飞 → serverSeesGliding() 会短暂变假，窗口重开时又被上层算作一次
+            // 「起飞成功」，见 legalArmorTick）。起飞烟花是不看间隔直接放的，不拦的话飞行中
+            // 每个窗口都会补一发，表现就是「自动烟花延迟全按最低的、疯狂放烟花」。
+            // 冷却没走完就不是真的起飞，等 tickFlightFirework 按间隔正常放。
+            if (legalFwCooldown > 0) return;
             queueAutoFirework(level, interval);
             return;
         }
