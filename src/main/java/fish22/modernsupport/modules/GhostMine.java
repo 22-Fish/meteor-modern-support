@@ -561,7 +561,16 @@ public class GhostMine extends Module {
         }
 
         if (stalled != null) {
-            // 一直拿着最佳工具，直到方块被服务端破坏
+            // 立即切回：每 tick 重来一次「切工具 → STOP → 切回」，进度一够服务端就会破坏，
+            // 手持槽位只在发包那一刻被占用（不占着手持工具，剑照样能用）
+            if (switchBackMode.get() == SwitchBackMode.IMMEDIATE) {
+                switchToBestTool(stalled);
+                sendStopPacket(stalled.pos, stalled.direction);
+                switchBackNow();
+                return;
+            }
+
+            // 延迟切回 / 不切回：按设置拿着最佳工具并行重发 STOP
             switchToBestTool(stalled);
             if (loopStop.get()) {
                 for (BlockDate block : pending) sendStopPacket(block.pos, block.direction);
