@@ -104,7 +104,7 @@ import static meteordevelopment.meteorclient.MeteorClient.mc;
  *       冻结模式 = 复用 Freeze 模块的冻结效果（travel 取消 + 输入屏蔽 + 位置包拦截），完全静止。
  *       冻结期间甲飞换装照常进行（维持服务端滑翔状态），但不释放任何排队的自动/一键烟花
  *       （见 {@link #releaseWindowFirework()}）；
- *       悬停+ = 冻结的包策略（不报位置）再补上「每 tick 至少一发只带朝向的移动包」，
+ *       grim悬停 = 冻结的包策略（不报位置）再补上「每 tick 至少一发只带朝向的移动包」，
  *       服务端每 tick 都能把「悬浮过久」计数结算成「正在滑翔」，反作弊那边又没有任何
  *       位移可比（见 {@link #sendHoverPlusLookPacket()}）</li>
  *   <li>甲飞时悬停/冻结不发位置包，原版会按旧值判「悬浮过久」踢出（约 4 秒）。悬停板块的
@@ -113,7 +113,7 @@ import static meteordevelopment.meteorclient.MeteorClient.mc;
  *       清零：下降脉冲 = 先比真实位置低 {@link #FLOATING_CHECK_DESCENT}、下一 tick 再回位，
  *       服务端按「正在下降」结算；空包防踢 = 换装时把鞘翅多留一 tick 再补一发原地包，
  *       服务端按「正在滑翔」结算（见 {@link #planAntiKick()} / {@link #tickAntiKick()}）。
- *       「悬停+」模式自带每 tick 的朝向包，不需要这两个防踢方式</li>
+ *       「grim悬停」模式自带每 tick 的朝向包，不需要这两个防踢方式</li>
  *   <li>自动烟花按烟花等级（1/2/3）分别配置间隔；烟花实体在服务器端沿服务器视角方向加速
  *       （寿命 1级≈20-31t、2级≈30-41t、3级≈40-51t）</li>
  * </ul>
@@ -602,7 +602,7 @@ public class ElytraFlySupport {
      * 服务端没有任何位移可比，所以不会被回弹；代价是服务端「悬浮过久」的计数没人给它清零，
      * 需要悬停板块的「防踢模式」按间隔补包（见 {@link #hoverAntiKick}）。
      *
-     * <p><b>悬停+</b>（史莱姆式）：同样不报位置（反作弊没有位移可比，不会回弹），但每 tick
+     * <p><b>grim悬停</b>（史莱姆式）：同样不报位置（反作弊没有位移可比，不会回弹），但每 tick
      * 保证有一发「只带朝向、不带坐标」的移动包被服务端处理。它排在甲飞每 tick 的起飞包之后，
      * 服务端处理它时 {@code isFallFlying} 为真 → 原版 {@code clientIsFloating} 每 tick 都被
      * 置假、悬浮计数每 tick 清零 → 不会被「Flying is not enabled」踢出，也就不需要防踢脉冲。
@@ -611,7 +611,7 @@ public class ElytraFlySupport {
     public enum HoverMode {
         Hover("悬停"),
         Freeze("冻结"),
-        HoverPlus("悬停+");
+        HoverPlus("grim悬停");
 
         private final String displayName;
 
@@ -630,7 +630,7 @@ public class ElytraFlySupport {
      *
      * <p>只给「冻结」用：冻结期间一个位置包都不发，服务端那条「悬浮过久」判定
      * （见 {@link #tickAntiKick()}）得不到重算机会，只能靠这里补包清零。
-     * 悬停模式（位置包照发）和「悬停+」（每 tick 一发朝向包）都不需要它。
+     * 悬停模式（位置包照发）和「grim悬停」（每 tick 一发朝向包）都不需要它。
      *
      * <p>关闭：不发任何额外包。
      * <p>下降脉冲移动包：冻结期间按「防踢间隔」（默认 20 tick）补一对移动包 —— 第一发比真实位置低
@@ -983,14 +983,14 @@ public class ElytraFlySupport {
     private static boolean bypassFreezeIntercept = false;
 
     /**
-     * 「悬停+」：本 tick 处于包层面静止的悬停（不报位置），要在这一 tick 的移动包之后
+     * 「grim悬停」：本 tick 处于包层面静止的悬停（不报位置），要在这一 tick 的移动包之后
      * 保证有一发只带朝向的移动包发出去（见 {@link #sendHoverPlusLookPacket()}）。
      */
     private static boolean hoverPlusThisTick = false;
 
     /**
      * 本 tick 是否已经有「不带坐标的移动包」发出去（客户端自己的旋转包、我们补的朝向包
-     * 都会置这一位）。「悬停+」靠它判断这一 tick 还需不需要补，避免一 tick 两个朝向包。
+     * 都会置这一位）。「grim悬停」靠它判断这一 tick 还需不需要补，避免一 tick 两个朝向包。
      */
     private static boolean noPositionPacketThisTick = false;
 
@@ -1663,7 +1663,7 @@ public class ElytraFlySupport {
 
     /** 发包监听（由 MixinElytraFly 拦截官方 onPacketSend 后调用） */
     public static void onPacketSend(PacketEvent.Send event) {
-        // 「悬停+」：记账本 tick 有没有「不带坐标的移动包」出去（客户端自己的旋转包也算）。
+        // 「grim悬停」：记账本 tick 有没有「不带坐标的移动包」出去（客户端自己的旋转包也算）。
         // 必须放在所有 return 之前——补包那一路（bypassFreezeIntercept）也要算进去。
         if (event.packet instanceof ServerboundMovePlayerPacket lookPacket && !lookPacket.hasPosition()) {
             noPositionPacketThisTick = true;
@@ -1708,7 +1708,7 @@ public class ElytraFlySupport {
             return;
         }
 
-        // 合法平飞「冻结 / 悬停+」悬停时拦截位置移动包（旋转包照发，可正常转头）
+        // 合法平飞「冻结 / grim悬停」悬停时拦截位置移动包（旋转包照发，可正常转头）
         if (!isLegalMode() || hoverMode.get() == HoverMode.Hover) return;
         if (!Freeze.isFrozen()) return;
         if (!(event.packet instanceof ServerboundMovePlayerPacket movePacket)) return;
@@ -2011,7 +2011,7 @@ public class ElytraFlySupport {
         boolean hoverCombo = noDirection && jump && sneak;
         if (hover || hoverCombo) {
             if (hoverMode.get() != HoverMode.Hover) {
-                // 冻结 / 悬停+：完全静止（travel 取消 + 输入屏蔽由 Freeze 外部冻结提供，
+                // 冻结 / grim悬停：完全静止（travel 取消 + 输入屏蔽由 Freeze 外部冻结提供，
                 // 位置移动包由 onPacketSend 拦截，旋转包照发可正常转头）
                 Freeze.setExternalFrozen(true);
                 // 丢弃动量：冻结期间清空速度（含重力累积），解冻后从零开始
@@ -2025,7 +2025,7 @@ public class ElytraFlySupport {
                     legalFwCooldown--;
                 }
 
-                // 悬停+（史莱姆 grim-floating 的同款）：位置包不发，但本 tick 的移动包之后
+                // grim悬停（史莱姆 grim-floating 的同款）：位置包不发，但本 tick 的移动包之后
                 // 必须补一发「只带朝向」的移动包，服务端才有东西把「悬浮过久」计数重算成
                 // 「正在滑翔」（见 sendHoverPlusLookPacket）。排在移动包之后发，顺序和原版一致。
                 if (hoverMode.get() == HoverMode.HoverPlus) {
@@ -2460,7 +2460,7 @@ public class ElytraFlySupport {
      * <p>只给「冻结」用：冻结悬停一个位置包都不发，服务端那条「悬浮过久」计数没有
      * 重算机会，只能靠补包清零（{@link #planAntiKick()}）。
      *
-     * <p>悬停模式（位置包照发）不需要；「悬停+」每 tick 自带一发朝向包
+     * <p>悬停模式（位置包照发）不需要；「grim悬停」每 tick 自带一发朝向包
      * （{@link #sendHoverPlusLookPacket()}）会替它把计数清零，也不需要；
      * 纯甲飞没有冻结/悬停概念、真鞘翅的合法平飞服务端始终认为在滑翔，都不需要。
      */
@@ -2637,10 +2637,10 @@ public class ElytraFlySupport {
         }
     }
 
-    // ====== 悬停+（史莱姆式悬停：不报位置，但每 tick 一发朝向包） ======
+    // ====== grim悬停（史莱姆式悬停：不报位置，但每 tick 一发朝向包） ======
 
     /**
-     * 「悬停+」：本 tick 的移动包发完之后（由 {@link LegalRotation#runAfterSend(Runnable)}
+     * 「grim悬停」：本 tick 的移动包发完之后（由 {@link LegalRotation#runAfterSend(Runnable)}
      * 排进 {@code SendMovementPacketsEvent.Post}），补一发<b>只带朝向、不带坐标</b>的移动包。
      *
      * <p><b>为什么这么发：</b>原版 {@code ServerGamePacketListenerImpl} 那条「悬浮过久」
