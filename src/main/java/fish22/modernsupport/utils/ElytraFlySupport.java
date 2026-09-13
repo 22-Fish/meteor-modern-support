@@ -100,7 +100,7 @@ import static meteordevelopment.meteorclient.MeteorClient.mc;
  *   <li>通过 {@link LegalRotation}（严格模式）把服务器视角转到目标角度，
  *       客户端视角不动——原版滑翔物理朝服务器视角方向自然加速</li>
  *   <li>无任何输入时悬停原地：悬停模式 = 每 tick 把速度置 (0, 0.02, 0)（抵消重力），
- *       可同时按间隔静默放烟花（需开启「自动烟花」总开关，仅为保持滑翔状态正常，
+ *       可同时按间隔静默放烟花（要开「悬停时自动烟花」，仅为保持滑翔状态正常，
  *       防止反作弊拦截，不影响悬停）；
  *       冻结模式 = 复用 Freeze 模块的冻结效果（travel 取消 + 输入屏蔽 + 位置包拦截），完全静止。
  *       冻结期间甲飞换装照常进行（维持服务端滑翔状态），但不释放任何排队的自动/一键烟花
@@ -2037,9 +2037,8 @@ public class ElytraFlySupport {
                 // 悬停：抵消重力停在空中（参考 Epsilon：每 tick 覆盖速度）；
                 // 悬停自动烟花仅为保持滑翔状态正常（防反作弊拦截），不影响悬停
                 Freeze.setExternalFrozen(false);
-                // 「自动烟花」是总管：它关着的时候悬停照自己的开关继续放，看起来就是「关不掉」，
-                // 所以这里两个开关都要开才放
-                if (autoFirework.get() && hoverFirework.get()) {
+                // 悬停自动烟花与飞行自动烟花是两个独立开关：这里只看悬停那一个
+                if (hoverFirework.get()) {
                     tickHoverFirework();
                 }
                 mc.player.setDeltaMovement(0, 0.02, 0);
@@ -2190,10 +2189,6 @@ public class ElytraFlySupport {
      * 一键烟花已经改成窗口内释放，自动烟花（起飞/飞行/悬停三处）按同一方式处理。
      */
     private static void queueAutoFirework(int level, int interval) {
-        // 「自动烟花」总开关：关闭时飞行 / 悬停 / 起飞三处的自动烟花一律不放
-        // （三个调用点已经判过，这里兜底，防止以后新增调用点漏判）
-        if (autoFirework == null || !autoFirework.get()) return;
-
         // 冻结中（冻结悬停 / 独立冻结模块）：冻结期间不放烟花。
         // 甲飞的换装窗口在冻结期间照常开合，不拦的话每次窗口都会把烟花放出去；
         // 真鞘翅模式则是队列回调在冻结期间直接发包。统一在这里拦掉。
@@ -2214,11 +2209,14 @@ public class ElytraFlySupport {
     }
 
     /**
-     * 关掉「自动烟花」时清掉已经排队的自动烟花，让开关立刻生效。
+     * 关掉某个自动烟花开关时清掉已经排队的那一发，让开关立刻生效。
      *
-     * <p>甲飞的自动烟花是排到「换装窗口」里释放的（见 {@link #releaseWindowFirework()}），
-     * 排上队到真正释放之间隔着几 tick；不在这里清掉的话，关掉开关后那一发照样会放出去，
-     * 看起来就是「关了还在放」。
+     * <p>甲飞的自动烟花（飞行 / 悬停 / 起飞三处）都是排到「换装窗口」里释放的
+     * （见 {@link #releaseWindowFirework()}），排上队到真正释放之间隔着一到几 tick；
+     * 不在这里清掉的话，关掉开关后那一发照样会放出去，看起来就是「关了还在放」。
+     *
+     * <p>两个开关（「自动烟花」/「悬停时自动烟花」）谁被关掉都调用这里，
+     * 因为排队用的是同一个槽位。
      */
     public static void cancelPendingAutoFirework() {
         windowFwPendingLevel = -1;

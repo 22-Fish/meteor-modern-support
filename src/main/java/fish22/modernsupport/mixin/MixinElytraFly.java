@@ -249,7 +249,7 @@ public abstract class MixinElytraFly {
 
         autoFirework = sgSimple.add(new BoolSetting.Builder()
             .name("自动烟花")
-            .description("飞行中自动释放烟花加速（同时是悬停自动烟花的总开关，关掉后悬停也不放）")
+            .description("飞行中自动释放烟花加速（与「悬停时自动烟花」相互独立）")
             .defaultValue(true)
             .onChanged(this::onAutoFireworkChanged)
             .visible(this::isLegalMode)
@@ -379,11 +379,10 @@ public abstract class MixinElytraFly {
 
         hoverFirework = sgSimple.add(new BoolSetting.Builder()
             .name("悬停时自动烟花")
-            .description("悬停期间按间隔释放烟花（要「自动烟花」也开着才生效）")
+            .description("悬停期间按间隔释放烟花（与「自动烟花」相互独立）")
             .defaultValue(false)
-            .visible(() -> isLegalMode()
-                && autoFirework.get()
-                && hoverMode.get() == ElytraFlySupport.HoverMode.Hover)
+            .onChanged(this::onHoverFireworkChanged)
+            .visible(() -> isLegalMode() && hoverMode.get() == ElytraFlySupport.HoverMode.Hover)
             .build()
         );
 
@@ -394,10 +393,7 @@ public abstract class MixinElytraFly {
             .min(1)
             .max(100)
             .sliderMax(100)
-            .visible(() -> isLegalMode()
-                && autoFirework.get()
-                && hoverMode.get() == ElytraFlySupport.HoverMode.Hover
-                && hoverFirework.get())
+            .visible(() -> isLegalMode() && hoverMode.get() == ElytraFlySupport.HoverMode.Hover && hoverFirework.get())
             .build()
         );
 
@@ -408,10 +404,7 @@ public abstract class MixinElytraFly {
             .min(1)
             .max(100)
             .sliderMax(100)
-            .visible(() -> isLegalMode()
-                && autoFirework.get()
-                && hoverMode.get() == ElytraFlySupport.HoverMode.Hover
-                && hoverFirework.get())
+            .visible(() -> isLegalMode() && hoverMode.get() == ElytraFlySupport.HoverMode.Hover && hoverFirework.get())
             .build()
         );
 
@@ -422,10 +415,7 @@ public abstract class MixinElytraFly {
             .min(1)
             .max(100)
             .sliderMax(100)
-            .visible(() -> isLegalMode()
-                && autoFirework.get()
-                && hoverMode.get() == ElytraFlySupport.HoverMode.Hover
-                && hoverFirework.get())
+            .visible(() -> isLegalMode() && hoverMode.get() == ElytraFlySupport.HoverMode.Hover && hoverFirework.get())
             .build()
         );
 
@@ -780,6 +770,13 @@ public abstract class MixinElytraFly {
      */
     @Unique
     private void onAutoFireworkChanged(Boolean enabled) {
+        if (enabled != null && enabled) return;
+        ElytraFlySupport.cancelPendingAutoFirework();
+    }
+
+    /** 关掉「悬停时自动烟花」：同样清掉排队中的那一发，悬停立刻不再放烟花 */
+    @Unique
+    private void onHoverFireworkChanged(Boolean enabled) {
         if (enabled != null && enabled) return;
         ElytraFlySupport.cancelPendingAutoFirework();
     }
