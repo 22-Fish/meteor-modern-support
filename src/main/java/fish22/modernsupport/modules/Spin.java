@@ -29,6 +29,7 @@ import meteordevelopment.meteorclient.settings.Setting;
 import meteordevelopment.meteorclient.settings.SettingGroup;
 import meteordevelopment.meteorclient.systems.modules.Categories;
 import meteordevelopment.meteorclient.systems.modules.Module;
+import meteordevelopment.meteorclient.utils.player.Rotations;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.util.Mth;
 
@@ -226,7 +227,12 @@ public class Spin extends Module {
         }
 
         // 按模块的合法转头设置旋转：严格/静默走合法转头，其余回退原版静默旋转
-        LegalRotation.rotateWithMode(yaw, pitch, legalRotation.get());
+        LegalRotation.Mode mode = legalRotation.get();
+        if (mode == LegalRotation.Mode.SEVERE || mode == LegalRotation.Mode.QUIET) {
+            LegalRotation.rotate(yaw, pitch, mode);
+        } else {
+            Rotations.rotate(yaw, pitch);
+        }
     }
 
     /** 抖动模式：朝前 N tick、朝后 N tick 交替 */

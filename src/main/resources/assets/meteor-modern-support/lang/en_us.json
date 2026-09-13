@@ -875,6 +875,8 @@
   "Setting.Meteor Client.keybind.Description": "The bind for keybind mode.",
   "Module.Meteor Client.elytra-fly": "elytra-fly",
   "Module.Meteor Client.elytra-fly.Description": "Gives you more control over your elytra.",
+  "Setting.Meteor Client.simple-mode": "simple-mode",
+  "Setting.Meteor Client.simple-mode.Description": "Off (default): the module does no flight control at all, armor-fly / infinite-elytra still work. Vanilla is Meteor's own mode and does not conflict with armor-fly (its controls keep working while armor-fly is on), Packet is Meteor's packet mode (exclusive with armor-fly), Legal is our legal flat flight (can be combined with armor-fly).",
   "Setting.Meteor Client.auto-take-off": "auto-take-off",
   "Setting.Meteor Client.auto-take-off.Description": "Automatically takes off when you hold jump without needing to double jump.",
   "Setting.Meteor Client.fall-multiplier": "fall-multiplier",

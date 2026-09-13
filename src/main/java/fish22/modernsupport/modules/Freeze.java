@@ -31,6 +31,9 @@ public class Freeze extends Module {
     /** 外部请求的冻结状态（如鞘翅飞行·合法平飞的悬停冻结），不依赖本模块开关 */
     private static boolean externalFrozen = false;
 
+    /** 放行下一发位置移动包（甲飞防踢脉冲用，见 ElytraFlySupport#sendFloatingPulse） */
+    private static boolean bypassNextMovePacket = false;
+
     /** 是否处于冻结状态（本模块开启 或 外部请求冻结） */
     public static boolean isFrozen() {
         return frozen || externalFrozen;
@@ -39,6 +42,24 @@ public class Freeze extends Module {
     /** 设置外部冻结状态（合法平飞悬停=冻结时调用；取消时传 false） */
     public static void setExternalFrozen(boolean value) {
         externalFrozen = value;
+    }
+
+    /**
+     * 放行下一发位置移动包（一次有效）。
+     *
+     * <p>冻结期间含位置的移动包一律拦下，只有甲飞防踢脉冲需要穿过这道拦截：
+     * 它本来就是用来把服务端「悬浮过久」计数清零的，被拦掉防踢就等于没开。
+     *
+     * <p>标记由 {@link #onSendPacket} 消费；每 tick 开始由
+     * {@link #clearMovePacketBypass()} 兜底清一次，避免残留标记放行下一 tick 的位置包。
+     */
+    public static void bypassNextMovePacket() {
+        bypassNextMovePacket = true;
+    }
+
+    /** 清掉「放行下一发位置移动包」标记（每 tick 兜底） */
+    public static void clearMovePacketBypass() {
+        bypassNextMovePacket = false;
     }
 
     /** 解冻时的动量处理方式 */
@@ -113,6 +134,11 @@ public class Freeze extends Module {
 
         // 冻结时拦截含位置的移动包，纯旋转包照常发送（转头正常）
         if (event.packet instanceof ServerboundMovePlayerPacket movePacket && movePacket.hasPosition()) {
+            // 甲飞防踢脉冲：放行这一发（一次有效）
+            if (bypassNextMovePacket) {
+                bypassNextMovePacket = false;
+                return;
+            }
             event.cancel();
         }
     }

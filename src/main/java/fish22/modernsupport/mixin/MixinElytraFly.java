@@ -1,8 +1,11 @@
 package fish22.modernsupport.mixin;
 
 import fish22.modernsupport.ModernSupport;
+import fish22.modernsupport.modules.ElytraBounce;
+import fish22.modernsupport.modules.ElytraPitch40;
 import fish22.modernsupport.utils.BackpackUse;
 import fish22.modernsupport.utils.ElytraFlySupport;
+import fish22.modernsupport.utils.InfiniteElytraSupport;
 import meteordevelopment.meteorclient.events.entity.player.PlayerMoveEvent;
 import meteordevelopment.meteorclient.events.packets.PacketEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
@@ -10,40 +13,65 @@ import meteordevelopment.meteorclient.settings.BoolSetting;
 import meteordevelopment.meteorclient.settings.EnumSetting;
 import meteordevelopment.meteorclient.settings.IVisible;
 import meteordevelopment.meteorclient.settings.IntSetting;
-import meteordevelopment.meteorclient.settings.KeybindSetting;
 import meteordevelopment.meteorclient.settings.Setting;
 import meteordevelopment.meteorclient.settings.SettingGroup;
+import meteordevelopment.meteorclient.systems.modules.Module;
+import meteordevelopment.meteorclient.systems.modules.Modules;
 import meteordevelopment.meteorclient.systems.modules.movement.elytrafly.ElytraFly;
 import meteordevelopment.meteorclient.systems.modules.movement.elytrafly.ElytraFlightModes;
-import meteordevelopment.meteorclient.utils.misc.Keybind;
+import net.minecraft.core.component.DataComponentType;
+import net.minecraft.world.item.ItemStack;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.Redirect;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 import java.lang.reflect.Field;
+import java.util.List;
+import java.util.function.Consumer;
 
 /**
  * Meteor 官方「鞘翅飞行」（ElytraFly）模块增强 mixin
  *
- * <p>不新建模块、不新建模式选项：通过 {@link MixinElytraFlightModes} 把「甲飞/合法平飞」
- * 追加进官方模式列表（flightMode），本 mixin 只在官方模式为这两个值时
- * 接管官方事件处理器（跳过官方 Vanilla/Packet 等逻辑），
- * 并添加配套的小设置分组（甲飞/Grim/合法平飞/悬停），
- * 具体业务逻辑在 {@link ElytraFlySupport} 中。
+ * <p>官方模式列表（{@link MixinElytraFlightModes}）只保留 关闭 / 原版 / 发包 / 合法，
+ * 俯仰40 与 弹跳 已拆成独立模块（{@link ElytraPitch40} / {@link ElytraBounce}）。
+ * 本 mixin 把模块设置界面整理成三大块：
  *
- * <p>官方 ElytraFly 已有的事件方法：onPlayerMove / onPreTick / onTick / onPacketSend / onPacketReceive，
- * 全部注入 HEAD 拦截；onActivate / onDeactivate 追加初始化/清理。
+ * <pre>
+ * 〔简单控制〕简单控制模式（关闭 / 原版 / 发包 / 合法，默认关闭）+ 官方原版/发包设置 + 合法模式设置（含悬停）
+ * 〔甲飞〕    甲飞模式（关闭 / 普通 / Grim模式）+ 换装、音效、落地防摔等设置
+ * 〔无限鞘翅〕无限鞘翅（照搬 AEfish）+ 周期 / 静音
+ * </pre>
+ *
+ * <p>互斥关系：
+ * <ul>
+ *   <li>「关闭」（默认）↔ 不互斥：模块本身不做任何飞行控制，甲飞 / 无限鞘翅 照常可用；</li>
+ *   <li>「原版」↔ 甲飞：<b>不互斥</b>。官方的原版控制照常跑（甲飞只是换装维持滑翔），
+ *       方法开头那道「胸甲槽要有滑翔组件」的守卫由
+ *       {@link #modernsupport$gliderForVanillaArmor} 放行；</li>
+ *   <li>甲飞 ↔ 无限鞘翅（开一个自动关另一个）；</li>
+ *   <li>发包模式 ↔ 甲飞 / 无限鞘翅（选发包会把这两个关掉，反之自动切回原版）。</li>
+ * </ul>
+ *
+ * <p>具体业务逻辑在 {@link ElytraFlySupport} 与 {@link InfiniteElytraSupport}。
+ * 官方 ElytraFly 的事件方法 onPlayerMove / onPreTick / onTick / onPacketSend / onPacketReceive
+ * 在「合法」以及「甲飞且非原版」时注入 HEAD 拦截（原版 + 甲飞要留着官方那套控制）；
+ * onActivate / onDeactivate 追加初始化/清理。
  */
 @Mixin(value = ElytraFly.class, remap = false)
 public abstract class MixinElytraFly {
 
-    /** 官方模式设置（甲飞/合法平飞为追加值，按 name 判断） */
+    /** 官方模式设置（已改名为「简单控制模式」，值：原版/发包/合法） */
     @Shadow
     public Setting<ElytraFlightModes> flightMode;
+
+    /** 官方模式设置改名后的内部名（配置键 / 翻译键都用它） */
+    @Unique
+    private static final String SIMPLE_MODE_SETTING = "simple-mode";
 
     @Unique
     private Setting<ElytraFlySupport.ArmorMode> armorMode;
@@ -55,7 +83,16 @@ public abstract class MixinElytraFly {
     private Setting<Boolean> spaceBlockInAir;
 
     @Unique
+    private Setting<Boolean> landingNoFall;
+
+    @Unique
+    private Setting<ElytraFlySupport.LandingNoFallMode> landingNoFallMode;
+
+    @Unique
     private Setting<Boolean> grimInputSequence;
+
+    @Unique
+    private Setting<Integer> armorSwapInterval;
 
     @Unique
     private Setting<Boolean> autoFirework;
@@ -97,6 +134,12 @@ public abstract class MixinElytraFly {
     private Setting<ElytraFlySupport.HoverMode> hoverMode;
 
     @Unique
+    private Setting<ElytraFlySupport.AntiKickMode> hoverAntiKick;
+
+    @Unique
+    private Setting<Integer> hoverAntiKickInterval;
+
+    @Unique
     private Setting<Boolean> notGlidingUnfreeze;
 
     @Unique
@@ -111,56 +154,302 @@ public abstract class MixinElytraFly {
     @Unique
     private Setting<Integer> hoverFwIntervalLv3;
 
+    /** 无限鞘翅总开关 */
     @Unique
-    private Setting<ElytraFlySupport.LegalArmorMode> legalArmorMode;
+    private Setting<Boolean> infiniteElytra;
 
+    /** 无限鞘翅刷新周期（tick） */
     @Unique
-    private Setting<Boolean> legalGrimInputSequence;
+    private Setting<Integer> infinitePeriod;
 
+    /** 无限鞘翅静音 */
     @Unique
-    private Setting<Boolean> legalMuteSounds;
+    private Setting<Boolean> infiniteMute;
 
-    @Unique
-    private Setting<Keybind> oneKeyFirework;
-
-    @Unique
-    private Setting<Boolean> oneKeyBackpackFirework;
-
-    @Unique
-    private Setting<BackpackUse.Mode> oneKeyBackpackMode;
-
-    // ====== 模式判断（追加的枚举值在编译期不可见，用 name 判断） ======
-
-    @Unique
-    private boolean isArmorMode() {
-        return flightMode.get().name().equals("Armor");
-    }
+    // ====== 模式判断（「合法」是追加的枚举值，编译期不可见，用 name 判断） ======
 
     @Unique
     private boolean isLegalMode() {
         return flightMode.get().name().equals("Legal");
     }
 
+    /** 「简单控制模式」是否为「关闭」（模块不做任何飞行控制） */
+    @Unique
+    private boolean isSimpleControlOff() {
+        return ElytraFlySupport.isSimpleControlOff();
+    }
+
+    /** 「甲飞模式」是否不为关闭 */
+    @Unique
+    private boolean isArmorMode() {
+        return armorMode != null && armorMode.get() != ElytraFlySupport.ArmorMode.Off;
+    }
+
+    /** 官方逻辑是否被我们接管（合法 / 甲飞） */
     @Unique
     private boolean isCustomMode() {
-        return isArmorMode() || isLegalMode();
+        return isLegalMode() || isArmorMode();
     }
+
+    /** 当前是不是官方「原版」模式（Meteor 官方那套飞行控制） */
+    @Unique
+    private boolean isVanillaMode() {
+        return ElytraFlySupport.isVanillaMode();
+    }
+
+    /**
+     * 官方那套飞行控制是否要拦下。
+     *
+     * <ul>
+     *   <li>「关闭」：模块不做任何飞行控制，官方逻辑同样不跑；</li>
+     *   <li>「合法」：方向控制由本模组接管（服务器视角 + 滑翔物理），官方逻辑不跑；</li>
+     *   <li>「原版」：官方原版那套控制照常跑 —— <b>开着甲飞也照常跑</b>
+     *       （原版 + 甲飞 不互斥：甲飞只管换装维持滑翔，飞行控制仍旧是官方原版那套）；</li>
+     *   <li>「发包」：官方发包逻辑照常跑（发包与甲飞本就互斥）。</li>
+     * </ul>
+     */
+    @Unique
+    private boolean suppressOfficialLogic() {
+        if (isSimpleControlOff()) return true;
+        if (isLegalMode()) return true;
+        // 甲飞：只有「原版」模式要留着官方逻辑（两者叠加），其余模式仍然拦下
+        return isArmorMode() && !isVanillaMode();
+    }
+
+    /** 当前是不是「发包」模式 */
+    @Unique
+    private boolean isPacketMode() {
+        return flightMode.get().name().equals("Packet");
+    }
+
+    // ====== 初始化 ======
 
     @Inject(method = "<init>", at = @At("TAIL"))
     private void onInit(CallbackInfo ci) {
         ElytraFly self = (ElytraFly) (Object) this;
 
-        // 官方其他模式的设置在甲飞/合法平飞下无意义，先隐藏（保留官方「模式」设置本身）
+        // 1. 官方 General / Inventory / Autopilot 三块设置合并成「简单控制」块（默认分组改名 + 设置搬家）
+        SettingGroup sgSimple = mergeOfficialGroups(self);
+
+        // 2. 官方「模式」设置改名「简单控制模式」（可选值由 MixinElytraFlightModes 收敛为 关闭/原版/发包/合法）
+        renameSetting(flightMode, SIMPLE_MODE_SETTING);
+        filterFlightModeValues();
+
+        // 2.5 简单控制默认「关闭」：官方构造时写死的默认值是「原版」，这里改成「关闭」
+        applyDefaultOffMode();
+
+        // 3. 隐藏官方其他模式的设置：必须在创建我们自己的设置之前调用，
+        //    否则刚建好的设置也会被一起套上「非接管模式才可见」的条件
         hideOfficialSettings(self);
 
-        // ====== 甲飞设置 ======
+        // 4. 发包模式与（甲飞 / 无限鞘翅）互斥：官方模式设置的回调只能改写，别无入口
+        wrapFlightModeOnChanged();
+
+        // ====== 简单控制：合法模式设置（含悬停） ======
+
+        autoFirework = sgSimple.add(new BoolSetting.Builder()
+            .name("自动烟花")
+            .description("飞行中自动释放烟花加速")
+            .defaultValue(true)
+            .visible(this::isLegalMode)
+            .build()
+        );
+
+        autoSwapElytra = sgSimple.add(new BoolSetting.Builder()
+            .name("自动替换鞘翅")
+            .description("空中按跳跃键自动换上鞘翅起飞落地自动换回胸甲。")
+            .defaultValue(false)
+            .visible(this::isLegalMode)
+            .build()
+        );
+
+        backpackFirework = sgSimple.add(new BoolSetting.Builder()
+            .name("背包烟花")
+            .description("自动烟花允许使用背包中的烟花")
+            .defaultValue(false)
+            .visible(() -> isLegalMode() && autoFirework.get())
+            .build()
+        );
+
+        backpackMode = sgSimple.add(new EnumSetting.Builder<BackpackUse.Mode>()
+            .name("背包使用模式")
+            .description("背包烟花的交换发包模式。1p：SWAP 2包;2p：PICKUP 4 包。除特殊原因，请使用2p更稳定")
+            .defaultValue(BackpackUse.Mode.PICKUP)
+            .visible(() -> isLegalMode() && autoFirework.get() && backpackFirework.get())
+            .build()
+        );
+
+        fwPriorityLv1 = sgSimple.add(new IntSetting.Builder()
+            .name("1级烟花优先级")
+            .description("1 级烟花的优先级，优先级高的烟花优先使用")
+            .defaultValue(1)
+            .min(1)
+            .max(3)
+            .visible(() -> isLegalMode() && autoFirework.get())
+            .build()
+        );
+
+        fwPriorityLv2 = sgSimple.add(new IntSetting.Builder()
+            .name("2级烟花优先级")
+            .description("2 级烟花的优先级，优先级高的烟花优先使用")
+            .defaultValue(1)
+            .min(1)
+            .max(3)
+            .visible(() -> isLegalMode() && autoFirework.get())
+            .build()
+        );
+
+        fwPriorityLv3 = sgSimple.add(new IntSetting.Builder()
+            .name("3级烟花优先级")
+            .description("3 级烟花的优先级，优先级高的烟花优先使用")
+            .defaultValue(1)
+            .min(1)
+            .max(3)
+            .visible(() -> isLegalMode() && autoFirework.get())
+            .build()
+        );
+
+        fwIntervalLv1 = sgSimple.add(new IntSetting.Builder()
+            .name("1级烟花间隔")
+            .description("1 级烟花的释放间隔（tick）")
+            .defaultValue(30)
+            .min(1)
+            .max(100)
+            .sliderMax(100)
+            .visible(() -> isLegalMode() && autoFirework.get())
+            .build()
+        );
+
+        fwIntervalLv2 = sgSimple.add(new IntSetting.Builder()
+            .name("2级烟花间隔")
+            .description("2 级烟花的释放间隔（tick）")
+            .defaultValue(40)
+            .min(1)
+            .max(100)
+            .sliderMax(100)
+            .visible(() -> isLegalMode() && autoFirework.get())
+            .build()
+        );
+
+        fwIntervalLv3 = sgSimple.add(new IntSetting.Builder()
+            .name("3级烟花间隔")
+            .description("3 级烟花的释放间隔（tick）")
+            .defaultValue(50)
+            .min(1)
+            .max(100)
+            .sliderMax(100)
+            .visible(() -> isLegalMode() && autoFirework.get())
+            .build()
+        );
+
+        // ----- 悬停（合法模式的不输入行为） -----
+
+        hoverMode = sgSimple.add(new EnumSetting.Builder<ElytraFlySupport.HoverMode>()
+            .name("悬停模式")
+            .description("不输入时如何悬停。")
+            .defaultValue(ElytraFlySupport.HoverMode.Hover)
+            .visible(this::isLegalMode)
+            .build()
+        );
+
+        hoverAntiKick = sgSimple.add(new EnumSetting.Builder<ElytraFlySupport.AntiKickMode>()
+            .name("防踢模式")
+            .description("防止因为\"本服务器未启用飞行\"被踢出服务器")
+            .defaultValue(ElytraFlySupport.AntiKickMode.Off)
+            .visible(() -> isLegalMode()
+                && isArmorMode()
+                && hoverMode.get() == ElytraFlySupport.HoverMode.Freeze)
+            .build()
+        );
+
+        hoverAntiKickInterval = sgSimple.add(new IntSetting.Builder()
+            .name("防踢间隔")
+            .description("")
+            .defaultValue(20)
+            .min(5)
+            .max(36)
+            .sliderRange(5, 36)
+            .visible(() -> isLegalMode()
+                && isArmorMode()
+                && hoverMode.get() == ElytraFlySupport.HoverMode.Freeze
+                && hoverAntiKick.get() != ElytraFlySupport.AntiKickMode.Off)
+            .build()
+        );
+
+        hoverFirework = sgSimple.add(new BoolSetting.Builder()
+            .name("悬停时自动烟花")
+            .description("悬停期间按间隔释放烟花")
+            .defaultValue(false)
+            .visible(() -> isLegalMode() && hoverMode.get() == ElytraFlySupport.HoverMode.Hover)
+            .build()
+        );
+
+        hoverFwIntervalLv1 = sgSimple.add(new IntSetting.Builder()
+            .name("悬停1级烟花间隔")
+            .description("悬停时 1 级烟花的释放间隔（tick）")
+            .defaultValue(30)
+            .min(1)
+            .max(100)
+            .sliderMax(100)
+            .visible(() -> isLegalMode() && hoverMode.get() == ElytraFlySupport.HoverMode.Hover && hoverFirework.get())
+            .build()
+        );
+
+        hoverFwIntervalLv2 = sgSimple.add(new IntSetting.Builder()
+            .name("悬停2级烟花间隔")
+            .description("悬停时 2 级烟花的释放间隔（tick）")
+            .defaultValue(40)
+            .min(1)
+            .max(100)
+            .sliderMax(100)
+            .visible(() -> isLegalMode() && hoverMode.get() == ElytraFlySupport.HoverMode.Hover && hoverFirework.get())
+            .build()
+        );
+
+        hoverFwIntervalLv3 = sgSimple.add(new IntSetting.Builder()
+            .name("悬停3级烟花间隔")
+            .description("悬停时 3 级烟花的释放间隔（tick）")
+            .defaultValue(50)
+            .min(1)
+            .max(100)
+            .sliderMax(100)
+            .visible(() -> isLegalMode() && hoverMode.get() == ElytraFlySupport.HoverMode.Hover && hoverFirework.get())
+            .build()
+        );
+
+        discardMomentum = sgSimple.add(new BoolSetting.Builder()
+            .name("丢弃动量")
+            .description("勾选后冻结清空玩家动量，解除冻结后动量清零。反作弊不拦截情况下推荐开启，提示飞行精确度")
+            .defaultValue(false)
+            .visible(() -> isLegalMode() && hoverMode.get() != ElytraFlySupport.HoverMode.Hover)
+            .build()
+        );
+
+        freezeFirework = sgSimple.add(new BoolSetting.Builder()
+            .name("冻结烟花")
+            .description("冻结期间冻结烟花使用，解冻后继续使用\"还未使用完\"的烟花")
+            .defaultValue(false)
+            .visible(() -> isLegalMode() && hoverMode.get() != ElytraFlySupport.HoverMode.Hover)
+            .build()
+        );
+
+        notGlidingUnfreeze = sgSimple.add(new BoolSetting.Builder()
+            .name("不在滑翔解冻")
+            .description("不在滑翔状态时立即解除冻结")
+            .defaultValue(false)
+            .visible(() -> isLegalMode() && hoverMode.get() != ElytraFlySupport.HoverMode.Hover)
+            .build()
+        );
+
+        // ====== 甲飞 ======
+
         SettingGroup sgArmor = self.settings.createGroup("甲飞");
 
         armorMode = sgArmor.add(new EnumSetting.Builder<ElytraFlySupport.ArmorMode>()
-            .name("甲飞方式")
-            .description("普通：每 tick 闪换 + 本地强制滑翔（原版服务器）｜懒换：停飞才闪换｜来回闪换：交替换装｜每tick闪换：纯发包")
-            .defaultValue(ElytraFlySupport.ArmorMode.Normal)
-            .visible(this::isArmorMode)
+            .name("甲飞模式")
+            .description("甲飞的模式")
+            .defaultValue(ElytraFlySupport.ArmorMode.Off)
+            .onChanged(this::onArmorModeChanged)
             .build()
         );
 
@@ -174,246 +463,74 @@ public abstract class MixinElytraFly {
 
         spaceBlockInAir = sgArmor.add(new BoolSetting.Builder()
             .name("空中屏蔽空格")
-            .description("空中把空格当作没按（改本地输入，服务器不知道你按着空格）。"
-                + "服务端会把「按着跳跃启动滑翔」判为异常并取消起飞包（烟花随之中招），开启可避免；地面起跳不受影响。")
+            .description("空中屏蔽空格输入")
             .defaultValue(false)
             .visible(this::isArmorMode)
+            .build()
+        );
+
+        landingNoFall = sgArmor.add(new BoolSetting.Builder()
+            .name("落地防摔")
+            .description("防止你被摔死")
+            .defaultValue(false)
+            .visible(this::isArmorMode)
+            .build()
+        );
+
+        landingNoFallMode = sgArmor.add(new EnumSetting.Builder<ElytraFlySupport.LandingNoFallMode>()
+            .name("落地防摔方式")
+            .description("防止你摔死的方式")
+            .defaultValue(ElytraFlySupport.LandingNoFallMode.Grim)
+            .visible(() -> isArmorMode() && landingNoFall.get())
             .build()
         );
 
         grimInputSequence = sgArmor.add(new BoolSetting.Builder()
             .name("兼容grim输入检测")
-            .description("起飞包配一对跳跃输入包：起飞包之后这一 tick 的输入包带跳跃按下，下一 tick 再松开。"
-                + "让服务端在收到起飞包时看到跳跃松开（Grim 的 no release 会取消起飞包），随后又看到按下（不报 no jump）。"
-                + "开启后起飞包隔 tick 发一次。")
+            .description("模拟真实按键输入")
             .defaultValue(false)
             .visible(this::isArmorMode)
             .build()
         );
 
-        // ====== 合法平飞：飞行配置 ======
-        SettingGroup sgLegal = self.settings.createGroup("合法平飞");
-
-        autoFirework = sgLegal.add(new BoolSetting.Builder()
-            .name("自动烟花")
-            .description("飞行中自动释放烟花加速")
-            .defaultValue(true)
-            .visible(this::isLegalMode)
-            .build()
-        );
-
-        autoSwapElytra = sgLegal.add(new BoolSetting.Builder()
-            .name("自动替换鞘翅")
-            .description("空中按跳跃键自动换上鞘翅起飞落地自动换回胸甲。")
-            .defaultValue(false)
-            .visible(this::isLegalMode)
-            .build()
-        );
-
-        backpackFirework = sgLegal.add(new BoolSetting.Builder()
-            .name("背包烟花")
-            .description("自动烟花允许使用背包中的烟花")
-            .defaultValue(false)
-            .visible(() -> isLegalMode() && autoFirework.get())
-            .build()
-        );
-
-        backpackMode = sgLegal.add(new EnumSetting.Builder<BackpackUse.Mode>()
-            .name("背包使用模式")
-            .description("背包烟花的交换发包模式。1p：SWAP 2包;2p：PICKUP 4 包。除特殊原因，请使用2p更稳定")
-            .defaultValue(BackpackUse.Mode.PICKUP)
-            .visible(() -> isLegalMode() && autoFirework.get() && backpackFirework.get())
-            .build()
-        );
-
-        fwPriorityLv1 = sgLegal.add(new IntSetting.Builder()
-            .name("1级烟花优先级")
-            .description("1 级烟花的优先级，优先级高的烟花优先使用")
+        armorSwapInterval = sgArmor.add(new IntSetting.Builder()
+            .name("换甲间隔")
+            .description("换甲的间隔")
             .defaultValue(1)
             .min(1)
-            .max(3)
-            .visible(() -> isLegalMode() && autoFirework.get())
+            .max(20)
+            .sliderMax(10)
+            .visible(this::isArmorMode)
             .build()
         );
 
-        fwPriorityLv2 = sgLegal.add(new IntSetting.Builder()
-            .name("2级烟花优先级")
-            .description("2 级烟花的优先级，优先级高的烟花优先使用")
-            .defaultValue(1)
-            .min(1)
-            .max(3)
-            .visible(() -> isLegalMode() && autoFirework.get())
-            .build()
-        );
+        // ====== 无限鞘翅（照搬 AEfish 的 InfiniteElytra） ======
 
-        fwPriorityLv3 = sgLegal.add(new IntSetting.Builder()
-            .name("3级烟花优先级")
-            .description("3 级烟花的优先级，优先级高的烟花优先使用")
-            .defaultValue(1)
-            .min(1)
-            .max(3)
-            .visible(() -> isLegalMode() && autoFirework.get())
-            .build()
-        );
+        SettingGroup sgInfinite = self.settings.createGroup("无限鞘翅");
 
-        fwIntervalLv1 = sgLegal.add(new IntSetting.Builder()
-            .name("1级烟花间隔")
-            .description("1 级烟花的释放间隔（tick）")
-            .defaultValue(30)
-            .min(1)
-            .max(100)
-            .sliderMax(100)
-            .visible(() -> isLegalMode() && autoFirework.get())
-            .build()
-        );
-
-        fwIntervalLv2 = sgLegal.add(new IntSetting.Builder()
-            .name("2级烟花间隔")
-            .description("2 级烟花的释放间隔（tick）")
-            .defaultValue(40)
-            .min(1)
-            .max(100)
-            .sliderMax(100)
-            .visible(() -> isLegalMode() && autoFirework.get())
-            .build()
-        );
-
-        fwIntervalLv3 = sgLegal.add(new IntSetting.Builder()
-            .name("3级烟花间隔")
-            .description("3 级烟花的释放间隔（tick）")
-            .defaultValue(50)
-            .min(1)
-            .max(100)
-            .sliderMax(100)
-            .visible(() -> isLegalMode() && autoFirework.get())
-            .build()
-        );
-
-        legalArmorMode = sgLegal.add(new EnumSetting.Builder<ElytraFlySupport.LegalArmorMode>()
-            .name("甲飞模式")
-            .description("关闭：穿真鞘翅飞行。其余：用甲飞换装（假鞘翅）维持滑翔，可穿胸甲飞行。")
-            .defaultValue(ElytraFlySupport.LegalArmorMode.Off)
-            .visible(this::isLegalMode)
-            .build()
-        );
-
-        legalGrimInputSequence = sgLegal.add(new BoolSetting.Builder()
-            .name("兼容grim输入检测")
-            .description("甲飞起飞包配一对跳跃输入包：起飞包之后这一 tick 的输入包带跳跃按下，下一 tick 再松开。"
-                + "让服务端在收到起飞包时看到跳跃松开（Grim 的 no release 会取消起飞包），随后又看到按下（不报 no jump）。"
-                + "开启后起飞包隔 tick 发一次。")
+        infiniteElytra = sgInfinite.add(new BoolSetting.Builder()
+            .name("无限鞘翅")
+            .description("滑翔时定期脱下再穿上鞘翅刷新滑翔计时，让鞘翅无限耐久")
             .defaultValue(false)
-            .visible(() -> isLegalMode() && legalArmorMode.get() != ElytraFlySupport.LegalArmorMode.Off)
+            .onChanged(this::onInfiniteElytraChanged)
             .build()
         );
 
-        legalMuteSounds = sgLegal.add(new BoolSetting.Builder()
+        infinitePeriod = sgInfinite.add(new IntSetting.Builder()
+            .name("周期")
+            .description("脱下鞘翅的周期")
+            .defaultValue(16)
+            .range(1, 100)
+            .sliderRange(1, 40)
+            .visible(infiniteElytra::get)
+            .build()
+        );
+
+        infiniteMute = sgInfinite.add(new BoolSetting.Builder()
             .name("静音")
-            .description("屏蔽甲飞换装音效")
+            .description("开启后屏蔽装备穿戴音效，换甲不再响。")
             .defaultValue(true)
-            .visible(() -> isLegalMode() && legalArmorMode.get() != ElytraFlySupport.LegalArmorMode.Off)
-            .build()
-        );
-
-        // ====== 合法平飞：悬停配置 ======
-        SettingGroup sgHover = self.settings.createGroup("悬停");
-
-        hoverMode = sgHover.add(new EnumSetting.Builder<ElytraFlySupport.HoverMode>()
-            .name("悬停模式")
-            .description("不输入时如何悬停。悬停：直接浮在原地，不推荐。|冻结：开启冻结模块的效果（完全静止，不发位置移动包），推荐")
-            .defaultValue(ElytraFlySupport.HoverMode.Hover)
-            .visible(this::isLegalMode)
-            .build()
-        );
-
-        hoverFirework = sgHover.add(new BoolSetting.Builder()
-            .name("悬停时自动烟花")
-            .description("悬停期间按间隔静默释放快捷栏烟花，仅为保持滑翔状态正常防止反作弊拦截，不影响悬停。")
-            .defaultValue(false)
-            .visible(() -> isLegalMode() && hoverMode.get() == ElytraFlySupport.HoverMode.Hover)
-            .build()
-        );
-
-        hoverFwIntervalLv1 = sgHover.add(new IntSetting.Builder()
-            .name("悬停1级烟花间隔")
-            .description("悬停时 1 级烟花的释放间隔（tick）")
-            .defaultValue(30)
-            .min(1)
-            .max(100)
-            .sliderMax(100)
-            .visible(() -> isLegalMode() && hoverMode.get() == ElytraFlySupport.HoverMode.Hover && hoverFirework.get())
-            .build()
-        );
-
-        hoverFwIntervalLv2 = sgHover.add(new IntSetting.Builder()
-            .name("悬停2级烟花间隔")
-            .description("悬停时 2 级烟花的释放间隔（tick）")
-            .defaultValue(40)
-            .min(1)
-            .max(100)
-            .sliderMax(100)
-            .visible(() -> isLegalMode() && hoverMode.get() == ElytraFlySupport.HoverMode.Hover && hoverFirework.get())
-            .build()
-        );
-
-        hoverFwIntervalLv3 = sgHover.add(new IntSetting.Builder()
-            .name("悬停3级烟花间隔")
-            .description("悬停时 3 级烟花的释放间隔（tick）")
-            .defaultValue(50)
-            .min(1)
-            .max(100)
-            .sliderMax(100)
-            .visible(() -> isLegalMode() && hoverMode.get() == ElytraFlySupport.HoverMode.Hover && hoverFirework.get())
-            .build()
-        );
-
-        discardMomentum = sgHover.add(new BoolSetting.Builder()
-            .name("丢弃动量")
-            .description("勾选后冻结清空玩家动量，解除冻结后动量清零。反作弊不拦截情况下推荐开启，提示飞行精确度")
-            .defaultValue(false)
-            .visible(() -> isLegalMode() && hoverMode.get() == ElytraFlySupport.HoverMode.Freeze)
-            .build()
-        );
-
-        freezeFirework = sgHover.add(new BoolSetting.Builder()
-            .name("冻结烟花")
-            .description("冻结期间冻结烟花使用，解冻后继续使用\"还未使用完\"的烟花")
-            .defaultValue(false)
-            .visible(() -> isLegalMode() && hoverMode.get() == ElytraFlySupport.HoverMode.Freeze)
-            .build()
-        );
-
-        notGlidingUnfreeze = sgHover.add(new BoolSetting.Builder()
-            .name("不在滑翔解冻")
-            .description("不在滑翔状态时立即解除冻结")
-            .defaultValue(false)
-            .visible(() -> isLegalMode() && hoverMode.get() == ElytraFlySupport.HoverMode.Freeze)
-            .build()
-        );
-
-        // ====== 一键烟花（所有模式通用） ======
-        SettingGroup sgFirework = self.settings.createGroup("一键烟花");
-
-        oneKeyFirework = sgFirework.add(new KeybindSetting.Builder()
-            .name("一键烟花")
-            .description("按下快捷键释放一次烟花。甲飞：延后到换装窗口（服务器认滑翔的那一刻）释放；合法平飞：延后到移动包发送后释放。")
-            .defaultValue(Keybind.none())
-            .action(ElytraFlySupport::fireworkOnce)
-            .build()
-        );
-
-        oneKeyBackpackFirework = sgFirework.add(new BoolSetting.Builder()
-            .name("背包烟花")
-            .description("一键烟花允许使用背包中的烟花")
-            .defaultValue(false)
-            .build()
-        );
-
-        oneKeyBackpackMode = sgFirework.add(new EnumSetting.Builder<BackpackUse.Mode>()
-            .name("背包使用模式")
-            .description("一键烟花背包烟花的交换发包模式。1p：SWAP 2包;2p：PICKUP 4 包。除特殊原因，请使用2p更稳定")
-            .defaultValue(BackpackUse.Mode.PICKUP)
-            .visible(() -> oneKeyBackpackFirework.get())
+            .visible(infiniteElytra::get)
             .build()
         );
 
@@ -422,7 +539,10 @@ public abstract class MixinElytraFly {
         ElytraFlySupport.armorMode = armorMode;
         ElytraFlySupport.muteSounds = muteSounds;
         ElytraFlySupport.spaceBlockInAir = spaceBlockInAir;
+        ElytraFlySupport.landingNoFall = landingNoFall;
+        ElytraFlySupport.landingNoFallMode = landingNoFallMode;
         ElytraFlySupport.grimInputSequence = grimInputSequence;
+        ElytraFlySupport.armorSwapInterval = armorSwapInterval;
         ElytraFlySupport.autoFirework = autoFirework;
         ElytraFlySupport.autoSwapElytra = autoSwapElytra;
         ElytraFlySupport.backpackFirework = backpackFirework;
@@ -436,21 +556,134 @@ public abstract class MixinElytraFly {
         ElytraFlySupport.fwIntervalLv2 = fwIntervalLv2;
         ElytraFlySupport.fwIntervalLv3 = fwIntervalLv3;
         ElytraFlySupport.hoverMode = hoverMode;
+        ElytraFlySupport.hoverAntiKick = hoverAntiKick;
+        ElytraFlySupport.hoverAntiKickInterval = hoverAntiKickInterval;
         ElytraFlySupport.notGlidingUnfreeze = notGlidingUnfreeze;
         ElytraFlySupport.hoverFirework = hoverFirework;
         ElytraFlySupport.hoverFwIntervalLv1 = hoverFwIntervalLv1;
         ElytraFlySupport.hoverFwIntervalLv2 = hoverFwIntervalLv2;
         ElytraFlySupport.hoverFwIntervalLv3 = hoverFwIntervalLv3;
-        ElytraFlySupport.legalArmorMode = legalArmorMode;
-        ElytraFlySupport.legalGrimInputSequence = legalGrimInputSequence;
-        ElytraFlySupport.legalMuteSounds = legalMuteSounds;
-        ElytraFlySupport.oneKeyFirework = oneKeyFirework;
-        ElytraFlySupport.oneKeyBackpackFirework = oneKeyBackpackFirework;
-        ElytraFlySupport.oneKeyBackpackMode = oneKeyBackpackMode;
+
+        InfiniteElytraSupport.infiniteElytra = infiniteElytra;
+        InfiniteElytraSupport.period = infinitePeriod;
+        InfiniteElytraSupport.mute = infiniteMute;
+    }
+
+    // ====== 分组整理 ======
+
+    /**
+     * 把官方 General / Inventory / Autopilot 三块设置合并成一个「简单控制」块：
+     * 默认分组（General）直接改名成「简单控制」，另外两块设置搬进来后把空分组删掉。
+     */
+    @Unique
+    private static SettingGroup mergeOfficialGroups(ElytraFly self) {
+        SettingGroup simple = self.settings.getDefaultGroup();
+
+        for (String groupName : new String[] { "Inventory", "Autopilot" }) {
+            SettingGroup group = self.settings.getGroup(groupName);
+            if (group == null) continue;
+            moveSettings(group, simple);
+            self.settings.groups.remove(group);
+        }
+
+        setGroupName(simple, "简单控制");
+        return simple;
+    }
+
+    /** 把 from 分组里的设置全部搬到 to 分组末尾（Meteor 只有末尾追加，没有跨分组搬家） */
+    @Unique
+    private static void moveSettings(SettingGroup from, SettingGroup to) {
+        if (from == to) return;
+        List<Setting<?>> source = ((SettingGroupAccessor) from).getSettings();
+        List<Setting<?>> target = ((SettingGroupAccessor) to).getSettings();
+        target.addAll(source);
+        source.clear();
+    }
+
+    /** 改写设置内部名（配置键/翻译键都用它）：name 是 final 字段，用 Unsafe 直接写 */
+    @Unique
+    private static void renameSetting(Setting<?> setting, String name) {
+        try {
+            Field field = Setting.class.getDeclaredField("name");
+            field.setAccessible(true);
+            sun.misc.Unsafe unsafe = getUnsafe();
+            unsafe.putObject(setting, unsafe.objectFieldOffset(field), name);
+        } catch (Exception e) {
+            ModernSupport.LOG.warn("重命名 ElytraFly 模式设置失败", e);
+        }
     }
 
     /**
-     * 隐藏官方其他模式的设置（甲飞/合法平飞接管时无意义），保留官方「模式」设置本身。
+     * 把「简单控制模式」的默认值与初始值都改成「关闭」。
+     *
+     * <p>官方 {@link ElytraFly} 构造设置时给的是 {@code defaultValue(Vanilla)}，两个地方要改：
+     * <ul>
+     *   <li>{@code defaultValue}（{@code protected final}，用 Unsafe 写）：设置界面的「重置」用的就是它；</li>
+     *   <li>当前值（{@code flightMode.set(off)}）：新装 / 配置里没有这一项时模块默认什么都不做。</li>
+     * </ul>
+     *
+     * <p>已保存的配置在 {@code Modules#load}（{@code Systems.load()}）里覆盖回来，
+     * 那一步在模块构造之后，不会把玩家自己的选择冲掉。
+     */
+    @Unique
+    private void applyDefaultOffMode() {
+        ElytraFlightModes off = ElytraFlySupport.offMode();
+        if (off == null) return;
+
+        try {
+            Field field = Setting.class.getDeclaredField("defaultValue");
+            field.setAccessible(true);
+            sun.misc.Unsafe unsafe = getUnsafe();
+            unsafe.putObject(flightMode, unsafe.objectFieldOffset(field), off);
+        } catch (Exception e) {
+            ModernSupport.LOG.warn("改写 ElytraFly 模式默认值失败", e);
+        }
+
+        flightMode.set(off);
+    }
+
+    /**
+     * 收敛「简单控制模式」的候选值：运行时枚举里还有官方的 俯仰40 / 弹跳（不能从 $VALUES 里删，
+     * 官方 switch 的 $SwitchMap 按 values().length 分配，删了会数组越界崩溃），
+     * 所以这里改 {@code EnumSetting.values}（命令解析/候选）与 {@code suggestions}，
+     * 下拉框的过滤由 {@link MixinDefaultSettingsWidgetFactory} 负责。
+     */
+    @Unique
+    private void filterFlightModeValues() {
+        try {
+            sun.misc.Unsafe unsafe = getUnsafe();
+            ElytraFlightModes[] allowed = ElytraFlySupport.simpleControlModes();
+
+            Field valuesField = EnumSetting.class.getDeclaredField("values");
+            valuesField.setAccessible(true);
+            unsafe.putObject(flightMode, unsafe.objectFieldOffset(valuesField), allowed);
+
+            Field suggestionsField = EnumSetting.class.getDeclaredField("suggestions");
+            suggestionsField.setAccessible(true);
+            @SuppressWarnings("unchecked")
+            List<String> suggestions = (List<String>) suggestionsField.get(flightMode);
+            suggestions.clear();
+            for (ElytraFlightModes mode : allowed) suggestions.add(mode.toString());
+        } catch (Exception e) {
+            ModernSupport.LOG.warn("收敛 ElytraFly 模式候选值失败", e);
+        }
+    }
+
+    /** 改写分组名（就是 GUI 里的分组标题）：name 是 final 字段，用 Unsafe 直接写 */
+    @Unique
+    private static void setGroupName(SettingGroup group, String name) {
+        try {
+            Field field = SettingGroup.class.getDeclaredField("name");
+            field.setAccessible(true);
+            sun.misc.Unsafe unsafe = getUnsafe();
+            unsafe.putObject(group, unsafe.objectFieldOffset(field), name);
+        } catch (Exception e) {
+            ModernSupport.LOG.warn("重命名 ElytraFly 设置分组失败", e);
+        }
+    }
+
+    /**
+     * 隐藏官方其他模式的设置（合法 / 甲飞 / 关闭 时它们都没意义），保留「简单控制模式」设置本身。
      * Setting.visible 是 private final 字段，Java 17+ 反射无法修改，用 Unsafe 直接写。
      */
     @Unique
@@ -463,16 +696,70 @@ public abstract class MixinElytraFly {
             for (SettingGroup group : self.settings) {
                 for (Setting<?> setting : group) {
                     // 官方模式设置本身必须保留可见（否则切不回官方模式）
-                    if (setting.name.equals("mode")) continue;
+                    if (setting == flightMode) continue;
 
                     IVisible original = (IVisible) visibleField.get(setting);
-                    getUnsafe().putObject(setting, offset, (IVisible) () -> !isCustomMode() && (original == null || original.isVisible()));
+                    getUnsafe().putObject(setting, offset,
+                        (IVisible) () -> !suppressOfficialLogic() && (original == null || original.isVisible()));
                 }
             }
         } catch (Exception e) {
             // 隐藏失败不影响主功能，但设置界面会显示官方设置，记录日志便于排查
             ModernSupport.LOG.warn("隐藏 ElytraFly 官方设置失败", e);
         }
+    }
+
+    // ====== 互斥 ======
+
+    /**
+     * 接管官方模式设置的回调：官方只允许构造时指定 onChanged，
+     * 这里用 Unsafe 把原回调包一层，实现「发包 ↔ 甲飞 / 无限鞘翅」互斥。
+     */
+    @Unique
+    private void wrapFlightModeOnChanged() {
+        try {
+            Field field = Setting.class.getDeclaredField("onChanged");
+            field.setAccessible(true);
+            sun.misc.Unsafe unsafe = getUnsafe();
+            long offset = unsafe.objectFieldOffset(field);
+
+            @SuppressWarnings("unchecked")
+            Consumer<ElytraFlightModes> original = (Consumer<ElytraFlightModes>) unsafe.getObject(flightMode, offset);
+
+            unsafe.putObject(flightMode, offset, (Consumer<ElytraFlightModes>) mode -> {
+                if (original != null) original.accept(mode);
+                onFlightModeChanged(mode);
+            });
+        } catch (Exception e) {
+            ModernSupport.LOG.warn("接管 ElytraFly 模式设置回调失败（互斥可能不生效）", e);
+        }
+    }
+
+    /** 选到「发包」：把互斥的 甲飞 / 无限鞘翅 关掉 */
+    @Unique
+    private void onFlightModeChanged(ElytraFlightModes mode) {
+        if (mode == null || !mode.name().equals("Packet")) return;
+
+        if (isArmorMode()) armorMode.set(ElytraFlySupport.ArmorMode.Off);
+        if (infiniteElytra != null && infiniteElytra.get()) infiniteElytra.set(false);
+    }
+
+    /** 开甲飞：关掉无限鞘翅；「发包」模式互斥，自动切回原版 */
+    @Unique
+    private void onArmorModeChanged(ElytraFlySupport.ArmorMode mode) {
+        if (mode == null || mode == ElytraFlySupport.ArmorMode.Off) return;
+
+        if (infiniteElytra != null && infiniteElytra.get()) infiniteElytra.set(false);
+        if (isPacketMode()) flightMode.set(ElytraFlightModes.Vanilla);
+    }
+
+    /** 开无限鞘翅：关掉甲飞；「发包」模式互斥，自动切回原版 */
+    @Unique
+    private void onInfiniteElytraChanged(Boolean enabled) {
+        if (enabled == null || !enabled) return;
+
+        if (isArmorMode()) armorMode.set(ElytraFlySupport.ArmorMode.Off);
+        if (isPacketMode()) flightMode.set(ElytraFlightModes.Vanilla);
     }
 
     @Unique
@@ -486,42 +773,71 @@ public abstract class MixinElytraFly {
         }
     }
 
-    // ====== 事件接管：官方模式为甲飞/合法平飞时跳过官方逻辑 ======
+    // ====== 事件接管：合法 / 甲飞 由我们接管，「关闭」时官方逻辑同样跳过 ======
 
     @Inject(method = "onPreTick", at = @At("HEAD"), cancellable = true)
     private void onPreTick(TickEvent.Pre event, CallbackInfo ci) {
         // 空中屏蔽空格的收尾：模式切走/关掉选项时也要把真实输入补发回服务器
         ElytraFlySupport.onPreTickAlways();
-        if (!isCustomMode()) return;
-        ElytraFlySupport.onTick();
-        ci.cancel();
+        // 我们自己的每 tick 逻辑只在 合法 / 甲飞 时跑（「关闭」没有任何飞行控制要跑）
+        if (isCustomMode()) ElytraFlySupport.onTick();
+        if (suppressOfficialLogic()) ci.cancel();
     }
 
     @Inject(method = "onTick", at = @At("HEAD"), cancellable = true)
     private void onTick(TickEvent.Post event, CallbackInfo ci) {
-        if (!isCustomMode()) return;
-        ci.cancel();
+        // 无限鞘翅不分模式：关闭 / 原版 / 发包 / 合法 / 甲飞 下都能刷新服务端滑翔计时
+        InfiniteElytraSupport.onTick();
+        if (suppressOfficialLogic()) ci.cancel();
     }
 
     @Inject(method = "onPlayerMove", at = @At("HEAD"), cancellable = true)
     private void onPlayerMove(PlayerMoveEvent event, CallbackInfo ci) {
-        if (!isCustomMode()) return;
-        // 甲飞/合法平飞不干预移动包内的移动向量（合法平飞靠服务器视角 + 滑翔物理），跳过官方逻辑
-        ci.cancel();
+        // 甲飞/合法不干预移动包内的移动向量（合法靠服务器视角 + 滑翔物理），跳过官方逻辑
+        // 「关闭」同理：官方的飞行控制（含 原版 / 发包）一律不跑
+        if (suppressOfficialLogic()) ci.cancel();
+    }
+
+    /**
+     * 「原版 + 甲飞」兼容：放行官方原版控制开头那道「胸甲槽要有滑翔组件」的守卫。
+     *
+     * <p>官方的「原版」控制全程建立在「客户端此刻穿着鞘翅、真的在滑翔」之上，方法开头
+     * 就是一句 {@code getItemBySlot(CHEST).has(GLIDER)}，不满足直接整块返回。甲飞穿的是
+     * 胸甲（鞘翅只在换装窗口那一两 tick 出现在胸甲槽上），这道守卫会把原版控制整体挡掉，
+     * 表现就是「原版 + 甲飞」只剩甲飞的换装滑翔，WASD / 空格完全没有反应。
+     *
+     * <p>这里只把这<b>一处判定</b>改成「有滑翔组件」（仅当
+     * {@link ElytraFlySupport#shouldProvideGliderForVanillaArmor()} 为真，也就是甲飞正按
+     * 滑翔运算移动的那些 tick）：不换装、不动背包、不改滑翔状态，甲飞的换装时序 / 发包 /
+     * 姿势锁定一律不变，官方原版控制照常接管本 tick 的移动向量。
+     *
+     * <p>{@code require = 0}：官方要是改了方法结构，注入失败也只是「原版 + 甲飞」没有原版
+     * 控制，不会让游戏起不来。
+     */
+    @Redirect(
+        method = "onPlayerMove",
+        at = @At(
+            value = "INVOKE",
+            target = "Lnet/minecraft/world/item/ItemStack;has(Lnet/minecraft/core/component/DataComponentType;)Z"
+        ),
+        require = 0
+    )
+    private boolean modernsupport$gliderForVanillaArmor(ItemStack stack, DataComponentType<?> component) {
+        if (ElytraFlySupport.shouldProvideGliderForVanillaArmor()) return true;
+        return stack.has(component);
     }
 
     @Inject(method = "onPacketSend", at = @At("HEAD"), cancellable = true)
     private void onPacketSend(PacketEvent.Send event, CallbackInfo ci) {
-        if (!isCustomMode()) return;
-        ElytraFlySupport.onPacketSend(event);
-        ci.cancel();
+        InfiniteElytraSupport.onPacketSend(event);
+        if (isCustomMode()) ElytraFlySupport.onPacketSend(event);
+        if (suppressOfficialLogic()) ci.cancel();
     }
 
     @Inject(method = "onPacketReceive", at = @At("HEAD"), cancellable = true)
     private void onPacketReceive(PacketEvent.Receive event, CallbackInfo ci) {
-        if (!isCustomMode()) return;
-        ElytraFlySupport.onPacketReceive(event);
-        ci.cancel();
+        if (isCustomMode()) ElytraFlySupport.onPacketReceive(event);
+        if (suppressOfficialLogic()) ci.cancel();
     }
 
     // ====== 生命周期：追加初始化/清理（官方逻辑保留） ======
@@ -529,19 +845,36 @@ public abstract class MixinElytraFly {
     @Inject(method = "onActivate", at = @At("TAIL"))
     private void onActivate(CallbackInfo ci) {
         ElytraFlySupport.onActivate();
+        InfiniteElytraSupport.reset();
+        // 与拆出去的「鞘翅Pitch40 / 鞘翅弹跳」互斥：两边都在控制滑翔
+        disableModule(ElytraPitch40.class);
+        disableModule(ElytraBounce.class);
     }
 
     @Inject(method = "onDeactivate", at = @At("TAIL"))
     private void onDeactivate(CallbackInfo ci) {
         ElytraFlySupport.onDeactivate();
+        InfiniteElytraSupport.reset();
+    }
+
+    @Unique
+    private static void disableModule(Class<? extends Module> moduleClass) {
+        Module module = Modules.get().get(moduleClass);
+        if (module != null && module.isActive()) module.toggle();
     }
 
     // ====== HUD 显示 ======
 
     @Inject(method = "getInfoString", at = @At("HEAD"), cancellable = true)
     private void onGetInfoString(CallbackInfoReturnable<String> cir) {
-        if (isCustomMode()) {
-            cir.setReturnValue(flightMode.get().toString());
+        if (isLegalMode()) {
+            cir.setReturnValue(isArmorMode() ? "合法+甲飞" : "合法");
+        } else if (isArmorMode()) {
+            cir.setReturnValue(isVanillaMode() ? "原版+甲飞" : "甲飞");
+        } else if (isSimpleControlOff()) {
+            // 关闭：官方那套 currentMode 的 HUD 名字会残留上一个模式，这里直接标成关闭 / 无限鞘翅
+            boolean infinite = infiniteElytra != null && infiniteElytra.get();
+            cir.setReturnValue(infinite ? "无限鞘翅" : "关闭");
         }
     }
 }

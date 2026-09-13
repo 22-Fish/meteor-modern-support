@@ -6,7 +6,6 @@ import meteordevelopment.meteorclient.renderer.Renderer3D;
 import meteordevelopment.meteorclient.settings.BoolSetting;
 import meteordevelopment.meteorclient.settings.ColorSetting;
 import meteordevelopment.meteorclient.settings.EnumSetting;
-import meteordevelopment.meteorclient.settings.IntSetting;
 import meteordevelopment.meteorclient.settings.Setting;
 import meteordevelopment.meteorclient.settings.SettingGroup;
 import meteordevelopment.meteorclient.systems.modules.combat.KillAura;
@@ -72,9 +71,6 @@ public abstract class MixinKillAura {
     private Setting<LegalRotation.Mode> legalRotationMode;
 
     @Unique
-    private Setting<Integer> onHitHoldTicks;
-
-    @Unique
     private Setting<Boolean> aimAndRangeOptimization;
 
     @Unique
@@ -107,26 +103,16 @@ public abstract class MixinKillAura {
 
         legalRotationMode = sg.add(new EnumSetting.Builder<LegalRotation.Mode>()
             .name("合法转头")
-            .description("合法转头模式。严格：移动方向为真实旋转。静默：在严格基础上映射 WASD 按键,尝试让移动方向与视觉朝向一致。")
+            .description("合法转头模式。严格：移动方向为真实旋转。静默：在严格基础上映射 WASD 按键,尝试让移动方向与视觉朝向一致")
             .defaultValue(LegalRotation.Mode.OFF)
             .visible(() -> rotation.get() != KillAura.RotationMode.None)
-            .build()
-        );
-
-        onHitHoldTicks = sg.add(new IntSetting.Builder()
-            .name("转回延迟")
-            .description("OnHit模式下，攻击后保持旋转的 tick 数")
-            .defaultValue(1)
-            .min(0)
-            .max(20)
-            .visible(() -> rotation.get() == KillAura.RotationMode.OnHit)
             .build()
         );
 
         // 瞄准点与范围优化：插到默认分组的「旋转」(rotate) 下面，改的是瞄准角度与范围判定
         aimAndRangeOptimization = new BoolSetting.Builder()
             .name("瞄准点与范围优化")
-            .description("同时优化瞄准点与攻击范围：瞄准碰撞箱上最靠近玩家的点（而非中心），范围按眼睛到碰撞箱距离判定（对齐服务器）。")
+            .description("同时优化瞄准点与攻击范围：瞄准碰撞箱上最靠近玩家的点（而非中心），范围按眼睛到碰撞箱距离判定")
             .defaultValue(true)
             .build();
         insertAfter(self.settings.getDefaultGroup(), "rotate", aimAndRangeOptimization);
@@ -141,7 +127,7 @@ public abstract class MixinKillAura {
 
         rangeColor = self.settings.getDefaultGroup().add(new ColorSetting.Builder()
             .name("颜色")
-            .description("范围渲染球体的颜色和透明度。")
+            .description("范围渲染球体的颜色和透明度")
             .defaultValue(new SettingColor(0, 255, 0, 50))
             .visible(rangeRender::get)
             .build()
@@ -189,8 +175,6 @@ public abstract class MixinKillAura {
         LegalRotation.Mode mode = legalRotationMode.get();
         if (mode == LegalRotation.Mode.SEVERE || mode == LegalRotation.Mode.QUIET) {
             LegalRotation.rotate(yaw, pitch, mode);
-            // 攻击后保持旋转 N tick 再转回原朝向
-            LegalRotation.setHoldTicks(onHitHoldTicks.get());
         } else {
             // 关闭 / 停止移动（未实现）：回退原版静默旋转
             Rotations.rotate(yaw, pitch);

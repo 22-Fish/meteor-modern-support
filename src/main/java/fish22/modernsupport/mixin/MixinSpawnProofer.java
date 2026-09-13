@@ -53,7 +53,9 @@ import static meteordevelopment.meteorclient.MeteorClient.mc;
 /**
  * SpawnProofer（防止生成）增强 mixin：
  * <ul>
- *   <li>「合法转头」：放置前直接调 LegalRotation.rotate()，不走 MixinBlockUtils 间接拦截</li>
+ *   <li>「合法转头」：放置前调 LegalRotation.rotate()，并把放置排到「带着这份朝向的
+ *       移动包」之后（{@link LegalRotation#runAfterSend(Runnable)}），服务器校验放置时
+ *       看到的才是目标角度</li>
  *   <li>「背包放置」：方块在背包（主背包）也能放置（走 BackpackUse 4 包 PICKUP）</li>
  *   <li>「瞄准点与范围优化」：范围按眼睛距离算，瞄准点用支撑方块表面中心（而非放置方块中心）</li>
  * </ul>
@@ -206,7 +208,7 @@ public abstract class MixinSpawnProofer {
             return BlockUtils.place(blockPos, block, rotate, rotationPriority, checkEntities);
         }
 
-        // 直接算旋转 + 调合法转头（不走 MixinBlockUtils 间接拦截）
+        // 算旋转角度 → 交给合法转头 → 放置排到移动包之后
         BlockHitResult hitResult = calcPlaceHitResult(blockPos);
         double yaw = Rotations.getYaw(hitResult.getLocation());
         double pitch = Rotations.getPitch(hitResult.getLocation());
@@ -214,10 +216,13 @@ public abstract class MixinSpawnProofer {
         if (debugLog.get()) logToChat("旋转");
         LegalRotation.rotate(yaw, pitch, mode);
 
-        // 以 rotate=false 调 BlockUtils.place，放置立即执行（不经过 Rotations.rotate）
-        boolean result = BlockUtils.place(blockPos, block, false, rotationPriority, checkEntities);
-        if (debugLog.get() && result) logToChat("放置");
-        return result;
+        // 放置必须排在「带着这份朝向的移动包」之后：否则服务器校验放置时看到的还是旧角度。
+        // 排进合法转头的队列即可（本 tick 移动包之后执行；tick 末尾调用则顺延到下一 tick）。
+        LegalRotation.runAfterSend(() -> {
+            boolean result = BlockUtils.place(blockPos, block, false, rotationPriority, checkEntities);
+            if (debugLog.get() && result) logToChat("放置");
+        });
+        return true;
     }
 
     @Unique
@@ -225,16 +230,23 @@ public abstract class MixinSpawnProofer {
         BlockHitResult hitResult = calcPlaceHitResult(blockPos);
         Predicate<ItemStack> pred = stack -> blocks.get().contains(Block.byItem(stack.getItem()));
 
-        if (useCorrection) {
-            double yaw = Rotations.getYaw(hitResult.getLocation());
-            double pitch = Rotations.getPitch(hitResult.getLocation());
-            if (debugLog.get()) logToChat("旋转");
-            LegalRotation.rotate(yaw, pitch, mode);
+        if (!useCorrection) {
+            boolean result = fish22.modernsupport.utils.BackpackUse.place(pred, hitResult, backpackMode.get());
+            if (debugLog.get() && result) logToChat("放置");
+            return result;
         }
 
-        boolean result = fish22.modernsupport.utils.BackpackUse.place(pred, hitResult, backpackMode.get());
-        if (debugLog.get() && result) logToChat("放置");
-        return result;
+        double yaw = Rotations.getYaw(hitResult.getLocation());
+        double pitch = Rotations.getPitch(hitResult.getLocation());
+        if (debugLog.get()) logToChat("旋转");
+        LegalRotation.rotate(yaw, pitch, mode);
+
+        // 同 redirectPlace：放置排到移动包之后，服务器那时才认这份朝向
+        LegalRotation.runAfterSend(() -> {
+            boolean result = fish22.modernsupport.utils.BackpackUse.place(pred, hitResult, backpackMode.get());
+            if (debugLog.get() && result) logToChat("放置");
+        });
+        return true;
     }
 
     // ====== 瞄准点与范围优化 ======

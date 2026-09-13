@@ -875,6 +875,8 @@
   "Setting.Meteor Client.keybind.Description": "按键绑定模式的绑定键.",
   "Module.Meteor Client.elytra-fly": "鞘翅飞行",
   "Module.Meteor Client.elytra-fly.Description": "让你对鞘翅有更多的控制.",
+  "Setting.Meteor Client.simple-mode": "简单控制模式",
+  "Setting.Meteor Client.simple-mode.Description": "关闭（默认）：模块不做任何飞行控制，甲飞/无限鞘翅照常可用。原版为 Meteor 官方模式（与甲飞不互斥，开着甲飞时原版那套控制照常生效），发包为官方发包模式（与甲飞互斥），合法为我们的合法平飞（可开启甲飞换装）。",
   "Setting.Meteor Client.auto-take-off": "自动起飞",
   "Setting.Meteor Client.auto-take-off.Description": "当你按住跳跃键时,自动起飞,无需双跳.",
   "Setting.Meteor Client.fall-multiplier": "下降倍数",

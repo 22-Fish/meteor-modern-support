@@ -29,6 +29,8 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
+import static meteordevelopment.meteorclient.MeteorClient.mc;
+
 /**
  * 静默模式按键映射 mixin
  *
@@ -47,7 +49,7 @@ public abstract class MixinKeyboardInput extends ClientInput {
     @Inject(method = "tick", at = @At("TAIL"))
     private void onTickTail(CallbackInfo ci) {
         // 仅静默模式生效
-        if (!LegalRotation.isActive() || LegalRotation.getMode() != LegalRotation.Mode.QUIET) {
+        if (!LegalRotation.isRotating() || LegalRotation.getMode() != LegalRotation.Mode.QUIET) {
             return;
         }
 
@@ -59,8 +61,8 @@ public abstract class MixinKeyboardInput extends ClientInput {
             return;
         }
 
-        // 客户端视觉朝向与服务器朝向的差值
-        float deltaYaw = LegalRotation.getVisualYaw() - LegalRotation.getTargetYaw();
+        // 客户端视觉朝向与服务器朝向的差值（视角 − 真实角度）
+        float deltaYaw = mc.player.getYRot() - LegalRotation.getRealYaw();
         double rad = Math.toRadians(deltaYaw);
 
         // 输入向量旋转（LiquidBounce 同款公式）

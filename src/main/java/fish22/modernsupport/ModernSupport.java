@@ -1,9 +1,14 @@
 package fish22.modernsupport;
 
 import fish22.modernsupport.gui.ItemPickerScreen;
+import fish22.modernsupport.modules.ElytraBounce;
+import fish22.modernsupport.modules.ElytraPitch40;
+import fish22.modernsupport.modules.FireworkUse;
 import fish22.modernsupport.modules.Freeze;
+import fish22.modernsupport.modules.FireworkBoost;
 import fish22.modernsupport.modules.GhostMine;
 import fish22.modernsupport.modules.ItemUse;
+import fish22.modernsupport.modules.LegalRotationConfig;
 import fish22.modernsupport.modules.Spin;
 import fish22.modernsupport.settings.ActionSetting;
 import fish22.modernsupport.settings.ItemUseListSetting;
@@ -116,9 +121,16 @@ public class ModernSupport extends MeteorAddon {
 
         // 杂项模块
         Modules.get().add(new ItemUse());
+        // 一键烟花（从「鞘翅飞行」模块拆出来的独立模块，排在「一键使用物品」下面）
+        Modules.get().add(new FireworkUse());
+        Modules.get().add(new LegalRotationConfig());
 
         // 移动模块
         Modules.get().add(new Freeze());
+        Modules.get().add(new FireworkBoost());
+        // 从官方「鞘翅飞行」拆出来的两个模式（移动分类）
+        Modules.get().add(new ElytraPitch40());
+        Modules.get().add(new ElytraBounce());
         // 鞘翅飞行增强已通过 MixinElytraFly 注入 Meteor 官方 ElytraFly 模块
 
         // 世界模块

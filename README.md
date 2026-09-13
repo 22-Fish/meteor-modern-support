@@ -11,6 +11,7 @@
 |功能|说明|
 |-|-|
 |合法转头 API|旋转时修正移动方向：走路、鞘翅移动方向与旋转朝向一致（参考 [Baritone](https://github.com/cabaletta/baritone)，[LiquidBounce](https://github.com/CCBlueX/LiquidBounce)）|
+|合法转头可见朝向|杂项模块「合法转头API配置」：开启「可见旋转方向」（默认开启）后，第三视角里玩家模型的朝向会跟着真实角度，方便判断服务器看到的朝向|
 |配置保存修改|设置修改 / 模块开关后异步防抖保存，强退不丢配置|
 |[Meteor-I18n-Support-plugin](https://github.com/dingzhen-vape/Meteor-I18n-Support-plugin) 语言支持|Meteor 全界面多语言：Config 里可设置语言（默认跟随 Minecraft），游戏目录动态加载语言文件|
 |背包使用|已经初步实现。一个tick内交换2次，直接使用背包中的物品。|
@@ -85,19 +86,6 @@ LegalRotation.rotateWithMode(yaw, pitch, legalRotation.get());
 * 调用方每 tick 调用一次（如 KillAura 的 onTick）；`LegalRotation.rotateWithMode` 会按模式自动分发（严格/静默走合法转头，其余回退原版 `Rotations.rotate`）
 * 合法转头状态**每 tick 自动清除**：停止调用后下一个 tick 自动归位，不会残留锁定
 * 需要回调时用 `LegalRotation.rotate(yaw, pitch, mode, callback)`，回调在移动包发送完毕后执行
-
-### 注意事项
-
-1. **全局状态**：合法转头状态是全局静态的，多个模块同时旋转会互相覆盖，避免同时使用
-2. **鞘翅飞行**：移动方向跟随服务器朝向，鞘翅方向正确
-
-### 内置示例
-
-* **KillAura 集成**（`mixin/MixinKillAura.java`）：通过 `@Redirect` 拦截 `Rotations.rotate(DD)` 的两个调用点，替换为合法转头
-* **转圈模块**（`modules/Spin.java`）：完整的"设置项 + rotateWithMode"使用范例
-
-
-
 
 
 
