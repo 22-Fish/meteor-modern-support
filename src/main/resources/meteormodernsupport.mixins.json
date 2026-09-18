@@ -30,10 +30,13 @@
     "MixinConfigScreen",
     "MixinModuleListFilter",
     "MixinModulesScreen",
+    "MultiPlayerGameModeDelayAccessor",
     "MixinTextRenderer",
     "MixinVanillaTextRenderer",
     "MixinVisibleRotation",
     "MixinWTopBar",
+    "MixinScaffold",
+    "MixinSpeedMine",
     "MixinSpawnProofer",
     "MixinSynchedEntityData",
     "MixinDefaultSettingsWidgetFactory"

@@ -8,29 +8,12 @@
 
 
 
-|功能|说明|
-|-|-|
-|合法转头 API|旋转时修正移动方向：走路、鞘翅移动方向与旋转朝向一致（参考 [Baritone](https://github.com/cabaletta/baritone)，[LiquidBounce](https://github.com/CCBlueX/LiquidBounce)）|
-|合法转头可见朝向|杂项模块「合法转头API配置」：开启「可见旋转方向」（默认开启）后，第三视角里玩家模型的朝向会跟着真实角度，方便判断服务器看到的朝向|
-|配置保存修改|设置修改 / 模块开关后异步防抖保存，强退不丢配置|
-|[Meteor-I18n-Support-plugin](https://github.com/dingzhen-vape/Meteor-I18n-Support-plugin) 语言支持|Meteor 全界面多语言：Config 里可设置语言（默认跟随 Minecraft），游戏目录动态加载语言文件|
-|背包使用|已经初步实现。一个tick内交换2次，直接使用背包中的物品。|
-
-
-
-
-
-
-
 
 
 ## 分页功能
-
 * 我们为meteor加入了分页功能。相信你一定遇到过这样一个问题:安装了一堆实用的插件，可是屏幕里根本放不下这么多，非常难受。在安装的插件过多的情况下，一页难以显示，分页是个好主意。
 * 在conifg页面，现在有页面设置选项，你可以创建多个页面，这些页面都会显示在顶端页面选择栏(不知道是不是这么表达，就是config,GUI那一栏)上，点击即可进入另一页面。config的页面设置界面点击页面列表中的页面名称，可以选择此页面肇展示的板块。
 * 我们会在启动时检查所有模块应用的页面。如果一个模块没有被记录过，那么推断他是新加的插件，自动在主界面开启显示。
-
-
 
 
 
@@ -42,18 +25,12 @@
 
 
 
-
-
-
-
-
-
 ## 合法转头 API 使用文档
 
 ### 为什么需要它
 
-* Meteor 原版 `Rotations.rotate` 是**发包旋转**：只在发包旋转，移动计算（aiStep）仍按客户端原朝向进行 → 旋转与移动方向不一致（走路、鞘翅方向不对）,在现代反作弊下回弹几乎是必然。
-* 本 API 采用 **Baritone LookBehavior** 的机制：**移动计算前真实设置玩家朝向** → WASD 移动方向、鞘翅方向自然跟随旋转；移动包发送后恢复原朝向（客户端静默）。状态由调用方每 tick 刷新，停止调用后自动归位。
+* Meteor 原版 `Rotations.rotate` 是**发包旋转**：只在发包旋转，移动计算仍按客户端原朝向进行 → 旋转与移动方向不一致,在现代反作弊下回弹几乎是必然。
+* 我们旋转同时设置真实移动朝向，移动符合原版，不触发反作弊
 * **一般情况下请不要使用严格模式，但是为了可能的特殊需求，仍保留**
 
 ### 快速开始（两步）
@@ -70,44 +47,39 @@ private final Setting<LegalRotation.Mode> legalRotation =
 
 // 2. 每次旋转时调用（例如模块 onTick 里）
 LegalRotation.rotateWithMode(yaw, pitch, legalRotation.get());
+//调用方每 tick 调用一次,下tick自动转回去
 ```
 
 ### 模式说明
 
 |模式|行为|
 |-|-|
-|关闭|原版meteor旋转|
-|停止移动|暂未实现，选中等同关闭|
 |严格|真实旋转 + 客户端静默：服务器朝向正确、移动方向跟随服务器朝向、客户端视角不动|
-|静默|在严格基础上映射 WASD 按键：移动方向与**客户端视觉朝向**一致。例如服务器朝正右（90°）、视觉朝正前（0°）时，W 键等效 A 键，人物仍朝视觉正前方移动；斜向自动产生 W+D 组合键效果，moveVector 使用浮点向量，任意角度精确|
-
-### 时序与生命周期
-
-* 调用方每 tick 调用一次（如 KillAura 的 onTick）；`LegalRotation.rotateWithMode` 会按模式自动分发（严格/静默走合法转头，其余回退原版 `Rotations.rotate`）
-* 合法转头状态**每 tick 自动清除**：停止调用后下一个 tick 自动归位，不会残留锁定
-* 需要回调时用 `LegalRotation.rotate(yaw, pitch, mode, callback)`，回调在移动包发送完毕后执行
+|静默|在严格基础上映射 WASD 按键：尝试让移动方向与**客户端视觉朝向**一致|
 
 
+### 优先级（同一 tick 多个模块抢转向）
+```java
+// 指定优先级（严格模式）
+LegalRotation.rotate(yaw, pitch, LegalRotation.Mode.SEVERE, 50);
+// 严格模式 + 自己设置项里的优先级
+LegalRotation.rotate(yaw, pitch, legalRotationPriority.get());
+// 被顶掉就不做后面那件事（放置包必须在「带着这份朝向的移动包」之后才发得合法）
+if (!LegalRotation.rotate(aim.yaw(), aim.pitch(), mode, priority)) return;
+```
 
 
 ## 语言支持（[Meteor-I18n-Support-plugin](https://github.com/dingzhen-vape/Meteor-I18n-Support-plugin)）
-
 Meteor 本体的文字（模块名、设置名、描述）是代码写死的，本 mod 通过 mixin 在构造时替换为语言文件中的翻译，并支持运行时切换（改完点击按钮刷新，重进界面立即生效，无需重启游戏）
-
 ### 设置入口
-
 Meteor 设置主界面（`/meteor` → Config）新增 **Language（语言）** 设置（下拉列表）：
-
 * 选项自动拉取**游戏目录 `meteor-lang/` 下所有文件夹**（文件夹名即语言代码），加上内置语言（简体中文 / 英语）
 * **首次启动自动选择**：与 Minecraft 游戏语言匹配的语言（MC 简体中文 → 中文，MC 英语 → 英语），无匹配时用英语兜底
-* 切换语言立即生效，无需重启；游戏运行中新增的语言文件夹也会出现在列表里
+* 切换语言重新打开界面立即生效，无需重启；游戏运行中新增的语言文件夹也会出现在列表里
 
 ### 语言文件位置
-
 **内置翻译**（初始化兜底）：打包在 mod 内 `assets/meteor-modern-support/lang/`，随 mod 分发。
-
 **外部语言文件**：游戏目录下 `meteor-lang/<语言名>/` 文件夹，**文件夹名即语言显示名**（内置语言为 `简体中文` / `English`），文件夹内**所有 JSON 文件同时生效**（按文件名排序合并，后者覆盖前者）。例如：
-
 ```
 .minecraft/
 └── meteor-lang/
@@ -136,11 +108,8 @@ Setting.Meteor.<设置内部名>.Description   → 设置描述
 ### 其他插件适配
 
 其他 Meteor addon 想支持多语言：在初始化时向 `meteor-lang/<语言代码>/` 注入 JSON 文件（键格式如上，插件名用自己 mod 的显示名），游戏启动/切换语言时自动加载；若在运行时注入，可调用 `fish22.modernsupport.utils.I18n.reloadAndApply()` 重新加载并刷新界面。
-
 > 注：为正常显示中文等非 ASCII 字符，本 mod 强制 Meteor 使用原版文字渲染器，Meteor 的「自定义字体」设置（custom-font / font）将不再生效。
-
 ### 来源
-
 翻译文件与实现思路基于 [Meteor-I18n-Support-plugin](https://github.com/dingzhen-vape/Meteor-I18n-Support-plugin)（作者 kono\_yalu）
 
 
@@ -178,5 +147,6 @@ Setting.Meteor.<设置内部名>.Description   → 设置描述
 * [Meteor Client](https://github.com/MeteorDevelopment/meteor-client)（GPL-3.0）— 依赖与扩展目标
 * [LiquidBounce](https://github.com/CCBlueX/LiquidBounce)（GPL-3.0）— MovementCorrection.SILENT 按键映射算法、Derp 模块、AngleSmooth 平滑机制
 * [Baritone](https://github.com/cabaletta/baritone)（LGPL-3.0）— LookBehavior 真实旋转机制（PRE/POST 时序）
+* [Grim](https://github.com/GrimAnticheat/Grim)（GPL-3.0）— 放置相关检查（RotationPlace / PositionPlace / FarPlace）与鼠标灵敏度反推公式：最佳合法角度 API 的「合法」就是按这些规则定的
 
 移植的代码文件均带有 GPL-3.0 头注释与来源说明。

@@ -22,6 +22,7 @@ package fish22.modernsupport.mixin;
 import fish22.modernsupport.utils.LegalRotation;
 import meteordevelopment.meteorclient.settings.BoolSetting;
 import meteordevelopment.meteorclient.settings.EnumSetting;
+import meteordevelopment.meteorclient.settings.IntSetting;
 import meteordevelopment.meteorclient.settings.Setting;
 import meteordevelopment.meteorclient.settings.SettingGroup;
 import meteordevelopment.meteorclient.systems.modules.world.SpawnProofer;
@@ -56,7 +57,7 @@ import static meteordevelopment.meteorclient.MeteorClient.mc;
  *   <li>「合法转头」：放置前调 LegalRotation.rotate()，并把放置排到「带着这份朝向的
  *       移动包」之后（{@link LegalRotation#runAfterSend(Runnable)}），服务器校验放置时
  *       看到的才是目标角度</li>
- *   <li>「背包放置」：方块在背包（主背包）也能放置（走 BackpackUse 4 包 PICKUP）</li>
+ *   <li>「背包放置」：方块在背包（主背包）也能放置（走 BackpackUse：发包方式 SWAP / PICKUP）</li>
  *   <li>「瞄准点与范围优化」：范围按眼睛距离算，瞄准点用支撑方块表面中心（而非放置方块中心）</li>
  * </ul>
  */
@@ -79,10 +80,16 @@ public abstract class MixinSpawnProofer {
     private Setting<LegalRotation.Mode> legalRotationMode;
 
     @Unique
+    private Setting<Integer> legalRotationPriority;
+
+    @Unique
     private Setting<Boolean> backpackPlace;
 
     @Unique
     private Setting<fish22.modernsupport.utils.BackpackUse.Mode> backpackMode;
+
+    @Unique
+    private Setting<fish22.modernsupport.utils.BackpackUse.TargetSlot> backpackTarget;
 
     @Unique
     private Setting<Boolean> aimOptimization;
@@ -102,6 +109,15 @@ public abstract class MixinSpawnProofer {
             .visible(() -> rotate.get())
             .build()
         );
+        legalRotationPriority = sg.add(new IntSetting.Builder()
+            .name("合法转头优先级")
+            .description("合法转头的优先级")
+            .defaultValue(0)
+            .sliderRange(-20, 20)
+            .visible(() -> rotate.get()
+                && (legalRotationMode.get() == LegalRotation.Mode.SEVERE || legalRotationMode.get() == LegalRotation.Mode.QUIET))
+            .build()
+        );
         debugLog = sg.add(new BoolSetting.Builder()
             .name("调试日志")
             .description("聊天栏打印旋转和放置时序")
@@ -118,9 +134,16 @@ public abstract class MixinSpawnProofer {
             .build()
         );
         backpackMode = sgGeneral.add(new EnumSetting.Builder<fish22.modernsupport.utils.BackpackUse.Mode>()
-            .name("背包使用模式")
-            .description("背包放置的发包模式。1p：SWAP 2包;2p：PICKUP 4 包。除特殊原因，请使用2p更稳定")
-            .defaultValue(fish22.modernsupport.utils.BackpackUse.Mode.PICKUP)
+            .name("背包使用发包")
+            .description("背包放置的发包方式。SWAP：2 次 SWAP 点击（背包槽与目标格互换）；PICKUP：4 次 PICKUP 点击（走光标，背包满也能换）")
+            .defaultValue(fish22.modernsupport.utils.BackpackUse.Mode.SWAP)
+            .visible(backpackPlace::get)
+            .build()
+        );
+        backpackTarget = sgGeneral.add(new EnumSetting.Builder<fish22.modernsupport.utils.BackpackUse.TargetSlot>()
+            .name("目标槽位")
+            .description("背包方块换到哪一格放置。副手：换到副手放置（不碰手上那一格）；主手：换到手持那一格；快捷栏：换到除手持那一格以外的一个快捷栏格（空手 > 工具 > 方块 > 物品）")
+            .defaultValue(fish22.modernsupport.utils.BackpackUse.TargetSlot.OFFHAND)
             .visible(backpackPlace::get)
             .build()
         );
@@ -213,8 +236,9 @@ public abstract class MixinSpawnProofer {
         double yaw = Rotations.getYaw(hitResult.getLocation());
         double pitch = Rotations.getPitch(hitResult.getLocation());
 
+        // 被更高优先级的旋转顶掉：这一格不放（不然发出去的角度和服务器视角对不上）
+        if (!LegalRotation.rotate(yaw, pitch, mode, legalRotationPriority.get())) return false;
         if (debugLog.get()) logToChat("旋转");
-        LegalRotation.rotate(yaw, pitch, mode);
 
         // 放置必须排在「带着这份朝向的移动包」之后：否则服务器校验放置时看到的还是旧角度。
         // 排进合法转头的队列即可（本 tick 移动包之后执行；tick 末尾调用则顺延到下一 tick）。
@@ -231,19 +255,19 @@ public abstract class MixinSpawnProofer {
         Predicate<ItemStack> pred = stack -> blocks.get().contains(Block.byItem(stack.getItem()));
 
         if (!useCorrection) {
-            boolean result = fish22.modernsupport.utils.BackpackUse.place(pred, hitResult, backpackMode.get());
+            boolean result = fish22.modernsupport.utils.BackpackUse.place(pred, hitResult, backpackMode.get(), backpackTarget.get());
             if (debugLog.get() && result) logToChat("放置");
             return result;
         }
 
         double yaw = Rotations.getYaw(hitResult.getLocation());
         double pitch = Rotations.getPitch(hitResult.getLocation());
+        if (!LegalRotation.rotate(yaw, pitch, mode, legalRotationPriority.get())) return false;
         if (debugLog.get()) logToChat("旋转");
-        LegalRotation.rotate(yaw, pitch, mode);
 
         // 同 redirectPlace：放置排到移动包之后，服务器那时才认这份朝向
         LegalRotation.runAfterSend(() -> {
-            boolean result = fish22.modernsupport.utils.BackpackUse.place(pred, hitResult, backpackMode.get());
+            boolean result = fish22.modernsupport.utils.BackpackUse.place(pred, hitResult, backpackMode.get(), backpackTarget.get());
             if (debugLog.get() && result) logToChat("放置");
         });
         return true;

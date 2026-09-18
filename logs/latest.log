@@ -1,0 +1,15 @@
+[06:21:37] [main/INFO]: [STDOUT]: piston properties: [BooleanProperty{name=extended, clazz=class java.lang.Boolean, values=[true, false]}, EnumProperty{name=facing, clazz=class net.minecraft.core.Direction, values=[north, east, south, west, up, down]}]
+[06:21:37] [main/INFO]: [STDOUT]: activator_rail properties: [BooleanProperty{name=powered, clazz=class java.lang.Boolean, values=[true, false]}, EnumProperty{name=shape, clazz=class net.minecraft.world.level.block.state.properties.RailShape, values=[north_south, east_west, ascending_east, ascending_west, ascending_north, ascending_south]}, BooleanProperty{name=waterlogged, clazz=class java.lang.Boolean, values=[true, false]}]
+[06:21:37] [main/INFO]: [STDOUT]: desired piston: Block{minecraft:piston}[extended=true,facing=north]
+[06:21:37] [main/INFO]: [STDOUT]:   placed Block{minecraft:piston}[extended=false,facing=down] -> 放? false
+[06:21:37] [main/INFO]: [STDOUT]:   placed Block{minecraft:piston}[extended=false,facing=up] -> 放? false
+[06:21:37] [main/INFO]: [STDOUT]:   placed Block{minecraft:piston}[extended=false,facing=north] -> 放? true
+[06:21:37] [main/INFO]: [STDOUT]:   placed Block{minecraft:piston}[extended=false,facing=south] -> 放? false
+[06:21:37] [main/INFO]: [STDOUT]:   placed Block{minecraft:piston}[extended=false,facing=west] -> 放? false
+[06:21:37] [main/INFO]: [STDOUT]:   placed Block{minecraft:piston}[extended=false,facing=east] -> 放? false
+[06:21:37] [main/INFO]: [STDOUT]: desired rail: Block{minecraft:activator_rail}[powered=true,shape=north_south,waterlogged=false]
+[06:21:37] [main/INFO]: [STDOUT]:   placed Block{minecraft:activator_rail}[powered=false,shape=north_south,waterlogged=false] -> 放? true
+[06:21:37] [main/INFO]: [STDERR]: java.lang.IllegalArgumentException: Cannot set property EnumProperty{name=facing, clazz=class net.minecraft.core.Direction, values=[down, north, south, west, east]} to up on Block{minecraft:hopper}, it is not an allowed value
+[06:21:37] [main/INFO]: [STDERR]: 	at net.minecraft.world.level.block.state.StateHolder.setValueInternal(StateHolder.java:144)
+[06:21:37] [main/INFO]: [STDERR]: 	at net.minecraft.world.level.block.state.StateHolder.setValue(StateHolder.java:124)
+[06:21:37] [main/INFO]: [STDERR]: 	at LiveStateCheck.main(LiveStateCheck.java:56)

@@ -23,6 +23,10 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
  * 后续由 {@link ElytraFlySupport#onPacketSend} 拦截并延迟到「换鞘翅 + 起飞」的
  * 滑翔窗口再重发，保证服务器端也正常发射。
  *
+ * <p>只在<b>客户端</b>、<b>模块真的开着</b>、<b>人在空中（甲飞飞行中）</b>这三条都满足时才伪造：
+ * 模块没开时右键烟花完全走原版；站在地面上右键本来就是 PASS，伪造 SUCCESS 只会多出一次
+ * 挥手动画。判定见 {@link ElytraFlySupport#shouldForceFireworkUse(net.minecraft.world.entity.player.Player)}。
+ *
  * <p>注意：用 @Inject HEAD + setReturnValue，而不是 @Redirect isFallFlying，
  * 避免与 ViaFabricPlus 对同一个 isFallFlying 调用点的 @Redirect 冲突。
  */
@@ -31,7 +35,11 @@ public class MixinFireworkRocketItem {
 
     @Inject(method = "use", at = @At("HEAD"), cancellable = true)
     private void forceFireworkUse(Level level, Player player, InteractionHand hand, CallbackInfoReturnable<InteractionResult> cir) {
-        if (ElytraFlySupport.isArmorFlyActive()) {
+        // 只在客户端伪造：这一段注入会连服务端那一侧一起顶掉（整合服里烟花就生成不出来了），
+        // 服务端的判断交给原版（服务端自己认滑翔时才会发射）。
+        if (!level.isClientSide()) return;
+
+        if (ElytraFlySupport.shouldForceFireworkUse(player)) {
             cir.setReturnValue(InteractionResult.SUCCESS);
         }
     }

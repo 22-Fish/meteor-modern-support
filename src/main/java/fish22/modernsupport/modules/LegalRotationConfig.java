@@ -21,6 +21,7 @@ package fish22.modernsupport.modules;
 
 import fish22.modernsupport.utils.LegalRotation;
 import meteordevelopment.meteorclient.settings.BoolSetting;
+import meteordevelopment.meteorclient.settings.IntSetting;
 import meteordevelopment.meteorclient.settings.Setting;
 import meteordevelopment.meteorclient.settings.SettingGroup;
 import meteordevelopment.meteorclient.systems.modules.Categories;
@@ -44,6 +45,9 @@ import meteordevelopment.meteorclient.systems.modules.Module;
  *       {@code AimDuplicateLook} 会每 tick 报一次（只是告警，没有 setback）。
  *       关掉就退回原版逻辑：<b>朝向不一样才在移动包里带朝向</b>，不会再出现重复朝向包，
  *       但服务端朝向被覆盖时要等下一次朝向变化才补回来（那种情况会出现朝向不一致/回弹）。</li>
+ *   <li><b>默认优先级</b>（默认 0）：调用合法转头 API 时没写优先级的那些功能（鞘翅飞行等）
+ *       用的优先级。同一 tick 里多个模块都要转视角时，优先级高的那一份生效，低的整个忽略
+ *       （见 {@link LegalRotation}）。</li>
  * </ul>
  */
 public class LegalRotationConfig extends Module {
@@ -67,6 +71,14 @@ public class LegalRotationConfig extends Module {
         .build()
     );
 
+    private final Setting<Integer> defaultPriority = sgGeneral.add(new IntSetting.Builder()
+        .name("默认优先级")
+        .description("合法转头的优先级")
+        .defaultValue(0)
+        .sliderRange(-20, 20)
+        .build()
+    );
+
     public LegalRotationConfig() {
         super(Categories.Misc, "合法转头API配置",
             "合法转头 API 的显示配置");
@@ -81,5 +93,10 @@ public class LegalRotationConfig extends Module {
     /** 「每次调用都设置朝向」是否开启（默认开启；模块还没创建时按默认值算） */
     public static boolean isAlwaysSetRotation() {
         return instance == null || instance.alwaysSetRotation.get();
+    }
+
+    /** 「默认优先级」（默认 0；模块还没创建时按默认值算） */
+    public static int getDefaultPriority() {
+        return instance == null ? 0 : instance.defaultPriority.get();
     }
 }

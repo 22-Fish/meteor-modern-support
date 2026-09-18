@@ -24,9 +24,10 @@ import static meteordevelopment.meteorclient.MeteorClient.mc;
  * <ul>
  *   <li>不勾选「背包使用」：快捷栏静默使用（副手优先，其次热栏静默切换使用后换回），
  *       等价于 Meteor 的静默使用方式</li>
- *   <li>勾选「背包使用」：同一 tick 先发「背包物品 ↔ 手上物品」交换包，
+ *   <li>勾选「背包使用」：同一 tick 先发「背包物品 ↔ 目标槽位」交换包，
  *       再发使用包，再发交换回去的包，物品可放在背包任意位置</li>
  * </ul>
+ * 背包使用的「发包方式」与「目标槽位」见 {@link BackpackUse}（目标槽位默认副手）。
  * 物品不在背包/快捷栏时直接不触发，不弹任何提示。
  */
 public class ItemUse extends Module {
@@ -40,15 +41,23 @@ public class ItemUse extends Module {
     ));
 
     private final Setting<BackpackUse.Mode> mode = sgGeneral.add(new EnumSetting.Builder<BackpackUse.Mode>()
-        .name("背包使用模式")
-        .description("背包使用的发包模式。1p：SWAP 2包;2p：PICKUP 4 包")
-        .defaultValue(BackpackUse.Mode.PICKUP)
+        .name("背包使用发包")
+        .description("2次SWAP点击；4 次PICKUP点击")
+        .defaultValue(BackpackUse.Mode.SWAP)
+        .visible(() -> itemList.get().stream().anyMatch(e -> e.backpackUse))
+        .build()
+    );
+
+    private final Setting<BackpackUse.TargetSlot> targetSlot = sgGeneral.add(new EnumSetting.Builder<BackpackUse.TargetSlot>()
+        .name("目标槽位")
+        .description("背包物品换到哪一格使用")
+        .defaultValue(BackpackUse.TargetSlot.OFFHAND)
         .visible(() -> itemList.get().stream().anyMatch(e -> e.backpackUse))
         .build()
     );
 
     public ItemUse() {
-        super(Categories.Misc, "一键使用物品", "配置物品与快捷键，按下快捷键一键使用对应物品（可勾选背包使用，使用背包中的物品）");
+        super(Categories.Misc, "一键使用物品", "配置物品与快捷键，按下快捷键一键使用对应物品");
     }
 
     @EventHandler
@@ -72,8 +81,8 @@ public class ItemUse extends Module {
 
     private void useItem(ItemUseListSetting.ItemUseEntry entry) {
         if (entry.backpackUse) {
-            // 背包使用：背包任意位置交换到手上使用
-            BackpackUse.use(stack -> stack.is(entry.item), mode.get());
+            // 背包使用：背包任意位置交换到「目标槽位」使用
+            BackpackUse.use(stack -> stack.is(entry.item), mode.get(), targetSlot.get());
         } else {
             useFromHotbar(entry.item);
         }

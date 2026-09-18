@@ -2,3 +2,12 @@ accessWidener v2 official
 
 # 发包挖掘 (GhostMine) 需要发送 sequenced packet（原版 MultiPlayerGameMode.startPrediction 为 private）
 accessible method net/minecraft/client/multiplayer/MultiPlayerGameMode startPrediction (Lnet/minecraft/client/multiplayer/ClientLevel;Lnet/minecraft/client/multiplayer/prediction/PredictiveAction;)V
+
+# 简单放置 (SimplePlace) 要按「物品自己的放置逻辑」预演一遍：火把/告示牌这种「立着的」和「墙上的」
+# 在游戏里是两个方块，由物品按点的是哪一面挑一个（原版 BlockItem.getPlacementState 为 protected）
+accessible method net/minecraft/world/item/BlockItem getPlacementState (Lnet/minecraft/world/item/context/BlockPlaceContext;)Lnet/minecraft/world/level/block/state/BlockState;
+
+# 鞘翅滑翔加速 (ElytraGrimAccelerate) 的「本地坐标回退」要连「在流体里」的两个标记一起退回
+# （史莱姆 playerStatus.restorePos 会一起回退 touchingWater / submergedInWater）
+accessible field net/minecraft/world/entity/Entity wasTouchingWater Z
+accessible field net/minecraft/world/entity/Entity wasEyeInWater Z

@@ -70,7 +70,16 @@ import static meteordevelopment.meteorclient.MeteorClient.mc;
  * </ol>
  *
  * <p>替换窗口都在玩家 tick 内部、且一定在渲染与鼠标处理之前关闭，所以本 API 在 tick 内
- * 任意时刻调用都不会影响视角（不闪、不卡、可自由转），同一 tick 多次调用以最后一次为准。
+ * 任意时刻调用都不会影响视角（不闪、不卡、可自由转）。
+ *
+ * <h3>优先级（同一 tick 多个模块抢转向）</h3>
+ * rotate() 可以多带一个 {@code priority} 参数：<b>数字越大越优先</b>，不写就是「合法转头API配置」
+ * 里的「默认优先级」（默认 0）。同一 tick 里第二次调用优先级<b>更低</b> → 整个调用被忽略
+ * （返回 false，连回调也不排）；优先级<b>更高</b> → 覆盖上一份；<b>一样</b> → 照旧最后一次生效。
+ *
+ * <p>优先级跟着「这一份还没随移动包发出去的旋转」走：tick 末尾设置的旋转顺延到下一 tick 的
+ * 移动包发出去，这期间它的优先级一直有效（下一 tick 里优先级更低的调用同样会被顶掉）。
+ * 旋转随移动包发完（或模式关闭）之后优先级记录清空，下一次调用重新开始仲裁。
  *
  * <h3>时序</h3>
  * <ul>
@@ -141,6 +150,15 @@ public class LegalRotation {
     /** 是否有一份「还没随移动包发出去」的真实角度（移动包发出后清零） */
     private static boolean rotating;
 
+    /**
+     * 当前这一份旋转的优先级（{@link #priorityActive} 为真时有效）。
+     *
+     * <p>用来仲裁同一 tick 里多个模块的 rotate()：优先级更低的调用整个忽略，更高的覆盖上一份。
+     * 跟「还没发出去的这一份旋转」同生共死（见 {@link #onSendMovementPacketsPost}）。
+     */
+    private static int activePriority;
+    private static boolean priorityActive;
+
     /** 本 tick 是否旋转过（TickEvent.Post 清空；烟花等 tick 之后才跑的代码要用） */
     private static boolean rotatedThisTick;
 
@@ -177,6 +195,20 @@ public class LegalRotation {
     private static float packetYaw;
     private static float packetPitch;
 
+    /** 当前 tick 序号（TickEvent.Pre 里自增，用来判断「上一次移动包」是哪一 tick 发的） */
+    private static int tickCounter;
+
+    /**
+     * 服务器此刻记录的角度：我们上一次随移动包发出去的真实角度。
+     *
+     * <p>本 tick / 上一 tick 没发过真实角度，说明这一份旋转早就结束了，
+     * 服务器那边已经被原版发回去的视角角度覆盖（{@link #getServerYaw()} 会回退到视角角度）。
+     */
+    private static boolean serverRotationValid;
+    private static int serverRotationTick;
+    private static float serverYaw;
+    private static float serverPitch;
+
     /** 移动包发出后要执行的动作 */
     private static final List<Runnable> postSendActions = new ArrayList<>();
 
@@ -188,31 +220,62 @@ public class LegalRotation {
 
     // ====== API ======
 
-    /** 记录目标旋转（严格模式） */
-    public static void rotate(double yaw, double pitch) {
-        rotate(yaw, pitch, Mode.SEVERE, null);
+    /** 记录目标旋转（严格模式，默认优先级） */
+    public static boolean rotate(double yaw, double pitch) {
+        return rotate(yaw, pitch, Mode.SEVERE, defaultPriority(), null);
+    }
+
+    /** 记录目标旋转（严格模式，指定优先级） */
+    public static boolean rotate(double yaw, double pitch, int priority) {
+        return rotate(yaw, pitch, Mode.SEVERE, priority, null);
     }
 
     /**
-     * 记录目标旋转（严格模式），并在这一份旋转随着移动包发出之后执行回调
+     * 记录目标旋转（严格模式，默认优先级），并在这一份旋转随着移动包发出之后执行回调
      * （等价 Meteor Rotations 的回调语义：回调里发交互包时服务器看到的已经是目标角度）。
      */
-    public static void rotate(double yaw, double pitch, Runnable callback) {
-        rotate(yaw, pitch, Mode.SEVERE, callback);
+    public static boolean rotate(double yaw, double pitch, Runnable callback) {
+        return rotate(yaw, pitch, Mode.SEVERE, defaultPriority(), callback);
     }
 
-    public static void rotate(double yaw, double pitch, Mode mode) {
-        rotate(yaw, pitch, mode, null);
+    /** 记录目标旋转（严格模式，指定优先级），并把回调排到这一份旋转发出之后 */
+    public static boolean rotate(double yaw, double pitch, int priority, Runnable callback) {
+        return rotate(yaw, pitch, Mode.SEVERE, priority, callback);
+    }
+
+    /** 记录目标旋转（指定模式，默认优先级） */
+    public static boolean rotate(double yaw, double pitch, Mode mode) {
+        return rotate(yaw, pitch, mode, defaultPriority(), null);
+    }
+
+    /** 记录目标旋转（指定模式 + 优先级） */
+    public static boolean rotate(double yaw, double pitch, Mode mode, int priority) {
+        return rotate(yaw, pitch, mode, priority, null);
+    }
+
+    /** 记录目标旋转（指定模式，默认优先级），并把回调排到这一份旋转发出之后 */
+    public static boolean rotate(double yaw, double pitch, Mode mode, Runnable callback) {
+        return rotate(yaw, pitch, mode, defaultPriority(), callback);
     }
 
     /**
      * 记录真实角度。这一 tick 的移动运算与移动包随后都会用这个角度；
      * 若调用发生在移动包之后（tick 末尾），则顺延到下一 tick 的移动包。
      *
-     * <p>一 tick 内可多次调用，最后一次生效。
+     * <p><b>优先级</b>：同一 tick 里可能有多个模块都要转视角。这次调用的优先级比「当前这一份
+     * 还没随移动包发出去的旋转」低 → 整个调用被忽略；更高 → 覆盖上一份；一样 → 照旧最后一次生效。
+     * 被忽略的调用连回调一起不算数（调用方可以看返回值决定后面那件事还做不做）。
+     *
+     * @return true = 这份旋转被采纳；false = 被优先级更高的那一份顶掉，本次调用没有生效
      */
-    public static void rotate(double yaw, double pitch, Mode mode, Runnable callback) {
-        if (mode == Mode.OFF || mc.player == null) return;
+    public static boolean rotate(double yaw, double pitch, Mode mode, int priority, Runnable callback) {
+        if (mode == Mode.OFF || mc.player == null) return false;
+
+        // 优先级仲裁：本 tick（或顺延到本 tick）已经有一份优先级更高的旋转等着发出去 → 整份忽略
+        if (priorityActive && priority < activePriority) return false;
+
+        activePriority = priority;
+        priorityActive = true;
 
         realYaw = (float) yaw;
         realPitch = (float) pitch;
@@ -231,10 +294,21 @@ public class LegalRotation {
 
         // 回调排到「移动包发出之后」：那时服务器看到的已经是这一份角度
         if (callback != null) runAfterSend(callback);
+
+        return true;
     }
 
-    public static void rotateWithMode(double yaw, double pitch, Mode mode) {
-        rotate(yaw, pitch, mode);
+    public static boolean rotateWithMode(double yaw, double pitch, Mode mode) {
+        return rotate(yaw, pitch, mode);
+    }
+
+    /**
+     * 没有单独设优先级的调用用的优先级：「合法转头API配置」里的「默认优先级」（默认 0）。
+     *
+     * <p>鞘翅飞行这些借用本 API、但自己没有优先级设置项的功能走的就是这个值。
+     */
+    public static int defaultPriority() {
+        return LegalRotationConfig.getDefaultPriority();
     }
 
     /**
@@ -259,6 +333,28 @@ public class LegalRotation {
 
     public static float getRealPitch() {
         return realPitch;
+    }
+
+    /**
+     * 服务器此刻记录的角度（偏航）。
+     *
+     * <p>本 tick 或上一 tick 发过真实角度，就是那一份真实角度（服务器只知道我们发出去的包）；
+     * 否则是玩家自己的视角角度（原版自己把视角角度发回去了）。
+     *
+     * <p>用途：合法角度量化（相对「服务器当前角度」差整数格鼠标灵敏度增量）、
+     * 避免发出和上一次完全相同的朝向。见 {@link LegalPlace#compute}。
+     */
+    public static float getServerYaw() {
+        if (mc.player == null) return 0.0f;
+        if (!serverRotationValid || tickCounter - serverRotationTick > 1) return mc.player.getYRot();
+        return serverYaw;
+    }
+
+    /** 服务器此刻记录的角度（俯仰），语义同 {@link #getServerYaw()} */
+    public static float getServerPitch() {
+        if (mc.player == null) return 0.0f;
+        if (!serverRotationValid || tickCounter - serverRotationTick > 1) return mc.player.getXRot();
+        return serverPitch;
     }
 
     public static Mode getMode() {
@@ -372,10 +468,13 @@ public class LegalRotation {
     /** 清空全部状态（换世界 / 玩家为空时调用） */
     public static void reset() {
         rotating = false;
+        priorityActive = false;
+        activePriority = 0;
         rotatedThisTick = false;
         displayActive = false;
         movementCaptured = false;
         packetApplied = false;
+        serverRotationValid = false;
         currentMode = Mode.OFF;
         postSendActions.clear();
 
@@ -398,6 +497,7 @@ public class LegalRotation {
     @EventHandler(priority = EventPriority.HIGHEST + 100)
     private static void onTickPre(TickEvent.Pre event) {
         movementCaptured = false;
+        tickCounter++;
 
         if (mc.player == null) {
             reset();
@@ -428,6 +528,12 @@ public class LegalRotation {
         mc.player.setYRot(packetYaw);
         mc.player.setXRot(packetPitch);
 
+        // 记下「服务器接下来会收到的角度」，供 getServerYaw/getServerPitch 查询
+        serverYaw = packetYaw;
+        serverPitch = packetPitch;
+        serverRotationTick = tickCounter;
+        serverRotationValid = true;
+
         // 让这一份真实角度真的随本 tick 的移动包发出去（hasRot = true），
         // 理由见 ROTATION_CONFIRM_EPSILON：服务端那边记的朝向可能已经被相机视角覆盖，
         // 只靠「角度变了才发」的话就永远补不回来。
@@ -457,8 +563,12 @@ public class LegalRotation {
 
         // 这一份旋转有没有随着移动包发出去？没有（例如刚在回调里又 rotate 过、或这一 tick
         // 根本没走到发包）就留给下一 tick；发出去了就清掉，下一 tick 恢复视角角度。
+        // 优先级记录跟这一份旋转同生共死：旋转结束了，下一次 rotate() 重新开始仲裁。
         boolean sent = applied && realYaw == packetYaw && realPitch == packetPitch;
-        if (sent || currentMode == Mode.OFF) rotating = false;
+        if (sent || currentMode == Mode.OFF) {
+            rotating = false;
+            priorityActive = false;
+        }
     }
 
     /** tick 结束：清掉「本 tick 旋转过」标记（早于它的实体 tick 已经用完了） */

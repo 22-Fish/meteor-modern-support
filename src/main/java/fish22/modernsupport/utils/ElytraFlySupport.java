@@ -209,6 +209,68 @@ public class ElytraFlySupport {
     }
 
     /**
+     * 甲飞飞行中，手动右键烟花是否要让 {@code FireworkRocketItem#use} 直接返回 SUCCESS
+     * （客户端才会发出使用包；由 {@link fish22.modernsupport.mixin.MixinFireworkRocketItem} 调用）。
+     *
+     * <p>原版客户端只有 {@code isFallFlying()} 为真时才返回 SUCCESS，而甲飞穿胸甲时本地这个
+     * 标志位是服务器同步的闪烁状态、经常是 false，手动右键发不出使用包，所以飞行期间强制 SUCCESS，
+     * 再由 {@link #onPacketSend} 把这一发包延后到「换鞘翅 + 起飞」的滑翔窗口重发。
+     *
+     * <p>两种情况<b>不</b>强制（保持原版行为）：
+     * <ul>
+     *   <li><b>模块没开 / 甲飞已关</b>：甲飞设置留着不动没开模块时候的烟花（右键还是原版那套）；</li>
+     *   <li><b>在地面</b>：原版这时本来就返回 PASS，强制 SUCCESS 会让客户端多出一次右键挥手
+     *       动画，还白白发一发被拦截的使用包。</li>
+     * </ul>
+     */
+    public static boolean shouldForceFireworkUse(Player player) {
+        if (player == null || player != mc.player) return false;
+        // 甲飞真的在跑（模块开着 + 甲飞模式非关闭）
+        if (!isArmorFlyEnabled()) return false;
+        // 地面/流体/骑乘/旁观/创造飞行：和姿势锁定、滑翔移动运算同一套判断，这些状态没有甲飞飞行
+        if (player.onGround() || fluidStopsFlight(player)) return false;
+        if (player.isPassenger() || player.isSpectator() || player.getAbilities().flying) return false;
+        return true;
+    }
+
+    /**
+     * 甲飞「允许在岩浆中飞行」是否开启（甲飞分组里的选项，默认开启）。
+     *
+     * <p>水永远不看这个选项：甲飞在水里<b>直接不工作</b> —— 一进水就收工，
+     * 换回胸甲、清掉本地滑翔，移动交回原版流体运算（游泳），等离开水面自己接着飞
+     * （见 {@link #fluidStopsFlight}）。
+     *
+     * <p>服务端那边水里本来也不接受起飞包（原版 {@code Player#tryToStartFallFlying} 里有
+     * {@code !isInWater()}，而且这一发失败会顺手把服务端的滑翔状态清掉），水里也放不出
+     * <b>新</b>烟花：烟花实体是服务端生成的（{@code FireworkRocketItem#use} 要求
+     * {@code isFallFlying()}）。所以水里就是老实游泳。
+     *
+     * <p>关闭：岩浆里和水一样收工（换回胸甲 + 清本地滑翔 + 按原版岩浆运算移动）。
+     *
+     * <p>开启（默认）：岩浆里按甲飞的原有逻辑走 —— 照常换装维持滑翔、移动照常按滑翔运算算、
+     * 姿势照常锁定，也就是「在岩浆里继续飞」（史莱姆 mod 的 enable-liquid-fly 就是这个意思：
+     * 流体里取消原版流体物理、继续用滑翔运算移动）。
+     */
+    public static boolean lavaFlightOn() {
+        return lavaFlight != null && lavaFlight.get();
+    }
+
+    /**
+     * 当前流体是否让甲飞退出原有逻辑（换回胸甲 + 清本地滑翔 + 退回原版流体运算）。
+     *
+     * <p>水：一律退出（甲飞在水里不工作，等离开水面再接着飞）；
+     * 岩浆：看「允许在岩浆中飞行」选项，关闭时同样退出，开启（默认）时照常飞。
+     *
+     * <p>移动运算、姿势锁定、输入屏蔽、换装收工用的是同一套判断
+     * （都写成 {@code if (mc.player.onGround() || fluidStopsFlight(mc.player))}），
+     * 不会一半按滑翔算、一半按原版流体算。
+     */
+    private static boolean fluidStopsFlight(Player player) {
+        if (player.isInWater()) return true;
+        return !lavaFlightOn() && player.isInLava();
+    }
+
+    /**
      * 客户端本地烟花加速方向是否必须对齐服务端朝向。
      *
      * <p>合法平飞 / 甲飞会把服务端朝向伪造成目标角，而客户端视觉朝向（相机）保持原样。
@@ -247,8 +309,11 @@ public class ElytraFlySupport {
         if (player == null || player != mc.player) return false;
         if (!isArmorFlyEnabled()) return false;
 
-        // 地面/流体/骑乘/旁观/创造飞行：姿势本来就是正常的，不干预
-        if (player.onGround() || player.isInWater() || player.isInLava()) return false;
+        // 地面/骑乘/旁观/创造飞行：姿势本来就是正常的，不干预。
+        // 流体：水里甲飞不工作（进水就收工了，见 armorTick），不锁；
+        // 岩浆在「允许在岩浆中飞行」（默认开启）下照样继续飞，滑翔标志为真，不锁的话姿势会切成
+        // FALL_FLYING（视高 0.4、碰撞箱只剩 0.6 高），进出岩浆时视角高度会跳，所以一并锁住。
+        if (player.onGround() || fluidStopsFlight(player)) return false;
         if (player.isPassenger() || player.isSpectator() || player.getAbilities().flying) return false;
 
         // 只有滑翔姿势会被服务器标志位来回覆盖，其它姿势照常
@@ -318,8 +383,11 @@ public class ElytraFlySupport {
         // 和服务器（Grim 按未滑翔预测）保持一致。
         if (!serverSeesGliding()) return false;
 
-        // 地面/流体/骑乘/旁观/创造飞行：走原版对应运算，不干预
-        if (player.onGround() || player.isInWater() || player.isInLava()) return false;
+        // 地面/骑乘/旁观/创造飞行：走原版对应运算，不干预。
+        // 流体：水一律退回原版流体运算（原版把流体运算排在滑翔运算之前，一进水就变游泳、
+        // 动量被流体阻力吃掉）—— 水里甲飞不工作，等离开水面再接着飞；
+        // 岩浆在「允许在岩浆中飞行」（默认开启）时不退出，甲飞在岩浆里继续按滑翔运算算。
+        if (player.onGround() || fluidStopsFlight(player)) return false;
         if (player.isPassenger() || player.isSpectator() || player.isDeadOrDying()) return false;
         if (player.getAbilities().flying) return false;
 
@@ -461,8 +529,10 @@ public class ElytraFlySupport {
         if (!grim && !spaceBlock) return false;
         if (!isArmorFlyActive() || mc.player == null) return false;
 
-        // 地面/流体/骑乘：不干预（起跳那一下必须让服务器看到）；兼容模式重置「已看到松开」状态
-        if (mc.player.onGround() || mc.player.isInWater() || mc.player.isInLava() || mc.player.isPassenger()) {
+        // 地面/流体/骑乘：不干预（起跳那一下必须让服务器看到）；兼容模式重置「已看到松开」状态。
+        // 「允许在岩浆中飞行」开启时岩浆不算「不干预」：岩浆里照常按空中那一套处理，否则兼容模式
+        // 在岩浆里一直重置「已看到松开」，起飞包会被 skipStartThisTick 无限跳过（表现就是不换甲）。
+        if (mc.player.onGround() || fluidStopsFlight(mc.player) || mc.player.isPassenger()) {
             if (grim) jumpInputReleasedForStart = false;
             return false;
         }
@@ -497,7 +567,9 @@ public class ElytraFlySupport {
      */
     public static boolean shouldHideMoveInput() {
         if (mc.player == null || !isArmorFlyEnabled()) return false;
-        if (mc.player.onGround() || mc.player.isInWater() || mc.player.isInLava() || mc.player.isPassenger()) return false;
+        // 「允许在岩浆中飞行」开启时岩浆里和空中一样屏蔽：岩浆里同样在换装，移动/疾跑键留在输入包里
+        // 会被 Grim 的 MultiActionsC/D 把换装的点击包直接取消（换装落空）。
+        if (mc.player.onGround() || fluidStopsFlight(mc.player) || mc.player.isPassenger()) return false;
         return serverSeesGliding();
     }
 
@@ -520,7 +592,9 @@ public class ElytraFlySupport {
     public static boolean shouldPressJumpInput() {
         if (!grimInputSequenceOn()) return false;
         if (mc.player == null || mc.player.onGround()) return false;
-        if (mc.player.isInWater() || mc.player.isInLava() || mc.player.isPassenger()) return false;
+        // 「允许在岩浆中飞行」开启时岩浆里照常补这一发「按下跳跃」包（否则 Grim ElytraB 的 no jump
+        // 会把换装窗口里那次起飞直接取消）
+        if (fluidStopsFlight(mc.player) || mc.player.isPassenger()) return false;
         if (!startedGlidingThisTick) return false;
 
         // 「空包防踢」保持鞘翅的那一发：本地胸甲槽此刻还是鞘翅，但这一发同样是完整的起飞，
@@ -712,6 +786,8 @@ public class ElytraFlySupport {
     public static Setting<ElytraFlightModes> flightMode;
     /** 甲飞模式（关闭/普通/Grim模式） */
     public static Setting<ArmorMode> armorMode;
+    /** 甲飞：「允许在岩浆中飞行」（默认开；开启后岩浆里也照常换装 + 按滑翔运算飞，见 {@link #lavaFlightOn()}） */
+    public static Setting<Boolean> lavaFlight;
     public static Setting<Boolean> muteSounds;
     public static Setting<Boolean> spaceBlockInAir;
     /** 甲飞：「落地防摔」开关（落地瞬间重置服务端摔伤距离，默认关闭） */
@@ -722,11 +798,15 @@ public class ElytraFlySupport {
     /** 甲飞换甲间隔（tick）：两次换装之间至少间隔的 tick 数，1 = 每 tick 都允许换（旧行为） */
     public static Setting<Integer> armorSwapInterval;
     public static Setting<Boolean> autoFirework;
+    /** 合法模式的「合法转头优先级」（和其他模块抢转向时用；设置没注入时退回 API 配置的默认优先级） */
+    public static Setting<Integer> legalRotationPriority;
     public static Setting<Integer> fwIntervalLv1;
     public static Setting<Integer> fwIntervalLv2;
     public static Setting<Integer> fwIntervalLv3;
     public static Setting<Boolean> backpackFirework;
     public static Setting<BackpackUse.Mode> backpackMode;
+    /** 背包烟花的「目标槽位」（副手 / 主手 / 快捷栏） */
+    public static Setting<BackpackUse.TargetSlot> backpackTarget;
     public static Setting<Integer> fwPriorityLv1;
     public static Setting<Integer> fwPriorityLv2;
     public static Setting<Integer> fwPriorityLv3;
@@ -748,8 +828,10 @@ public class ElytraFlySupport {
 
     /** 一键烟花（独立模块「一键烟花」注入）：是否允许使用背包中的烟花 */
     public static Setting<Boolean> oneKeyBackpackFirework;
-    /** 一键烟花（独立模块「一键烟花」注入）：背包交换的发包模式（1p = SWAP 2包 / 2p = PICKUP 4 包） */
+    /** 一键烟花（独立模块「一键烟花」注入）：背包交换的发包方式（SWAP 2 包 / PICKUP 4 包） */
     public static Setting<BackpackUse.Mode> oneKeyBackpackMode;
+    /** 一键烟花（独立模块「一键烟花」注入）：背包烟花换到哪一格使用 */
+    public static Setting<BackpackUse.TargetSlot> oneKeyBackpackTarget;
     /** 烟花加速值（史莱姆 mod 默认 1.7） */
     public static Setting<Double> fireworkBoostSpeed;
     /** 史莱姆的 auto-rescale-firework-box */
@@ -1183,8 +1265,14 @@ public class ElytraFlySupport {
         return hasActiveOwnedFirework();
     }
 
-    /** 是否有附着在自己身上且仍存活的烟花（对应史莱姆 mod 的 canFireworkControlMotion(0)） */
-    private static boolean hasActiveOwnedFirework() {
+    /**
+     * 是否有附着在自己身上且仍存活的烟花（对应史莱姆 mod 的 canFireworkControlMotion(0)）。
+     *
+     * <p>「烟花加速」({@link fish22.modernsupport.modules.FireworkBoost}) 与
+     * 「鞘翅滑翔加速」({@link fish22.modernsupport.modules.ElytraGrimAccelerate}) 共用这个判断。
+     */
+    public static boolean hasActiveOwnedFirework() {
+        if (mc.level == null || mc.player == null) return false;
         for (FireworkRocketEntity rocket : mc.level.getEntitiesOfClass(
             FireworkRocketEntity.class,
             mc.player.getBoundingBox().inflate(16.0)
@@ -1756,14 +1844,19 @@ public class ElytraFlySupport {
         // 打开容器/界面时不动手，避免误点
         if (mc.player.containerMenu.containerId != 0) return;
 
-        // 落地/进水：恢复正常状态（胸甲槽若还是鞘翅则换回胸甲）
-        if (mc.player.onGround() || mc.player.isInWater()) {
+        // 落地/流体：恢复正常状态（胸甲槽若还是鞘翅则换回胸甲）。
+        // 水一律算收工，岩浆看「允许在岩浆中飞行」（见 fluidStopsFlight）：
+        // 收工后就不换装也不发起飞包，等离开流体再自己接着飞。
+        if (mc.player.onGround() || fluidStopsFlight(mc.player)) {
             // 服务器清滑翔标志要等一个同步往返，本地主动清掉，落地即取消甲飞
             cancelLocalGliding();
             swapBackChestplate();
             wasFlying = false;
             armorSwapCooldown = 0;
             windowFwPendingLevel = -1;
+            // 落地清掉还排着队的烟花：一键烟花 / 拦下来的手动右键烟花都是排到换装窗口放的，
+            // 不在这里清的话这一发会留到下一次起飞才放（又变成「地面按一下、空中放一发」）
+            cancelPendingManualFirework();
             return;
         }
 
@@ -1949,13 +2042,15 @@ public class ElytraFlySupport {
         }
         prevFlying = flying;
 
-        // 落地/进水：解除冻结并换回胸甲
-        if (mc.player.onGround() || mc.player.isInWater()) {
+        // 落地/流体：解除冻结并换回胸甲（和 armorTick 同一套收工判断，见 fluidStopsFlight）
+        if (mc.player.onGround() || fluidStopsFlight(mc.player)) {
             Freeze.setExternalFrozen(false);
             if (mc.player.isFallFlying()) return;
             swapBackChestplate();
             armorSwapCooldown = 0;
             windowFwPendingLevel = -1;
+            // 落地清掉还排着队的烟花（见 armorTick 的同一处注释）
+            cancelPendingManualFirework();
             // 落地重置冷却：下一次真正起飞时立刻补一发烟花（起飞烟花本身受冷却约束，见 tryFireworkOnce）
             legalFwCooldown = 0;
             return;
@@ -2050,7 +2145,12 @@ public class ElytraFlySupport {
         // 先转向再解除冻结（同 tick）：避免解除冻结后先沿旧朝向移动再转头
         float targetYaw = calcLegalYaw(forward, back, left, right);
         float targetPitch = calcLegalPitch(jump, sneak);
-        LegalRotation.rotate(targetYaw, targetPitch, LegalRotation.Mode.SEVERE);
+        // 优先级用「简单控制 → 合法转头优先级」（设置还没注入时退回 API 配置的默认优先级）：
+        // 比这一份低的模块抢不过我们，比这一份高的模块会把我们这一 tick 的转向顶掉
+        int rotationPriority = legalRotationPriority == null
+            ? LegalRotation.defaultPriority()
+            : legalRotationPriority.get();
+        LegalRotation.rotate(targetYaw, targetPitch, LegalRotation.Mode.SEVERE, rotationPriority);
         Freeze.setExternalFrozen(false);
 
         // 飞行中自动烟花（释放延后到移动包发送后，烟花加速方向才能跟随服务器视角）
@@ -2224,6 +2324,21 @@ public class ElytraFlySupport {
         takeoffFireworkPending = false;
     }
 
+    /**
+     * 清掉「排队等滑翔窗口」的手动烟花：一键烟花那一发 + 被 {@link #onPacketSend} 拦下来的手动右键使用包。
+     *
+     * <p>两者都要等换装窗口（鞘翅在胸甲槽 + 起飞包已发）才放出去，所以天然是跨 tick 排队的；
+     * 落地/进水收工时人已经不飞了，这一发就该丢掉 —— 不然它会留到下一次起飞时才放出去
+     * （表现就是「地面按一下、空中放一发」）。
+     *
+     * <p>自动烟花另有一个队列（windowFwPendingLevel），由 {@link #cancelPendingAutoFirework()} 负责，
+     * 这里不动它。
+     */
+    private static void cancelPendingManualFirework() {
+        oneKeyPending = false;
+        pendingFireworkPacket = null;
+    }
+
     /** 按烟花等级取飞行间隔 */
     private static int fwIntervalForLevel(int level) {
         return switch (level) {
@@ -2314,7 +2429,7 @@ public class ElytraFlySupport {
     private static boolean tryUseFireworkOfLevel(int level) {
         Predicate<ItemStack> pred = fireworkOfLevel(level);
         if (backpackFirework.get()) {
-            return BackpackUse.use(pred, backpackMode.get());
+            return BackpackUse.use(pred, backpackMode.get(), backpackTarget.get());
         }
         return useFireworkFromHotbar(pred);
     }
@@ -2357,6 +2472,9 @@ public class ElytraFlySupport {
         // 只有「鞘翅飞行」开着且处于 甲飞 / 合法 时才需要延后到滑翔窗口
         // （甲飞 = 换装窗口结束后、合法 = 移动包发送后）；模块没开或原版/发包时立即释放
         if (elytraFlyActive() && (isArmorFlyEnabled() || isLegalMode())) {
+            // 甲飞：地面上按快捷键不入队 —— 换装窗口只在天上开，入队后这一发要一直等到
+            // 飞起来那一刻才放出去（表现就是「地面按一下、空中放一发烟花」）。
+            if (isArmorFlyEnabled() && mc.player.onGround()) return;
             oneKeyPending = true;
             return;
         }
@@ -2381,15 +2499,15 @@ public class ElytraFlySupport {
         releaseFireworkOnce();
     }
 
-    /** 释放一次烟花（一键烟花模块专用，可选背包，按一键烟花的背包开关与背包使用模式） */
+    /** 释放一次烟花（一键烟花模块专用，可选背包，按一键烟花的背包开关与背包使用设置） */
     private static void releaseFireworkOnce() {
         boolean backpack = oneKeyBackpackFirework != null && oneKeyBackpackFirework.get();
         int level = selectFireworkLevel(backpack);
         if (level == -1) return;
         Predicate<ItemStack> pred = fireworkOfLevel(level);
         if (backpack) {
-            // 背包烟花：按一键烟花自己的「背包使用模式」交换到手使用（1p SWAP / 2p PICKUP）
-            BackpackUse.use(pred, oneKeyBackpackMode.get());
+            // 背包烟花：按一键烟花自己的「背包使用」设置交换到目标槽位使用（SWAP / PICKUP）
+            BackpackUse.use(pred, oneKeyBackpackMode.get(), oneKeyBackpackTarget.get());
         } else {
             useFireworkFromHotbar(pred);
         }

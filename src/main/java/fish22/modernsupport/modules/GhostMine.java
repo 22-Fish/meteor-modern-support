@@ -71,12 +71,16 @@ import static meteordevelopment.meteorclient.MeteorClient.mc;
  *    后点的方块占着挖掘槽位 → 进度到阈值时切工具 + STOP，服务端立即破坏；
  *    先点的方块占着延迟破坏槽位 → 它的进度每次都用「当前手持工具」重算，
  *    所以要等它进度走完，再拿住最佳工具一两 tick，让服务端自己把它补完
+ *    （延迟破坏这条路服务端只在进度 ≥ 1.0 时才破坏；70% 那条线只对「收到 STOP 时正好是
+ *     服务端记着的那个方块」有效，所以先点的那个只能等到 100%）
  * 4. 绕过技术：高空包、滞空挖掘微调、sequenced packet（startPrediction）
  * 5. 挖掘冷却：开始一个挖掘后的一段时间内忽略其他方块，适配反作弊的挖掘延迟检查
  * 6. 超时放弃：进度走完后等待服务端确认破坏，超时仍未被破坏则放弃该方块
  * 7. 自动重挖：服务端破坏方块后 destroyPos 仍然指着那个位置（只有新的 START 才会改），而进度是
  *    「当前手持工具速度 × (gameTicks - destroyProgressStart + 1)」，已经过了很久再补 STOP 会直接 ≥ 0.7，
  *    所以重挖位置再次出现方块时不需要 START，切最佳工具补一个 STOP 就能瞬间破坏
+ *    （位置必须是服务端 destroyPos 指着的那个：单挖的方块、双挖里后点并由我们收尾的那个。
+ *     延迟破坏那个方块的位置不是 destroyPos，补 STOP 会被忽略，不能当重挖位置）
  */
 public class GhostMine extends Module {
     private final SettingGroup sgGeneral = settings.getDefaultGroup();   // 挖掘（Meteor 默认组）
@@ -139,7 +143,8 @@ public class GhostMine extends Module {
         .add(
             new BoolSetting.Builder()
                 .name("滞空挖掘绕过")
-                .description("在发送 STOP 前微调 Y 坐标")
+                .description("在空中挖掘时按「踩在地面上」发包，让服务端按地面速度算进度（不被空中 1/5 惩罚减速）；"
+                    + "发送 STOP、以及等服务端把延迟破坏的方块补完时都会补一个这样的位置包")
                 .defaultValue(false)
                 .build()
         );
@@ -186,7 +191,7 @@ public class GhostMine extends Module {
         .add(
             new IntSetting.Builder()
                 .name("延迟")
-                .description("延迟切回：切工具后多少 tick 切回原来的槽位")
+                .description("延迟切回：切工具后多少 tick 切回原来的槽位（等延迟破坏槽位的方块掉下来不算在内，那段必须拿着工具）")
                 .defaultValue(1)
                 .sliderRange(1, 10)
                 .visible(() -> switchBackMode.get() == SwitchBackMode.DELAYED)
@@ -318,6 +323,8 @@ public class GhostMine extends Module {
     /** 工具切换状态：是否已切到最佳工具等切回、已等待 tick 数 */
     private boolean hasSwitch = false;
     private int switchTicks = 0;
+    /** 正在为「等服务端把延迟破坏槽位的方块挖掉」而拿住最佳工具的方块（没在等的时候是 null） */
+    private BlockDate holdBlock = null;
     // 挖掘挥手包控制：allow=放行下一个 swing 包，block=拦截下一个 swing 包（由「挖掘开始/结束挥手」设置决定，
     // 不依赖瞄准状态，避免挖掘开始/结束瞬间没瞄准方块时包漏拦/漏放）
     private boolean allowSwingPacket = false;
@@ -361,6 +368,7 @@ public class GhostMine extends Module {
         mineCooldownTicks = 0;
         hasSwitch = false;
         switchTicks = 0;
+        holdBlock = null;
     }
 
     @Override
@@ -371,6 +379,7 @@ public class GhostMine extends Module {
         rebreakTicks = 0;
         rebreakTried = false;
         mineCooldownTicks = 0;
+        holdBlock = null;
 
         // 恢复工具栏
         if (hasSwitch) {
@@ -491,7 +500,9 @@ public class GhostMine extends Module {
         switchToBestTool(block);
         sendStop(block.pos, block.direction);
 
-        if (switchBackMode.get() == SwitchBackMode.IMMEDIATE) switchBackNow();
+        // 立即切回：还有方块等着服务端「用手上的工具」把它补完时不能切回，否则会把它的手持工具抢走
+        // （那段等待由 handleSwitchBack 负责，等方块掉下来再切回）
+        if (switchBackMode.get() == SwitchBackMode.IMMEDIATE && holdNeeded() == null) switchBackNow();
     }
 
     /** 进度走完后等待服务端确认破坏，等待超过「放弃等待」则放弃该方块 */
@@ -505,9 +516,20 @@ public class GhostMine extends Module {
         return true;
     }
 
-    /** 记录重挖位置（自动重挖开启时） */
+    /**
+     * 记录重挖位置（自动重挖开启时）
+     * <p>
+     * 只记「服务端还记着正在挖」的那个位置，也就是最后一次收到开始包、由我们发结束包收尾的方块。
+     * 重挖的原理是：服务端破坏方块后 {@code destroyPos} 不会清掉，位置再次出现方块时补一个结束包，
+     * 进度按「最后一次开始包到现在」算、早就 ≥70% → 瞬间破坏。位置对不上 destroyPos 的话，
+     * 结束包会被服务端直接忽略（要 {@code pos.equals(this.destroyPos)} 才认），根本挖不掉。
+     * <p>
+     * 双挖时先点的方块是服务端自己走「延迟破坏」补完的，它早就不是 destroyPos 了 —— 记它没用，
+     * 还会把真正能重挖的位置顶掉（先点的方块一般先掉），所以不记。
+     */
     private void recordRebreak(BlockDate block) {
         if (!rebreak.get() || !block.rebreak) return;
+        if (!block.serverTracked) return;
         rebreakBlockDate = new BlockDate(block.pos, block.direction);
         rebreakTicks = 0;
         rebreakTried = false;
@@ -520,8 +542,19 @@ public class GhostMine extends Module {
 
     // ==================== 工具切换 ====================
 
-    /** 切到该方块的最佳工具（热栏里没有合适的工具时不切） */
+    /** 切到该方块的最佳工具：普通收尾用，重新开始「切回」计时 */
     private void switchToBestTool(BlockDate block) {
+        switchToBestTool(block, true);
+    }
+
+    /**
+     * 切到该方块的最佳工具（热栏里没有合适的工具时不切）
+     *
+     * @param restartTimer 是否重新开始「切回」计时。普通收尾（发 STOP）要重新开始；
+     *                     等延迟破坏槽位的方块掉下来时不要 —— 那时候工具停多久由方块什么时候掉决定，
+     *                     不能和切回延迟叠加成「普通收尾 1 tick + 等待 1 tick」
+     */
+    private void switchToBestTool(BlockDate block, boolean restartTimer) {
         int slot = getBestTool(mc.level.getBlockState(block.pos));
         if (slot == -1 || slot == mc.player.getInventory().getSelectedSlot()) return;
 
@@ -533,7 +566,7 @@ public class GhostMine extends Module {
 
         InvUtils.swap(slot, true);
         hasSwitch = true;
-        switchTicks = 0;
+        if (restartTimer) switchTicks = 0;
     }
 
     /** 切回原来的槽位 */
@@ -548,61 +581,78 @@ public class GhostMine extends Module {
     /**
      * 切工具后的处理
      * <p>
-     * 1. 有方块「客户端进度已经走完、服务端还没破坏」→ 必须拿着最佳工具并继续补 STOP。
-     * 服务端的进度是用「当前手持工具」重算的，手上不拿挖得动的工具，这个方块永远走不完
-     * （手动切一下工具就能挖掉也是这个原因，这里只是把它自动化）。
-     * 2. 正常情况 → 按「切工具模式」切回原槽位（切回时机由 延迟 / 方块破坏切回 决定）。
+     * 1. 有方块「客户端进度已经走完、服务端还没破坏」（延迟破坏槽位那个）→ 必须拿着最佳工具。
+     * 服务端每个 tick 都拿「当前手持工具」重算它的进度，手上不拿挖得动的工具，它就掉不下来
+     * （手动切一下工具就能挖掉也是这个原因，这里只是把它自动化）。这是唯一需要「停留」的情况。
+     * 2. 切回计时照常走：从「普通收尾切工具」那一刻开始算，等待期间也算，不会和等待叠成两段停留。
+     * 3. 但工具只有一个 —— 还在等方块掉的时候不能切回，否则会把它需要的手持工具抢走。
      */
     private void handleSwitchBack() {
-        BlockDate stalled = null;
-        if (needsHelp(firstBlockDate)) stalled = firstBlockDate;
-        else if (needsHelp(secondBlockDate)) stalled = secondBlockDate;
-
-        if (stalled != null) {
-            switchToBestTool(stalled);
-
-            if (loopStop.get()) {
-                // 服务端当前记着谁就给谁补 STOP（另一个发过去也会被忽略）
-                if (needsHelp(firstBlockDate) && firstBlockDate.serverTracked) {
-                    sendStopPacket(firstBlockDate.pos, firstBlockDate.direction);
-                }
-                if (needsHelp(secondBlockDate) && secondBlockDate.serverTracked) {
-                    sendStopPacket(secondBlockDate.pos, secondBlockDate.direction);
-                }
+        // 1. 延迟破坏槽位的方块：进度走完了，但服务端要拿「手上的工具」自己把它补完才掉
+        BlockDate hold = holdNeeded();
+        if (hold == null) {
+            holdBlock = null;
+        } else {
+            if (hold != holdBlock) {
+                holdBlock = hold;
+                // 只在开始等的时候切一次工具，并且不动切回计时（等待时间不算额外的停留）
+                switchToBestTool(hold, false);
             }
+            // 服务端每个 tick 都用「手上的工具 + 它自己的 onGround」重算延迟破坏的进度，
+            // 所以等待期间要持续把「踩在地面上」发过去，否则空中会一直按 1/5 慢慢走
+            sendFakeGround();
+        }
+
+        // 2. 切回计时：等待期间照常计时，这样等方块掉下来时可以直接切回，不会两段停留叠起来
+        boolean back = false;
+        if (hasSwitch) {
+            switch (switchBackMode.get()) {
+                // 立即切回：正常情况在发 STOP 的那一 tick 已经切回了，这里处理「等方块掉」这种被拖住的情况
+                case IMMEDIATE -> back = true;
+                case DELAYED -> {
+                    if (switchBackOnBreak.get() && !hasLiveStopTarget()) {
+                        back = true;
+                    } else {
+                        if (switchTicks < switchBackDelay.get()) switchTicks++;
+                        back = switchTicks >= switchBackDelay.get();
+                    }
+                }
+                // 不切回：保持最佳工具
+                case NONE -> { }
+            }
+        }
+
+        if (back && hold == null) {
+            switchBackNow();
             return;
         }
 
-        if (!hasSwitch) return;
+        if (!loopStop.get()) return;
 
-        switch (switchBackMode.get()) {
-            // 立即切回在发 STOP 的那一 tick 已经切回了
-            case IMMEDIATE -> switchBackNow();
-            case DELAYED -> {
-                if (switchBackOnBreak.get() && !hasLiveStopTarget()) {
-                    switchBackNow();
-                    return;
-                }
-
-                switchTicks++;
-                if (switchTicks >= switchBackDelay.get()) {
-                    switchBackNow();
-                    return;
-                }
-
-                if (loopStop.get()) {
-                    if (isLiveStopTarget(firstBlockDate)) sendStopPacket(firstBlockDate.pos, firstBlockDate.direction);
-                    if (isLiveStopTarget(secondBlockDate)) sendStopPacket(secondBlockDate.pos, secondBlockDate.direction);
-                }
+        if (hold != null) {
+            // 等方块掉期间：服务端当前记着谁就给谁补 STOP（另一个发过去也会被忽略）
+            if (needsHelp(firstBlockDate) && firstBlockDate.serverTracked) {
+                sendStopPacket(firstBlockDate.pos, firstBlockDate.direction);
             }
-            // 不切回：保持最佳工具
-            case NONE -> { }
+            if (needsHelp(secondBlockDate) && secondBlockDate.serverTracked) {
+                sendStopPacket(secondBlockDate.pos, secondBlockDate.direction);
+            }
+        } else {
+            if (isLiveStopTarget(firstBlockDate)) sendStopPacket(firstBlockDate.pos, firstBlockDate.direction);
+            if (isLiveStopTarget(secondBlockDate)) sendStopPacket(secondBlockDate.pos, secondBlockDate.direction);
         }
     }
 
     /** 方块进度已经走完、但服务端还没把它破坏掉 → 需要拿着最佳工具让服务端把进度补完 */
     private boolean needsHelp(BlockDate block) {
         return block != null && block.isMining && block.done && !isBroken(block.pos);
+    }
+
+    /** 正在等服务端把方块挖掉（需要拿住最佳工具的那个方块，先点的优先），没有则返回 null */
+    private BlockDate holdNeeded() {
+        if (needsHelp(firstBlockDate)) return firstBlockDate;
+        if (needsHelp(secondBlockDate)) return secondBlockDate;
+        return null;
     }
 
     /** 发过 STOP 但还没被破坏的方块（服务端当前记着的那个才有意义） */
@@ -694,7 +744,7 @@ public class GhostMine extends Module {
     private void rebreakNow() {
         switchToBestTool(rebreakBlockDate);
         sendStopPacket(rebreakBlockDate.pos, rebreakBlockDate.direction);
-        if (switchBackMode.get() == SwitchBackMode.IMMEDIATE) switchBackNow();
+        if (switchBackMode.get() == SwitchBackMode.IMMEDIATE && holdNeeded() == null) switchBackNow();
     }
 
     // ==================== 发包方法 ====================
@@ -755,29 +805,45 @@ public class GhostMine extends Module {
     }
 
     /**
-     * 只发一个 STOP 包（循环发包 / 重挖用，不带挥手与绕过）
+     * 只发一个 STOP 包（循环发包 / 重挖用，不带挥手）
+     * <p>
+     * 服务端是拿「收到 STOP 那一刻手上的工具」按
+     * {@code 单tick进度 × (gameTicks - destroyProgressStart + 1)} 重算整个进度的，
+     * 所以滞空挖掘绕过要在 STOP 之前先把「踩在地面上」发出去（空中惩罚是最后一步 {@code speed /= 5}，
+     * 去掉它整个进度就按地面速度算），否则在空中这一下会被算成 1/5，进度不够 0.7 就被丢掉。
      */
     private void sendStopPacket(BlockPos pos, Direction direction) {
+        sendFakeGround();
+
         mc.gameMode.startPrediction(mc.level, id ->
             new ServerboundPlayerActionPacket(ServerboundPlayerActionPacket.Action.STOP_DESTROY_BLOCK, pos, direction, id));
     }
 
     /**
+     * 滞空挖掘绕过：给服务端补一个「踩在地面上」的位置包
+     * <p>
+     * 服务端的挖掘进度最后一步是 {@code if (!player.onGround()) speed /= 5}（26.1 {@code Player.getDestroySpeed}），
+     * 而 onGround 这个标记就是客户端发过来的，所以先发一个 onGround = true 的位置包，
+     * 服务端接下来这一 tick 就会按地面速度算进度。Y 微调 1.0e-9 只是让这个包不和上一 tick 的位置完全一样。
+     * <p>
+     * 必须在 STOP 之前发（服务端按收到的顺序处理），并且延迟破坏那个方块也要按 tick 补，
+     * 否则服务端每个 tick 用它自己的 onGround 重算，会一直按空中的 1/5 走。
+     */
+    private void sendFakeGround() {
+        if (!bypassGround.get() || mc.player.onGround() || mc.player.isFallFlying()) return;
+
+        mc.getConnection().send(
+            new ServerboundMovePlayerPacket.PosRot(
+                mc.player.getX(), mc.player.getY() + 1.0e-9, mc.player.getZ(),
+                mc.player.getYRot(), mc.player.getXRot(), true, mc.player.horizontalCollision));
+    }
+
+    /**
      * 发送 STOP 包 - 带绕过技术
-     * 1. 滞空挖掘绕过：微调 Y 坐标
-     * 2. 高空 STOP 抵消
-     * 3. 使用 sequenced packet 发送主 STOP
+     * 1. 高空 STOP 抵消
+     * 2. 使用 sequenced packet 发送主 STOP（滞空挖掘绕过的位置包在里面）
      */
     private void sendStop(BlockPos pos, Direction direction) {
-        // 滞空挖掘绕过：在 STOP 前微调 Y 坐标（26.1 无 Player.onLanding，只保留位置微调）
-        if (bypassGround.get() && !mc.player.isFallFlying() && pos != null
-            && !mc.level.isEmptyBlock(pos) && !mc.player.onGround()) {
-            mc.getConnection().send(
-                new ServerboundMovePlayerPacket.PosRot(
-                    mc.player.getX(), mc.player.getY() + 1.0e-9, mc.player.getZ(),
-                    mc.player.getYRot(), mc.player.getXRot(), true, mc.player.horizontalCollision));
-        }
-
         // 高空 STOP 抵消
         if (fastBypass.get()) {
             BlockPos bypassPos = new BlockPos(pos.getX(), 321, pos.getZ());
@@ -1033,6 +1099,10 @@ public class GhostMine extends Module {
             int slot = getBestTool(blockState);
             double delta = BlockUtils.getBreakDelta(
                 slot != -1 ? slot : mc.player.getInventory().getSelectedSlot(), blockState);
+
+            // 滞空挖掘绕过：服务端算进度时会被我们骗成「踩在地上」（发 STOP / 等延迟破坏时都会补位置包），
+            // 所以这里也要把空中的 1/5 惩罚去掉 —— 否则客户端会按被减速的进度慢慢等，结束包发得晚、挖得也慢
+            if (bypassGround.get() && !mc.player.onGround()) delta *= 5.0;
 
             // 原版挖掘速度：进度累加到 1.0 表示挖完
             progress += delta;

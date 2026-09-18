@@ -43,7 +43,7 @@ import java.util.function.Consumer;
  *
  * <pre>
  * 〔简单控制〕简单控制模式（关闭 / 原版 / 发包 / 合法，默认关闭）+ 官方原版/发包设置 + 合法模式设置（含悬停）
- * 〔甲飞〕    甲飞模式（关闭 / 普通 / Grim模式）+ 换装、音效、落地防摔等设置
+ * 〔甲飞〕    甲飞模式（关闭 / 普通 / Grim模式）+ 允许在岩浆中飞行 + 换装、音效、落地防摔等设置
  * 〔无限鞘翅〕无限鞘翅（照搬 AEfish）+ 周期 / 静音
  * </pre>
  *
@@ -77,6 +77,9 @@ public abstract class MixinElytraFly {
     private Setting<ElytraFlySupport.ArmorMode> armorMode;
 
     @Unique
+    private Setting<Boolean> lavaFlight;
+
+    @Unique
     private Setting<Boolean> muteSounds;
 
     @Unique
@@ -98,6 +101,9 @@ public abstract class MixinElytraFly {
     private Setting<Boolean> autoFirework;
 
     @Unique
+    private Setting<Integer> legalRotationPriority;
+
+    @Unique
     private Setting<Boolean> autoSwapElytra;
 
     @Unique
@@ -105,6 +111,9 @@ public abstract class MixinElytraFly {
 
     @Unique
     private Setting<BackpackUse.Mode> backpackMode;
+
+    @Unique
+    private Setting<BackpackUse.TargetSlot> backpackTarget;
 
     @Unique
     private Setting<Integer> fwPriorityLv1;
@@ -247,6 +256,15 @@ public abstract class MixinElytraFly {
 
         // ====== 简单控制：合法模式设置（含悬停） ======
 
+        legalRotationPriority = sgSimple.add(new IntSetting.Builder()
+            .name("合法转头优先级")
+            .description("合法转头的优先级")
+            .defaultValue(0)
+            .sliderRange(-20, 20)
+            .visible(this::isLegalMode)
+            .build()
+        );
+
         autoFirework = sgSimple.add(new BoolSetting.Builder()
             .name("自动烟花")
             .description("飞行中自动释放烟花加速（与「悬停时自动烟花」相互独立）")
@@ -273,9 +291,17 @@ public abstract class MixinElytraFly {
         );
 
         backpackMode = sgSimple.add(new EnumSetting.Builder<BackpackUse.Mode>()
-            .name("背包使用模式")
-            .description("背包烟花的交换发包模式。1p：SWAP 2包;2p：PICKUP 4 包。除特殊原因，请使用2p更稳定")
-            .defaultValue(BackpackUse.Mode.PICKUP)
+            .name("背包使用发包")
+            .description("背包烟花的交换发包方式。SWAP：2 次 SWAP 点击（背包槽与目标格互换）；PICKUP：4 次 PICKUP 点击（走光标，背包满也能换）")
+            .defaultValue(BackpackUse.Mode.SWAP)
+            .visible(() -> isLegalMode() && autoFirework.get() && backpackFirework.get())
+            .build()
+        );
+
+        backpackTarget = sgSimple.add(new EnumSetting.Builder<BackpackUse.TargetSlot>()
+            .name("目标槽位")
+            .description("背包烟花换到哪一格使用。副手：换到副手使用（不碰手上那一格）；主手：换到手持那一格；快捷栏：换到除手持那一格以外的一个快捷栏格（空手 > 工具 > 方块 > 物品）")
+            .defaultValue(BackpackUse.TargetSlot.OFFHAND)
             .visible(() -> isLegalMode() && autoFirework.get() && backpackFirework.get())
             .build()
         );
@@ -455,6 +481,14 @@ public abstract class MixinElytraFly {
             .build()
         );
 
+        lavaFlight = sgArmor.add(new BoolSetting.Builder()
+            .name("允许在岩浆中飞行")
+            .description("开启后岩浆里也照常换装维持滑翔、按滑翔运算继续飞；关闭则和以前一样进岩浆就收工（换回胸甲 + 清滑翔 + 按岩浆移动）。水里一律不工作，等离开水面再继续")
+            .defaultValue(true)
+            .visible(this::isArmorMode)
+            .build()
+        );
+
         muteSounds = sgArmor.add(new BoolSetting.Builder()
             .name("静音")
             .description("屏蔽换装音效")
@@ -539,6 +573,7 @@ public abstract class MixinElytraFly {
         // 注入设置引用到支持类
         ElytraFlySupport.flightMode = flightMode;
         ElytraFlySupport.armorMode = armorMode;
+        ElytraFlySupport.lavaFlight = lavaFlight;
         ElytraFlySupport.muteSounds = muteSounds;
         ElytraFlySupport.spaceBlockInAir = spaceBlockInAir;
         ElytraFlySupport.landingNoFall = landingNoFall;
@@ -546,9 +581,11 @@ public abstract class MixinElytraFly {
         ElytraFlySupport.grimInputSequence = grimInputSequence;
         ElytraFlySupport.armorSwapInterval = armorSwapInterval;
         ElytraFlySupport.autoFirework = autoFirework;
+        ElytraFlySupport.legalRotationPriority = legalRotationPriority;
         ElytraFlySupport.autoSwapElytra = autoSwapElytra;
         ElytraFlySupport.backpackFirework = backpackFirework;
         ElytraFlySupport.backpackMode = backpackMode;
+        ElytraFlySupport.backpackTarget = backpackTarget;
         ElytraFlySupport.fwPriorityLv1 = fwPriorityLv1;
         ElytraFlySupport.fwPriorityLv2 = fwPriorityLv2;
         ElytraFlySupport.fwPriorityLv3 = fwPriorityLv3;

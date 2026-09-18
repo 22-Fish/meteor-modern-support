@@ -3258,5 +3258,17 @@
   "Setting.Meteor Client.forward-multiplier": "前进倍数",
   "Setting.Meteor Client.forward-multiplier.Description": "",
   "Setting.Meteor Client.sideways-multiplier": "侧移倍数",
-  "Setting.Meteor Client.sideways-multiplier.Description": ""
+  "Setting.Meteor Client.sideways-multiplier.Description": "",
+  "Module.meteor现代化支持.openAI": "openAI",
+  "Module.meteor现代化支持.openAI.Description": "启动一个openAI服务器",
+  "Setting.meteor现代化支持.自动聊天": "自动聊天",
+  "Setting.meteor现代化支持.自动聊天.Description": "开启后，符合公屏/私聊格式的任意聊天都会进入聚合；不需要触发词，也不看白名单。",
+  "Setting.meteor现代化支持.自动聊天消息整合上限": "自动聊天消息整合上限",
+  "Setting.meteor现代化支持.自动聊天消息整合上限.Description": "从第一条消息开始计时，最多等这么多秒；到时间就把期间的消息按多条 user 消息发给AI。",
+  "Setting.meteor现代化支持.自动消息整合下限": "自动消息整合下限",
+  "Setting.meteor现代化支持.自动消息整合下限.Description": "距离上一条消息超过这么多秒仍没有新消息时，直接把当前这批消息发给AI。",
+  "Setting.meteor现代化支持.随机整合时间": "随机整合时间",
+  "Setting.meteor现代化支持.随机整合时间.Description": "开启后，每批自动聊天的整合上限和下限在设置值基础上随机上下浮动 1-10 tick（1 tick = 50 毫秒）。",
+  "Setting.meteor现代化支持.强制触发": "强制触发",
+  "Setting.meteor现代化支持.强制触发.Description": "强制触发一次AI：把公屏最近 10 条消息作为多条 user 消息传入，回复强制发送到公屏。"
 }

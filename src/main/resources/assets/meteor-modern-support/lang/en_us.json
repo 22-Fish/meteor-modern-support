@@ -2490,5 +2490,17 @@
   "Setting.Meteor.proxies-button": "proxies-button",
   "Setting.Meteor.proxies-button.Description": "Controls the position and visibility of the proxies button in the multiplayer screen.",
   "Setting.Meteor.proxy-status": "proxy-status",
-  "Setting.Meteor.proxy-status.Description": "Shows information about the current proxy in the multiplayer screen."
+  "Setting.Meteor.proxy-status.Description": "Shows information about the current proxy in the multiplayer screen.",
+  "Module.meteor现代化支持.openAI": "openAI",
+  "Module.meteor现代化支持.openAI.Description": "Starts an openAI server.",
+  "Setting.meteor现代化支持.自动聊天": "Auto Chat",
+  "Setting.meteor现代化支持.自动聊天.Description": "Aggregates any matching public or private chat without requiring a trigger word or whitelist.",
+  "Setting.meteor现代化支持.自动聊天消息整合上限": "Auto Chat Max Window",
+  "Setting.meteor现代化支持.自动聊天消息整合上限.Description": "Seconds to wait from the first message before sending the whole batch as multiple user messages.",
+  "Setting.meteor现代化支持.自动消息整合下限": "Auto Chat Idle Window",
+  "Setting.meteor现代化支持.自动消息整合下限.Description": "Seconds without a new message before sending the current batch immediately.",
+  "Setting.meteor现代化支持.随机整合时间": "Randomize Aggregate Timing",
+  "Setting.meteor现代化支持.随机整合时间.Description": "Randomizes both aggregate windows by 1-10 ticks in either direction (1 tick = 50 ms).",
+  "Setting.meteor现代化支持.强制触发": "Force Trigger",
+  "Setting.meteor现代化支持.强制触发.Description": "Forces one AI call using the latest 10 public chat messages as user messages. The reply always goes to public chat."
 }

@@ -31,17 +31,43 @@ public class Freeze extends Module {
     /** 外部请求的冻结状态（如鞘翅飞行·合法平飞的悬停冻结），不依赖本模块开关 */
     private static boolean externalFrozen = false;
 
+    /** 外部冻结请求计数（可为多个功能同时请求，互不覆盖） */
+    private static int externalFreezeRequests = 0;
+
+    /** 绕过/特殊放置期间放行「带旋转的位置包」的请求计数，避免旋转被冻结拦截 */
+    private static int rotatedMovePacketRequests = 0;
+
     /** 放行下一发位置移动包（甲飞防踢脉冲用，见 ElytraFlySupport#sendFloatingPulse） */
     private static boolean bypassNextMovePacket = false;
 
     /** 是否处于冻结状态（本模块开启 或 外部请求冻结） */
     public static boolean isFrozen() {
-        return frozen || externalFrozen;
+        return frozen || externalFrozen || externalFreezeRequests > 0;
     }
 
     /** 设置外部冻结状态（合法平飞悬停=冻结时调用；取消时传 false） */
     public static void setExternalFrozen(boolean value) {
         externalFrozen = value;
+    }
+
+    /** 申请一次外部冻结（与其它外部冻结功能互相独立，用 releaseExternalFreeze 释放） */
+    public static void requestExternalFreeze() {
+        externalFreezeRequests++;
+    }
+
+    /** 释放一次外部冻结请求 */
+    public static void releaseExternalFreeze() {
+        if (externalFreezeRequests > 0) externalFreezeRequests--;
+    }
+
+    /** 请求放行带旋转的移动包（只影响「有旋转」的包，纯位置包照旧拦） */
+    public static void requestRotatedMovePackets() {
+        rotatedMovePacketRequests++;
+    }
+
+    /** 释放一次「放行带旋转移动包」请求 */
+    public static void releaseRotatedMovePackets() {
+        if (rotatedMovePacketRequests > 0) rotatedMovePacketRequests--;
     }
 
     /**
@@ -137,6 +163,10 @@ public class Freeze extends Module {
             // 甲飞防踢脉冲：放行这一发（一次有效）
             if (bypassNextMovePacket) {
                 bypassNextMovePacket = false;
+                return;
+            }
+            // 绕过放置需要把这一 tick 的旋转带给服务器：带旋转的包放行，纯位置包仍然拦下
+            if (rotatedMovePacketRequests > 0 && movePacket.hasRotation()) {
                 return;
             }
             event.cancel();

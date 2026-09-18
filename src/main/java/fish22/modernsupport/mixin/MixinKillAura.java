@@ -6,6 +6,7 @@ import meteordevelopment.meteorclient.renderer.Renderer3D;
 import meteordevelopment.meteorclient.settings.BoolSetting;
 import meteordevelopment.meteorclient.settings.ColorSetting;
 import meteordevelopment.meteorclient.settings.EnumSetting;
+import meteordevelopment.meteorclient.settings.IntSetting;
 import meteordevelopment.meteorclient.settings.Setting;
 import meteordevelopment.meteorclient.settings.SettingGroup;
 import meteordevelopment.meteorclient.systems.modules.combat.KillAura;
@@ -71,6 +72,9 @@ public abstract class MixinKillAura {
     private Setting<LegalRotation.Mode> legalRotationMode;
 
     @Unique
+    private Setting<Integer> legalRotationPriority;
+
+    @Unique
     private Setting<Boolean> aimAndRangeOptimization;
 
     @Unique
@@ -106,6 +110,16 @@ public abstract class MixinKillAura {
             .description("合法转头模式。严格：移动方向为真实旋转。静默：在严格基础上映射 WASD 按键,尝试让移动方向与视觉朝向一致")
             .defaultValue(LegalRotation.Mode.OFF)
             .visible(() -> rotation.get() != KillAura.RotationMode.None)
+            .build()
+        );
+
+        legalRotationPriority = sg.add(new IntSetting.Builder()
+            .name("合法转头优先级")
+            .description("合法转头的优先级")
+            .defaultValue(0)
+            .sliderRange(-20, 20)
+            .visible(() -> rotation.get() != KillAura.RotationMode.None
+                && (legalRotationMode.get() == LegalRotation.Mode.SEVERE || legalRotationMode.get() == LegalRotation.Mode.QUIET))
             .build()
         );
 
@@ -155,7 +169,7 @@ public abstract class MixinKillAura {
     private void redirectRotateAlways(double yaw, double pitch) {
         LegalRotation.Mode mode = legalRotationMode.get();
         if (mode == LegalRotation.Mode.SEVERE || mode == LegalRotation.Mode.QUIET) {
-            LegalRotation.rotate(yaw, pitch, mode);
+            LegalRotation.rotate(yaw, pitch, mode, legalRotationPriority.get());
         } else {
             // 关闭 / 停止移动（未实现）：回退原版静默旋转
             Rotations.rotate(yaw, pitch);
@@ -174,7 +188,7 @@ public abstract class MixinKillAura {
     private void redirectRotateOnHit(double yaw, double pitch) {
         LegalRotation.Mode mode = legalRotationMode.get();
         if (mode == LegalRotation.Mode.SEVERE || mode == LegalRotation.Mode.QUIET) {
-            LegalRotation.rotate(yaw, pitch, mode);
+            LegalRotation.rotate(yaw, pitch, mode, legalRotationPriority.get());
         } else {
             // 关闭 / 停止移动（未实现）：回退原版静默旋转
             Rotations.rotate(yaw, pitch);

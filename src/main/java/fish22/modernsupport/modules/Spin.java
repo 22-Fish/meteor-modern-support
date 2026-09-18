@@ -166,6 +166,14 @@ public class Spin extends Module {
         .defaultValue(LegalRotation.Mode.OFF)
         .build()
     );
+    private final Setting<Integer> legalRotationPriority = sgMovement.add(new IntSetting.Builder()
+        .name("合法转头优先级")
+        .description("合法转头的优先级")
+        .defaultValue(0)
+        .sliderRange(-20, 20)
+        .visible(() -> legalRotation.get() == LegalRotation.Mode.SEVERE || legalRotation.get() == LegalRotation.Mode.QUIET)
+        .build()
+    );
     private final Setting<Boolean> safePitch = sgGeneral.add(new BoolSetting.Builder()
         .name("安全俯仰")
         .description("把俯仰限制在 -90° ~ 90° 之间，避免视角翻转。")
@@ -229,7 +237,7 @@ public class Spin extends Module {
         // 按模块的合法转头设置旋转：严格/静默走合法转头，其余回退原版静默旋转
         LegalRotation.Mode mode = legalRotation.get();
         if (mode == LegalRotation.Mode.SEVERE || mode == LegalRotation.Mode.QUIET) {
-            LegalRotation.rotate(yaw, pitch, mode);
+            LegalRotation.rotate(yaw, pitch, mode, legalRotationPriority.get());
         } else {
             Rotations.rotate(yaw, pitch);
         }
