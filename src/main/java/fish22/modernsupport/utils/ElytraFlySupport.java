@@ -97,7 +97,7 @@ import static meteordevelopment.meteorclient.MeteorClient.mc;
  * <ul>
  *   <li>每 tick 按 WASD 相对当前视角计算目标偏航（8 方向），按空格/潜行计算目标俯仰
  *       （空格看天上升、潜行看地下降、仅移动时微俯 -1.9° 保持滑翔速度）</li>
- *   <li>通过 {@link LegalRotation}（严格模式）把服务器视角转到目标角度，
+ *   <li>通过 {@link LegalRotation}（静默模式）把服务器视角转到目标角度，
  *       客户端视角不动——原版滑翔物理朝服务器视角方向自然加速</li>
  *   <li>无任何输入时悬停原地：悬停模式 = 每 tick 把速度置 (0, 0.02, 0)（抵消重力），
  *       可同时按间隔静默放烟花（要开「悬停时自动烟花」，仅为保持滑翔状态正常，
@@ -377,7 +377,7 @@ public class ElytraFlySupport {
         // 冻结（悬停）：完全静止，移动运算由冻结逻辑接管
         if (Freeze.isFrozen()) return false;
 
-        // 服务端此刻是否把这一 tick 当作滑翔：本地已同步滑翔，或最近 4 tick 内发出过起飞包
+        // 服务端此刻是否把这一 tick 当作滑翔：本地已同步滑翔，或最近「换鞘翅后维持滑翔」这么多 tick 内发出过起飞包
         // （见 serverSeesGliding：服务端清滑翔标志要跟 transaction 绕一个往返才生效，这段延迟里仍认滑翔）。
         // 不满足（例如刚起跳、模块没换装成功、开容器时）就按原版空中运算走，
         // 和服务器（Grim 按未滑翔预测）保持一致。
@@ -423,14 +423,14 @@ public class ElytraFlySupport {
 
     /**
      * 服务端此刻是否把这一 tick 当作滑翔：本地已同步滑翔，
-     * 或最近 {@link #START_FLYING_WINDOW_TICKS} tick 内发出过起飞包。
+     * 或最近 {@link #startFlyingWindowTicks()} tick 内发出过起飞包。
      *
      * <p>甲飞本地大多时候不是滑翔状态（胸甲在身上，只有换装窗口那一两个 tick 服务器才认），
      * 服务器认滑翔靠的是我们发出去的起飞包。而服务端清滑翔标志不是立刻生效的：
-     * 那个广播要跟着 transaction 绕一个往返才应用（见 {@link #START_FLYING_WINDOW_TICKS}），
+     * 那个广播要跟着 transaction 绕一个往返才应用（见 {@link #startFlyingWindowTicks()}），
      * 这段时间里服务端/反作弊那边仍然在按滑翔预测，所以客户端也要继续按滑翔运算移动。
      *
-     * <p>窗口固定 {@value #START_FLYING_WINDOW_TICKS} tick（硬编码）：
+     * <p>窗口长度由「甲飞 → 换鞘翅后维持滑翔」设置决定（默认 {@value #DEFAULT_START_FLYING_WINDOW_TICKS} tick）：
      * 超过窗口还没有新的起飞包，就当作服务端已经不认滑翔，退回原版空中运算。
      *
      * <p>移动运算（{@link #travelAsElytra}）与甲飞模式下的方向控制
@@ -443,7 +443,7 @@ public class ElytraFlySupport {
         if (glidingRealignTicks > 0) return false;
 
         return mc.player != null
-            && (mc.player.isFallFlying() || ticksSinceStartFlying <= START_FLYING_WINDOW_TICKS);
+            && (mc.player.isFallFlying() || ticksSinceStartFlying <= startFlyingWindowTicks());
     }
 
     /**
@@ -797,6 +797,8 @@ public class ElytraFlySupport {
     public static Setting<Boolean> grimInputSequence;
     /** 甲飞换甲间隔（tick）：两次换装之间至少间隔的 tick 数，1 = 每 tick 都允许换（旧行为） */
     public static Setting<Integer> armorSwapInterval;
+    /** 甲飞：「换鞘翅后维持滑翔」窗口（tick）：起飞包发出后本地还按滑翔运算移动多久，见 {@link #startFlyingWindowTicks()} */
+    public static Setting<Integer> startFlyingWindow;
     public static Setting<Boolean> autoFirework;
     /** 合法模式的「合法转头优先级」（和其他模块抢转向时用；设置没注入时退回 API 配置的默认优先级） */
     public static Setting<Integer> legalRotationPriority;
@@ -925,6 +927,9 @@ public class ElytraFlySupport {
     /** 起飞包重试间隔剩余 tick 数（服务器拒绝后隔一段时间自动重发，避免反复滑翔/取消） */
     private static int takeoffRetryTicks = 0;
 
+    /** 「自动替换鞘翅」这一轮的鞘翅是不是本模块换上去的（滑翔结束时只收回这种鞘翅，玩家自己穿的不管） */
+    private static boolean autoSwappedElytra = false;
+
     /** 上一 tick 是否滑翔（检测滑翔状态转变，起飞成功瞬间放烟花） */
     private static boolean prevFlying = false;
 
@@ -959,24 +964,35 @@ public class ElytraFlySupport {
     /** 本 tick 是否发过起飞包（服务器处理本 tick 移动包时已经在滑翔，本地移动运算据此对齐） */
     private static boolean startedGlidingThisTick = false;
 
-    /** 上一 tick 是否发过起飞包（「起飞包窗口」计时用，见 {@link #START_FLYING_WINDOW_TICKS}） */
+    /** 上一 tick 是否发过起飞包（「起飞包窗口」计时用，见 {@link #startFlyingWindowTicks()}） */
     private static boolean startedGlidingLastTick = false;
 
     /**
-     * 【硬编码】起飞包有效期（tick）：发出起飞包后这么久之内，本地仍然按滑翔运算移动。
+     * 起飞包有效期默认值（tick）：发出起飞包后这么久之内，本地仍然按滑翔运算移动。
+     * 实际取值看设置「甲飞 → 换鞘翅后维持滑翔」，设置还没注入（初始化前）时用这个默认值。
      *
      * <p>服务端广播的滑翔标志不是立刻生效的：Grim 那边把它挂在 transaction 上
      * （{@code PacketSelfMetadataListener} → {@code addRealTimeTask}），要等这个 transaction
      * 从客户端绕回来才应用，延迟 ≈ 一个 RTT。这段时间里服务端/反作弊那边仍然按滑翔预测，
      * 本地保持滑翔运算才不会两边分叉（无限鞘翅脱鞘翅那几 tick 不回弹就是这个道理）。
+     * 所以窗口不能短于「服务端停滑 → 反作弊那边也认停滑」的那段往返，
+     * 高延迟服务器上要自己把「换鞘翅后维持滑翔」调大一点。
      *
      * <p>超过这个窗口还没有新的起飞包，说明换装 → 起飞包那条链断了，本地就退回原版空中运算，
      * 和「服务端已经不认滑翔」的预测保持一致：宁可顿一下，也不要单边滑翔吃回弹。
      */
-    private static final int START_FLYING_WINDOW_TICKS = 4;
+    private static final int DEFAULT_START_FLYING_WINDOW_TICKS = 3;
 
-    /** 距上一次发出起飞包经过的 tick 数（发出起飞包那一 tick 记 0；窗口外保持大于窗口的值） */
-    private static int ticksSinceStartFlying = START_FLYING_WINDOW_TICKS + 1;
+    /** 窗口长度（tick）：优先读设置「换鞘翅后维持滑翔」，没注入时用默认值 */
+    private static int startFlyingWindowTicks() {
+        return startFlyingWindow == null ? DEFAULT_START_FLYING_WINDOW_TICKS : Math.max(0, startFlyingWindow.get());
+    }
+
+    /** 「窗口已过期」的哨兵值：一定大于任何窗口长度，且 +1 不会溢出 int */
+    private static final int START_FLYING_WINDOW_EXPIRED = Integer.MAX_VALUE / 2;
+
+    /** 距上一次发出起飞包经过的 tick 数（发出起飞包那一 tick 记 0；窗口外保持哨兵值） */
+    private static int ticksSinceStartFlying = START_FLYING_WINDOW_EXPIRED;
 
     /**
      * 「服务端刚把滑翔停掉」之后的重新对齐等待（tick）。
@@ -1628,10 +1644,11 @@ public class ElytraFlySupport {
         jumpWasDown = false;
         takeoffRequested = false;
         takeoffRetryTicks = 0;
+        autoSwappedElytra = false;
         prevFlying = false;
         startedGlidingThisTick = false;
         startedGlidingLastTick = false;
-        ticksSinceStartFlying = START_FLYING_WINDOW_TICKS + 1;
+        ticksSinceStartFlying = START_FLYING_WINDOW_EXPIRED;
         glidingRealignTicks = 0;
         rubberbandCount = 0;
         rubberbandWindow = 0;
@@ -1690,7 +1707,7 @@ public class ElytraFlySupport {
         // 「起飞包窗口」计时：上一 tick 发过起飞包就清零，否则 +1（超过窗口后不再增长）
         ticksSinceStartFlying = startedGlidingLastTick
             ? 0
-            : Math.min(ticksSinceStartFlying + 1, START_FLYING_WINDOW_TICKS + 1);
+            : Math.min(ticksSinceStartFlying + 1, startFlyingWindowTicks() + 1);
         antiKickPacketThisTick = false;
         hoverPlusThisTick = false;
         noPositionPacketThisTick = false;
@@ -1926,6 +1943,7 @@ public class ElytraFlySupport {
             Freeze.setExternalFrozen(false);
             takeoffRequested = false;
             takeoffRetryTicks = 0;
+            autoSwappedElytra = false;
             return;
         }
 
@@ -1939,10 +1957,12 @@ public class ElytraFlySupport {
         boolean left = mc.options.keyLeft.isDown();
         boolean right = mc.options.keyRight.isDown();
 
-        // 滑翔状态转变（起飞成功瞬间）：立即释放一次烟花，不等自动烟花间隔
+        // 滑翔状态转变（起飞成功瞬间）：结束起飞请求；开了自动烟花则立即释放一次，不等自动烟花间隔
         boolean flying = mc.player.isFallFlying();
-        if (flying && !prevFlying && autoFirework.get()) {
-            tryFireworkOnce();
+        if (flying && !prevFlying) {
+            takeoffRequested = false;
+            takeoffRetryTicks = 0;
+            if (autoFirework.get()) tryFireworkOnce();
         }
         prevFlying = flying;
 
@@ -1960,6 +1980,7 @@ public class ElytraFlySupport {
             takeoffRetryTicks = 0;
             if (autoSwapElytra.get()) {
                 swapBackChestplate();
+                autoSwappedElytra = false;
             }
             return;
         }
@@ -1981,6 +2002,12 @@ public class ElytraFlySupport {
                 if (jumpPressed) {
                     takeoffRequested = true;
                 }
+
+                // 滑翔结束（服务器不再认滑翔，此时也没在请求起飞）：把鞘翅换回胸甲
+                if (!takeoffRequested && autoSwappedElytra) {
+                    swapBackChestplate();
+                    autoSwappedElytra = false;
+                }
                 if (!takeoffRequested) return;
                 if (isElytraEquipped()) {
                     // 鞘翅已穿（换装点击本地同步执行，立即生效）：按间隔重发起飞包
@@ -2001,6 +2028,7 @@ public class ElytraFlySupport {
                     swapWithChest(elytra.slot());
                     sendStartFlying();
                     takeoffRetryTicks = 5;
+                    autoSwappedElytra = true;
                 }
                 // 服务器广播滑翔状态后视为起飞成功
                 if (mc.player.isFallFlying()) {
@@ -2061,7 +2089,7 @@ public class ElytraFlySupport {
             armorFlySwap(armorMode.get());
         }
 
-        // 滑翔中应用方向控制
+        // 方向控制
         // 不能用 mc.player.isFallFlying() 判断：甲飞本地大多时候不是滑翔状态
         // （Grim 模式不会把本地滑翔标志设真，只有普通模式会本地强制滑翔），
         // 用「服务器认滑翔」的窗口判断（本地滑翔标志 或 本 tick/上一 tick 发过起飞包）。
@@ -2069,7 +2097,57 @@ public class ElytraFlySupport {
         // 烟花加速方向会跟着视觉朝向（俯仰也是相机俯仰）而不是平飞目标朝向。
         if (serverSeesGliding()) {
             legalFlightControl(forward, back, left, right);
+        } else {
+            // 服务器这一 tick 不认滑翔（换装窗口断开、起飞包还没生效、回弹自愈期间…）也照样转头
+            rotateArmorInAir(forward, back, left, right);
         }
+    }
+
+    /**
+     * 甲飞：服务器这一 tick 不认滑翔时，照样把朝向转到目标方向（只转头，不做悬停/烟花那一套）
+     *
+     * <p>原来方向控制整块都挂在「服务器认滑翔」的窗口上，窗口一断（换装链断了、回弹自愈、
+     * 起飞包还没生效…）朝向就掉回相机方向，窗口再接上时方向已经错位。
+     *
+     * <p>朝向在窗口外转也不会和服务器分叉：本地这一 tick 的移动运算虽然退回原版空中运算，
+     * 但原版的 WASD 方向换算同样走合法转头（{@link fish22.modernsupport.mixin.MixinMoveRelative}），
+     * 服务器按同一份朝向预测，两边一致。用<b>静默</b>模式：WASD 按键会先映射到服务器朝向的
+     * 坐标系（{@link fish22.modernsupport.mixin.MixinKeyboardInput}），所以人物还是朝<b>视觉方向</b>
+     * 移动，不会被转过去的朝向带走（严格模式下 A / W+D 会跟着多偏几十度）。
+     *
+     * <p>条件：甲飞开启、空中（水里不转；岩浆看「允许在岩浆中飞行」，见 {@link #fluidStopsFlight}）、
+     * 悬停中不转（无方向键，且空格与潜行同状态 = 悬停 / 悬停组合，和 {@link #legalFlightControl} 同一套判定）
+     */
+    private static void rotateArmorInAir(boolean forward, boolean back, boolean left, boolean right) {
+        if (!isArmorFlyEnabled()) return;
+        if (mc.player.onGround() || fluidStopsFlight(mc.player)) return;
+        if (mc.player.isPassenger() || mc.player.isSpectator() || mc.player.isDeadOrDying()) return;
+        if (mc.player.getAbilities().flying) return;
+
+        // 相反方向键同时按：输入互相抵消，视为未按（和 legalFlightControl 一致）
+        if (forward && back) {
+            forward = false;
+            back = false;
+        }
+        if (left && right) {
+            left = false;
+            right = false;
+        }
+
+        boolean jump = mc.options.keyJump.isDown();
+        boolean sneak = mc.options.keyShift.isDown();
+        // 悬停 / 悬停组合：不转头（这一 tick 玩家没在控制方向）
+        if (!forward && !back && !left && !right && jump == sneak) return;
+
+        int rotationPriority = legalRotationPriority == null
+            ? LegalRotation.defaultPriority()
+            : legalRotationPriority.get();
+        LegalRotation.rotate(
+            calcLegalYaw(forward, back, left, right),
+            calcLegalPitch(jump, sneak),
+            LegalRotation.Mode.QUIET,
+            rotationPriority
+        );
     }
 
     /** 合法平飞飞行/悬停方向控制（真鞘翅与甲飞模式共用） */
@@ -2150,7 +2228,10 @@ public class ElytraFlySupport {
         int rotationPriority = legalRotationPriority == null
             ? LegalRotation.defaultPriority()
             : legalRotationPriority.get();
-        LegalRotation.rotate(targetYaw, targetPitch, LegalRotation.Mode.SEVERE, rotationPriority);
+        // 静默模式：滑翔中移动方向本来就由滑翔物理按真实朝向算（不吃 WASD），
+        // 换装窗口断开那几 tick 退回原版空中运算时，WASD 会被映射到真实朝向坐标系，
+        // 人物照样朝视觉方向移动（见 rotateArmorInAir 的同一处说明）
+        LegalRotation.rotate(targetYaw, targetPitch, LegalRotation.Mode.QUIET, rotationPriority);
         Freeze.setExternalFrozen(false);
 
         // 飞行中自动烟花（释放延后到移动包发送后，烟花加速方向才能跟随服务器视角）
@@ -2901,16 +2982,48 @@ public class ElytraFlySupport {
         fallDistanceBeforeTick = 0.0;
     }
 
-    /** 找背包里的鞘翅（快捷栏 0-8 / 主背包 9-35 / 副手 40）；找不到返回 null。
-     *  不查装备槽：胸甲槽已经穿着鞘翅时无需再换，而且 26.1 的 Inventory 把护甲放在
-     *  36-39（36=脚…39=头），Meteor SlotUtils 仍按旧版顺序换算菜单槽位，
-     *  拿装备槽索引去点击会落到别的护甲槽上。 */
+    /**
+     * 找背包里「能起飞、且剩余耐久最多」的鞘翅（快捷栏 0-8 / 主背包 9-35 / 副手 40）；找不到返回 null。
+     *
+     * <p>按剩余耐久挑，不按槽位先后挑：背包里放着好几件鞘翅时，先遇上的那件往往是快坏的旧鞘翅，
+     * 拿它去起飞会被服务端拒掉（原版起飞要求 {@code 伤害值 < 最大耐久 - 1}），
+     * 表现就是「换上鞘翅了却一直起飞失败」。
+     *
+     * <p>不查装备槽：胸甲槽已经穿着鞘翅时无需再换，而且 26.1 的 Inventory 把护甲放在
+     * 36-39（36=脚…39=头），Meteor SlotUtils 仍按旧版顺序换算菜单槽位，
+     * 拿装备槽索引去点击会落到别的护甲槽上。
+     */
     private static FindItemResult findElytra() {
-        FindItemResult elytra = InvUtils.find(stack -> stack.is(Items.ELYTRA), SlotUtils.HOTBAR_START, SlotUtils.MAIN_END);
-        if (elytra.found()) return elytra;
+        int bestIndex = -1;
+        int bestRemaining = 0;
+
+        for (int i = SlotUtils.HOTBAR_START; i <= SlotUtils.MAIN_END; i++) {
+            int remaining = elytraRemaining(mc.player.getInventory().getItem(i));
+            if (remaining > bestRemaining) {
+                bestRemaining = remaining;
+                bestIndex = i;
+            }
+        }
 
         ItemStack offhand = mc.player.getOffhandItem();
-        return offhand.is(Items.ELYTRA) ? new FindItemResult(SlotUtils.OFFHAND, offhand.getCount()) : null;
+        if (elytraRemaining(offhand) > bestRemaining) return new FindItemResult(SlotUtils.OFFHAND, offhand.getCount());
+
+        return bestIndex == -1 ? null : new FindItemResult(bestIndex, mc.player.getInventory().getItem(bestIndex).getCount());
+    }
+
+    /**
+     * 这件物品当鞘翅用的剩余耐久；不能拿它起飞的一律返回 -1（当候选排除掉）。
+     *
+     * <p>排除两种情况：压根不是鞘翅；耐久见底或已经用完（原版起飞要求
+     * {@code 伤害值 < 最大耐久 - 1}，也就是剩余耐久至少 2 才能起飞）。
+     * 没有耐久条的鞘翅（带「不可破坏」）当作无限耐久，最优先。
+     */
+    private static int elytraRemaining(ItemStack stack) {
+        if (!stack.is(Items.ELYTRA) && !stack.has(DataComponents.GLIDER)) return -1;
+        if (!stack.isDamageableItem()) return Integer.MAX_VALUE;
+
+        int remaining = stack.getMaxDamage() - stack.getDamageValue();
+        return remaining >= 2 ? remaining : -1;
     }
 
     /**
@@ -2992,7 +3105,7 @@ public class ElytraFlySupport {
     private static void sendStartFlying() {
         // 服务器处理本 tick 的移动包时已经在滑翔（起飞包先于位置包发出），本地移动运算据此对齐
         startedGlidingThisTick = true;
-        // 重置「起飞包窗口」：接下来 4 tick 内即使某个 tick 没换成鞘翅，本地也照样按滑翔运算移动
+        // 重置「起飞包窗口」：接下来「换鞘翅后维持滑翔」这么多 tick 内即使某个 tick 没换成鞘翅，本地也照样按滑翔运算移动
         ticksSinceStartFlying = 0;
         mc.getConnection().send(new ServerboundPlayerCommandPacket(mc.player, ServerboundPlayerCommandPacket.Action.START_FALL_FLYING));
     }

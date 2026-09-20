@@ -5,6 +5,7 @@ import fish22.modernsupport.aibot.AI;
 import fish22.modernsupport.commands.PearlCommand;
 import fish22.modernsupport.modules.AutoSugarcane;
 import fish22.modernsupport.modules.ElytraBounce;
+import fish22.modernsupport.modules.ElytraAutoReplace;
 import fish22.modernsupport.modules.ElytraGrimAccelerate;
 import fish22.modernsupport.modules.ElytraPitch40;
 import fish22.modernsupport.modules.EntityList;
@@ -330,6 +331,8 @@ public class ModernSupport extends MeteorAddon {
         Modules.get().add(new GhostMine());
         // 自动收甘蔗（由官方「核爆」简化：只收甘蔗/竹子，留下最下面一节）
         Modules.get().add(new AutoSugarcane());
+        // 鞘翅自动替换（滑翔中快坏的鞘翅自动换成背包里耐久最高的那把）
+        Modules.get().add(new ElytraAutoReplace());
         // 简单放置（配合投影模组使用）
         Modules.get().add(new SimplePlace());
         // 投影打印机（在范围内自动搭投影，放置逻辑用「简单放置」那一套）

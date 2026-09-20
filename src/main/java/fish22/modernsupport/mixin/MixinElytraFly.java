@@ -98,6 +98,9 @@ public abstract class MixinElytraFly {
     private Setting<Integer> armorSwapInterval;
 
     @Unique
+    private Setting<Integer> startFlyingWindow;
+
+    @Unique
     private Setting<Boolean> autoFirework;
 
     @Unique
@@ -276,7 +279,7 @@ public abstract class MixinElytraFly {
 
         autoSwapElytra = sgSimple.add(new BoolSetting.Builder()
             .name("自动替换鞘翅")
-            .description("空中按跳跃键自动换上鞘翅起飞落地自动换回胸甲。")
+            .description("空中按跳跃键自动换上鞘翅起飞（用背包里剩余耐久最高的那件），滑翔结束后自动换回胸甲。")
             .defaultValue(false)
             .visible(this::isLegalMode)
             .build()
@@ -540,6 +543,17 @@ public abstract class MixinElytraFly {
             .build()
         );
 
+        startFlyingWindow = sgArmor.add(new IntSetting.Builder()
+            .name("换鞘翅后维持滑翔")
+            .description("服务端命令停止滑翔后，维持多少tick的滑翔")
+            .defaultValue(1)
+            .min(0)
+            .max(20)
+            .sliderMax(10)
+            .visible(this::isArmorMode)
+            .build()
+        );
+
         // ====== 无限鞘翅（照搬 AEfish 的 InfiniteElytra） ======
 
         SettingGroup sgInfinite = self.settings.createGroup("无限鞘翅");
@@ -580,6 +594,7 @@ public abstract class MixinElytraFly {
         ElytraFlySupport.landingNoFallMode = landingNoFallMode;
         ElytraFlySupport.grimInputSequence = grimInputSequence;
         ElytraFlySupport.armorSwapInterval = armorSwapInterval;
+        ElytraFlySupport.startFlyingWindow = startFlyingWindow;
         ElytraFlySupport.autoFirework = autoFirework;
         ElytraFlySupport.legalRotationPriority = legalRotationPriority;
         ElytraFlySupport.autoSwapElytra = autoSwapElytra;
