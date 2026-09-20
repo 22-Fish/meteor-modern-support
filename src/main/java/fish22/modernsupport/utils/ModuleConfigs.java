@@ -2,6 +2,7 @@ package fish22.modernsupport.utils;
 
 import fish22.modernsupport.ModernSupport;
 import meteordevelopment.meteorclient.MeteorClient;
+import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.systems.modules.Modules;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
@@ -118,30 +119,60 @@ public class ModuleConfigs {
 
     // ====== 增删改 ======
 
-    /** 新建配置（复制当前模块设置） */
+    /** 新建配置（白板配置：所有模块关闭 + 所有设置回到 Meteor 默认值） */
     public static void create(String name) {
         if (!validName(name) || exists(name)) return;
-        writeTag(fileOf(name), Modules.get().toTag());
+        writeTag(fileOf(name), blankTag());
         ensureMetaEntry(name);
         saveMeta();
     }
 
-    /** 删除配置（至少保留一个）；删的是勾选配置时自动勾选剩余第一个 */
+    /**
+     * 生成"白板"配置：逐个模块临时重置成默认值并导出，随即用原数据还原（不改动游戏里的实际状态）。
+     * 导出的模块 active 一律改成 false，得到的就是 Meteor 默认配置（什么都没开、设置全默认）。
+     * 还原用模块自己的 fromTag：active 值没变，所以不会触发模块开关（不会刷聊天栏）。
+     */
+    private static CompoundTag blankTag() {
+        Modules modules = Modules.get();
+        ListTag modulesTag = new ListTag();
+
+        for (Module module : modules.getAll()) {
+            CompoundTag backup = module.toTag();
+            if (backup == null) continue;
+
+            module.settings.reset();
+            CompoundTag blank = module.toTag();
+            module.fromTag(backup);
+
+            blank.putBoolean("active", false);
+            modulesTag.add(blank);
+        }
+
+        CompoundTag tag = new CompoundTag();
+        tag.put("modules", modulesTag);
+        return tag;
+    }
+
+    /** 删除配置（至少保留一个）；删的是勾选配置时自动勾选剩余第一个，并把它的内容加载回来 */
     public static void delete(String name) {
         if (list().size() <= 1) return;
         File file = fileOf(name);
         if (file.exists()) file.delete();
         if (name.equals(meta.getStringOr("selected", ""))) {
             meta.putString("selected", "");
+            meta.putString("current", ""); // 旧版元数据的键也一起清掉，避免 selected() 回退到它
         }
         removeMetaEntry(name);
         saveMeta();
         // 勾选的被删了 → 自动勾选剩余第一个（保持始终有一个勾选）
+        // 必须同时把它加载回内存：内存里还留着被删配置的设置，只要之后保存一次
+        // （切配置的 saveCurrent、自动保存）就会把它写进这个配置，等于把配置覆盖掉
         if (selected() == null) {
             List<String> remaining = list();
             if (!remaining.isEmpty()) {
                 meta.putString("selected", remaining.get(0));
                 saveMeta();
+                applyFrom(remaining.get(0));
             }
         }
     }

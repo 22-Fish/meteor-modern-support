@@ -1,5 +1,6 @@
 package fish22.modernsupport.mixin;
 
+import fish22.modernsupport.modules.ElytraBounce;
 import fish22.modernsupport.utils.ElytraFlySupport;
 import net.minecraft.world.entity.Pose;
 import net.minecraft.world.entity.player.Player;
@@ -30,7 +31,7 @@ public abstract class MixinElytraPoseLock {
     @Inject(method = "getDesiredPose", at = @At("HEAD"), cancellable = true)
     private void meteor$lockViewHeight(CallbackInfoReturnable<Pose> cir) {
         Player self = (Player) (Object) this;
-        if (!ElytraFlySupport.shouldLockPose(self)) return;
+        if (!ElytraFlySupport.shouldLockPose(self) && !ElytraBounce.shouldLockPose(self)) return;
 
         boolean crouching = self.isShiftKeyDown() && !self.getAbilities().flying;
         cir.setReturnValue(crouching ? Pose.CROUCHING : Pose.STANDING);

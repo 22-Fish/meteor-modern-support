@@ -30,6 +30,7 @@ import fish22.modernsupport.utils.BackpackUse;
 import fish22.modernsupport.utils.I18n;
 import fish22.modernsupport.utils.ModuleConfigs;
 import fish22.modernsupport.utils.ModulePages;
+import fish22.modernsupport.utils.RenderSettings;
 import fish22.modernsupport.utils.LegalRotation;
 import com.mojang.logging.LogUtils;
 import meteordevelopment.meteorclient.MeteorClient;
@@ -343,6 +344,11 @@ public class ModernSupport extends MeteorAddon {
         Systems.add(pages);
         pages.load();
         pages.checkNewCategories();
+
+        // 渲染板块设置（顶部栏 Render 页）
+        RenderSettings renderSettings = new RenderSettings();
+        Systems.add(renderSettings);
+        renderSettings.load();
 
         // 全量翻译: 模块标题在构造时已自动翻译, 这里补模块设置 (构造时设置项还未创建)
         // 和 Meteor 设置主界面 (Config) 的设置

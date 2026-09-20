@@ -1,5 +1,6 @@
 package fish22.modernsupport.mixin;
 
+import fish22.modernsupport.modules.ElytraBounce;
 import fish22.modernsupport.utils.ElytraFlySupport;
 import net.minecraft.client.player.ClientInput;
 import net.minecraft.client.player.KeyboardInput;
@@ -33,13 +34,17 @@ public abstract class MixinElytraKeyboardInput extends ClientInput {
     private void onTickTail(CallbackInfo ci) {
         // 兼容 grim 输入检测：发过起飞包的那一 tick 让输入包带 jump=true
         // （按下包排在起飞包后面，正好是原版顺序）
-        boolean pressJump = ElytraFlySupport.shouldPressJumpInput();
+        // 鞘翅弹跳的「兼容 grim 输入检测」同理：起飞那一 tick 按下，其余空中 tick 松开
+        boolean pressJump = ElytraFlySupport.shouldPressJumpInput()
+            || ElytraBounce.shouldPressJumpInput();
 
         // 每 tick 都必须推进「服务端已看到松开」状态：它同时是「兼容 grim 输入检测」里
         // 下一次起飞包的放行条件（skipStartThisTick）。放行状态跟本地有没有按着空格无关，
         // 所以这里不能先判 keyPresses.jump() —— 那样不按空格时状态永远推进不了，
         // 换装窗口只在按着/狂按空格的那些 tick 才开，表现为「按一下空格正常几 tick 就停飞」。
-        boolean hideJump = pressJump || ElytraFlySupport.shouldHideJumpInput();
+        boolean hideJump = pressJump
+            || ElytraFlySupport.shouldHideJumpInput()
+            || ElytraBounce.shouldHideJumpInput();
 
         // 甲飞换装期间屏蔽移动/疾跑键：Grim MultiActionsC/D（移动中点击背包 / 关闭背包）
         // 会把换装的容器点击包直接取消，换装随之落空（「甲飞不换甲」）。
@@ -51,6 +56,9 @@ public abstract class MixinElytraKeyboardInput extends ClientInput {
         boolean right = keyPresses.right() && !hideMove;
         boolean jump = pressJump || (keyPresses.jump() && !hideJump);
         boolean sprint = keyPresses.sprint() && !hideMove;
+
+        // 鞘翅弹跳的兼容模式靠这个状态判断「服务端最后看到的跳跃键」是不是松开
+        ElytraBounce.recordJumpInput(jump);
 
         // 没有任何要改的：保持原样（避免每 tick 都重建 Input 记录）
         if (forward == keyPresses.forward() && backward == keyPresses.backward()

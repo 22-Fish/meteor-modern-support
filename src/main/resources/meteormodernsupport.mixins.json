@@ -17,6 +17,7 @@
     "MixinFreezeTravel",
     "MixinKillAura",
     "MixinKeyboardInput",
+    "MixinLoadingOverlay",
     "MixinLivingEntityMovement",
     "MixinMoveRelative",
     "LocalPlayerRotationAccessor",
@@ -31,6 +32,12 @@
     "MixinModuleListFilter",
     "MixinModulesScreen",
     "MultiPlayerGameModeDelayAccessor",
+    "MinecraftAccessor",
+    "FontManagerAccessor",
+    "FontFamilyAccessor",
+    "SystemFontFaceAccessor",
+    "MixinFonts",
+    "MixinNativeImage",
     "MixinTextRenderer",
     "MixinVanillaTextRenderer",
     "MixinVisibleRotation",
@@ -39,7 +46,12 @@
     "MixinSpeedMine",
     "MixinSpawnProofer",
     "MixinSynchedEntityData",
-    "MixinDefaultSettingsWidgetFactory"
+    "MixinDefaultSettingsWidgetFactory",
+    "MixinMeteorGuiTheme",
+    "MixinWMeteorModule",
+    "MixinWMeteorWindow",
+    "MixinWMeteorWindowHeader",
+    "GuiThemesAccessor"
   ],
   "injectors": {
     "defaultRequire": 1

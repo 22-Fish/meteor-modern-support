@@ -1,5 +1,6 @@
 package fish22.modernsupport.mixin;
 
+import fish22.modernsupport.modules.ElytraBounce;
 import fish22.modernsupport.utils.InfiniteElytraSupport;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.network.syncher.SyncedDataHolder;
@@ -35,15 +36,22 @@ public abstract class MixinSynchedEntityData {
 
     @ModifyVariable(method = "assignValues", at = @At("HEAD"), argsOnly = true)
     private List<SynchedEntityData.DataValue<?>> modernsupport$rewriteStopGliding(List<SynchedEntityData.DataValue<?>> items) {
-        if (!InfiniteElytraSupport.isActive()) return items;
+        boolean infiniteElytra = InfiniteElytraSupport.isActive();
+        boolean keepGlide = ElytraBounce.isKeepingGlide();
 
-        // 只处理本地玩家，且客户端本地仍在滑翔
+        // 只处理本地玩家
         if (!(this.entity instanceof LocalPlayer player) || player != mc.player) return items;
+
+        if (!infiniteElytra && !keepGlide) return items;
+        // 下面两个改写只针对「客户端本地仍在滑翔」的停滑广播
         if (!player.isFallFlying()) return items;
 
         List<SynchedEntityData.DataValue<?>> result = new ArrayList<>(items.size());
         for (SynchedEntityData.DataValue<?> item : items) {
-            result.add(InfiniteElytraSupport.processDataValue(item));
+            // 鞘翅弹跳的「落地维持滑翔」：落地那几 tick 把停滑广播改回滑翔，本地不闪断
+            result.add(keepGlide && !infiniteElytra
+                ? ElytraBounce.keepGlideDataValue(item)
+                : InfiniteElytraSupport.processDataValue(item));
         }
         return result;
     }

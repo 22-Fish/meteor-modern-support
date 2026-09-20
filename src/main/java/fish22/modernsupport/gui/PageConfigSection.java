@@ -20,6 +20,7 @@
 package fish22.modernsupport.gui;
 
 import fish22.modernsupport.utils.ModulePages;
+import fish22.modernsupport.utils.I18n;
 import meteordevelopment.meteorclient.gui.GuiTheme;
 import meteordevelopment.meteorclient.gui.GuiThemes;
 import meteordevelopment.meteorclient.gui.WidgetScreen;
@@ -55,7 +56,7 @@ public class PageConfigSection extends WVerticalList {
      * 由 MixinConfigScreen / MixinSettings 在创建设置列表时调用。
      */
     public static void addToSettings(WContainer settingsContainer, GuiTheme theme) {
-        WSection section = settingsContainer.add(theme.section("页面配置", true)).expandX().widget();
+        WSection section = settingsContainer.add(theme.section(I18n.t("Text.page-section", "页面配置"), true)).expandX().widget();
         section.add(new PageConfigSection()).expandX();
     }
 
@@ -70,10 +71,10 @@ public class PageConfigSection extends WVerticalList {
         // 新增页面按钮（满上限时提示）
         WHorizontalList top = add(theme.horizontalList()).expandX().widget();
         if (ModulePages.get().pageCount() < ModulePages.MAX_PAGES) {
-            WButton addBtn = top.add(theme.button("新增页面")).widget();
+            WButton addBtn = top.add(theme.button(I18n.t("Text.new-page", "新增页面"))).widget();
             addBtn.action = this::addPage;
         } else {
-            top.add(theme.label("已达页面上限 (" + ModulePages.MAX_PAGES + " 个)"));
+            top.add(theme.label(I18n.t("Text.page-limit", "已达页面上限 (%s 个)").formatted(ModulePages.MAX_PAGES)));
         }
 
         // 页面行：页名按钮(撑满) + 重命名 + 删除(右对齐)
@@ -85,11 +86,11 @@ public class PageConfigSection extends WVerticalList {
             WButton listBtn = table.add(theme.button(pages.get(i).name)).expandCellX().widget();
             listBtn.action = () -> mc.setScreen(new ModuleSelectScreen(theme, idx));
 
-            WButton renameBtn = table.add(theme.button("重命名")).widget();
+            WButton renameBtn = table.add(theme.button(I18n.t("Text.rename", "重命名"))).widget();
             renameBtn.action = () -> mc.setScreen(new RenamePageScreen(theme, idx));
 
             if (idx > 0) {
-                WButton delBtn = table.add(theme.button("删除")).widget();
+                WButton delBtn = table.add(theme.button(I18n.t("Text.delete", "删除"))).widget();
                 delBtn.action = () -> confirmDelete(idx);
             }
 
@@ -104,9 +105,9 @@ public class PageConfigSection extends WVerticalList {
 
     private void confirmDelete(int idx) {
         YesNoPrompt.create(theme, mc.screen)
-            .title("删除页面")
-            .message("确定删除页面 \"" + ModulePages.get().getPage(idx).name + "\" 吗？")
-            .message("该页面勾选的分类将从本页面移除，其他页面不受影响。")
+            .title(I18n.t("Text.delete-page", "删除页面"))
+            .message(I18n.t("Text.delete-page-confirm", "确定删除页面 \"%s\" 吗？").formatted(ModulePages.get().getPage(idx).name))
+            .message(I18n.t("Text.delete-page-note", "该页面勾选的分类将从本页面移除，其他页面不受影响。"))
             .dontShowAgainCheckboxVisible(false)
             .onYes(() -> {
                 ModulePages.get().deletePage(idx);

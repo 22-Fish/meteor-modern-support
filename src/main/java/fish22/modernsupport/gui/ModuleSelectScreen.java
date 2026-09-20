@@ -20,6 +20,7 @@
 package fish22.modernsupport.gui;
 
 import fish22.modernsupport.utils.ModulePages;
+import fish22.modernsupport.utils.I18n;
 import meteordevelopment.meteorclient.gui.GuiTheme;
 import meteordevelopment.meteorclient.gui.WindowScreen;
 import meteordevelopment.meteorclient.gui.widgets.containers.WTable;
@@ -42,7 +43,7 @@ public class ModuleSelectScreen extends WindowScreen {
     private String filterText = "";
 
     public ModuleSelectScreen(GuiTheme theme, int pageIdx) {
-        super(theme, "分类列表 - " + ModulePages.get().getPage(pageIdx).name);
+        super(theme, I18n.t("Text.category-list-format", "分类列表 - %s").formatted(ModulePages.get().getPage(pageIdx).name));
         this.pageIdx = pageIdx;
     }
 

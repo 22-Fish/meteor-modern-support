@@ -20,6 +20,7 @@
 package fish22.modernsupport.gui;
 
 import fish22.modernsupport.utils.ModulePages;
+import fish22.modernsupport.utils.I18n;
 import meteordevelopment.meteorclient.gui.GuiTheme;
 import meteordevelopment.meteorclient.gui.WindowScreen;
 import meteordevelopment.meteorclient.gui.widgets.WLabel;
@@ -37,7 +38,7 @@ public class RenamePageScreen extends WindowScreen {
     private WLabel errorLabel;
 
     public RenamePageScreen(GuiTheme theme, int pageIdx) {
-        super(theme, "重命名页面");
+        super(theme, I18n.t("Text.rename-page", "重命名页面"));
         this.pageIdx = pageIdx;
     }
 
@@ -48,17 +49,17 @@ public class RenamePageScreen extends WindowScreen {
 
         WHorizontalList buttons = add(theme.horizontalList()).expandX().widget();
 
-        WButton save = buttons.add(theme.button("保存")).widget();
+        WButton save = buttons.add(theme.button(I18n.t("Text.save", "保存"))).widget();
         save.action = () -> {
             if (ModulePages.get().renamePage(pageIdx, textBox.get().trim())) {
                 // 重命名后重建当前 Tab 界面（顶部栏按钮文字与页面配置列表同步更新）
                 PageConfigSection.refreshTabScreen();
             } else {
-                errorLabel.set("名称无效：不能为空或与其他页面重名");
+                errorLabel.set(I18n.t("Text.invalid-page-name", "名称无效：不能为空或与其他页面重名"));
             }
         };
 
-        WButton cancel = buttons.add(theme.button("取消")).widget();
+        WButton cancel = buttons.add(theme.button(I18n.t("Text.cancel", "取消"))).widget();
         cancel.action = () -> mc.setScreen(parent);
 
         errorLabel = add(theme.label("")).widget();

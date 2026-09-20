@@ -1,5 +1,6 @@
 package fish22.modernsupport.gui;
 
+import fish22.modernsupport.utils.I18n;
 import meteordevelopment.meteorclient.gui.GuiTheme;
 import meteordevelopment.meteorclient.gui.WidgetScreen;
 import meteordevelopment.meteorclient.gui.WindowScreen;
@@ -42,7 +43,7 @@ public class ConfigNameInputScreen extends WindowScreen {
 
         WHorizontalList buttons = add(theme.horizontalList()).expandX().widget();
 
-        WButton save = buttons.add(theme.button("保存")).widget();
+        WButton save = buttons.add(theme.button(I18n.t("Text.save", "保存"))).widget();
         save.action = () -> {
             String error = onConfirm.apply(textBox.get().trim());
             if (error != null) {
@@ -54,7 +55,7 @@ public class ConfigNameInputScreen extends WindowScreen {
             if (parent instanceof WidgetScreen widgetScreen) widgetScreen.reload();
         };
 
-        WButton cancel = buttons.add(theme.button("取消")).widget();
+        WButton cancel = buttons.add(theme.button(I18n.t("Text.cancel", "取消"))).widget();
         cancel.action = () -> mc.setScreen(parent);
 
         errorLabel = add(theme.label("")).widget();

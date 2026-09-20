@@ -20,9 +20,11 @@
 package fish22.modernsupport.mixin;
 
 import fish22.modernsupport.gui.WModulePageButton;
+import fish22.modernsupport.gui.RenderTab;
 import fish22.modernsupport.utils.ModulePages;
 import meteordevelopment.meteorclient.gui.tabs.Tab;
 import meteordevelopment.meteorclient.gui.tabs.Tabs;
+import meteordevelopment.meteorclient.gui.tabs.builtin.GuiTab;
 import meteordevelopment.meteorclient.gui.tabs.builtin.ModulesTab;
 import meteordevelopment.meteorclient.gui.widgets.WTopBar;
 import org.spongepowered.asm.mixin.Mixin;
@@ -58,12 +60,19 @@ public abstract class MixinWTopBar {
     @Redirect(method = "init", at = @At(value = "INVOKE", target = "Lmeteordevelopment/meteorclient/gui/tabs/Tabs;get()Ljava/util/List;"))
     private List<Tab> redirectTabsGet() {
         // 原 Modules 标签由"主界面"按钮替代，不再单独渲染
+        // Render 板块插在 GUI 和 HUD 中间
         List<Tab> filtered = new ArrayList<>();
+        boolean inserted = false;
         for (Tab tab : Tabs.get()) {
             if (!(tab instanceof ModulesTab)) {
                 filtered.add(tab);
             }
+            if (!inserted && tab instanceof GuiTab) {
+                filtered.add(RenderTab.INSTANCE);
+                inserted = true;
+            }
         }
+        if (!inserted) filtered.add(RenderTab.INSTANCE);
         return filtered;
     }
 }

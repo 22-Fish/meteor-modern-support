@@ -4,10 +4,7 @@
 
 * **⚠本项目代码由AI生成**
 * 在使用meteor client模组的过程中，经常遇到一些问题。比如现代反作弊对meteor的旋转几乎是百分百拦截。meteor本身也缺少非常多的实用功能。此项目致力于为meteor添加现代化的功能，如加入了合法转头的杀戮光环，绝不回弹卡脚。
-* meteor经常因为非正常关闭丢失配置，我们修改了保存机制，让meteor每次状态变化都进行保存。
-
-
-
+* meteor经常因为非正常关闭丢失配置，我们修改了保存机制，让meteor每次状态变化都进行保存
 
 
 ## 分页功能
@@ -16,12 +13,11 @@
 * 我们会在启动时检查所有模块应用的页面。如果一个模块没有被记录过，那么推断他是新加的插件，自动在主界面开启显示。
 
 
-
 ## 配置更改
-
 原本的meteor中的模块配置(模块参数设置，开关状态)放在./meteor-client/modules.nbt这跟个文件中，但是他是单个文件，无法做到动态切换。我们将配置文件存放路径改为./meteor-client/config/这个文件夹。内部可以存放多个配置文件。应用的配置可以在顶部栏的config页中替换，还支持在加入某些服务器时自动替换为对应配置，大大提升了meteor的灵活度
 
-
+## 字体
+- 现在meteor可以加载系统字体。此功能为实验性，可能存在部分问题。
 
 
 
@@ -111,12 +107,6 @@ Setting.Meteor.<设置内部名>.Description   → 设置描述
 > 注：为正常显示中文等非 ASCII 字符，本 mod 强制 Meteor 使用原版文字渲染器，Meteor 的「自定义字体」设置（custom-font / font）将不再生效。
 ### 来源
 翻译文件与实现思路基于 [Meteor-I18n-Support-plugin](https://github.com/dingzhen-vape/Meteor-I18n-Support-plugin)（作者 kono\_yalu）
-
-
-
-
-
-
 
 
 

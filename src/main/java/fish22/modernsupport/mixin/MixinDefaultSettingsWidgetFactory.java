@@ -1,9 +1,11 @@
 package fish22.modernsupport.mixin;
 
 import fish22.modernsupport.utils.ElytraFlySupport;
+import fish22.modernsupport.utils.I18n;
 import meteordevelopment.meteorclient.gui.DefaultSettingsWidgetFactory;
 import meteordevelopment.meteorclient.gui.GuiTheme;
 import meteordevelopment.meteorclient.gui.widgets.input.WDropdown;
+import meteordevelopment.meteorclient.gui.widgets.containers.WSection;
 import meteordevelopment.meteorclient.systems.modules.movement.elytrafly.ElytraFlightModes;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
@@ -23,6 +25,19 @@ import org.spongepowered.asm.mixin.injection.Redirect;
  */
 @Mixin(value = DefaultSettingsWidgetFactory.class, remap = false)
 public abstract class MixinDefaultSettingsWidgetFactory {
+
+    /** 分组标题（General / Colors / ...）走翻译表 Group.Meteor.<名字> */
+    @Redirect(
+        method = "group",
+        at = @At(
+            value = "INVOKE",
+            target = "Lmeteordevelopment/meteorclient/gui/GuiTheme;section(Ljava/lang/String;Z)Lmeteordevelopment/meteorclient/gui/widgets/containers/WSection;"
+        ),
+        require = 0
+    )
+    private WSection modernsupport$translateGroupTitle(GuiTheme theme, String name, boolean expanded) {
+        return theme.section(I18n.groupName(name), expanded);
+    }
 
     @Redirect(
         method = "enumW",

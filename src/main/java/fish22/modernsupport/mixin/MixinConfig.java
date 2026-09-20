@@ -1,14 +1,22 @@
 package fish22.modernsupport.mixin;
 
 import fish22.modernsupport.settings.ActionSetting;
+import fish22.modernsupport.font.FontSharpness;
+import fish22.modernsupport.font.StandardFont;
 import fish22.modernsupport.utils.I18n;
+import meteordevelopment.meteorclient.settings.BoolSetting;
+import meteordevelopment.meteorclient.settings.DoubleSetting;
+import meteordevelopment.meteorclient.settings.EnumSetting;
 import meteordevelopment.meteorclient.settings.ProvidedStringSetting;
+import meteordevelopment.meteorclient.settings.Setting;
 import meteordevelopment.meteorclient.settings.SettingGroup;
 import meteordevelopment.meteorclient.systems.config.Config;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+
+import java.util.List;
 
 import static meteordevelopment.meteorclient.MeteorClient.mc;
 
@@ -46,5 +54,52 @@ public abstract class MixinConfig {
             },
             null
         ));
+
+        // 字体组: 放在设置页最上面, 并把 Meteor 自带的「自定义字体 / 字体选择」一起并进来
+        SettingGroup sgFont = config.settings.createGroup("Font");
+
+        SettingGroup sgVisual = config.settings.getGroup("Visual");
+        if (sgVisual != null) {
+            List<Setting<?>> visualSettings = ((SettingGroupAccessor) sgVisual).getSettings();
+            visualSettings.remove(config.customFont);
+            visualSettings.remove(config.font);
+        }
+
+        sgFont.add(config.customFont);
+        sgFont.add(config.font);
+
+        StandardFont.enabled = sgFont.add(new BoolSetting.Builder()
+            .name("standard-font")
+            .description("Render the font selected in Meteor's font setting through the vanilla FreeType pipeline: font size is the em size, glyphs are rasterized on demand, missing characters fall back to the vanilla font.")
+            .defaultValue(false)
+            .visible(() -> config.customFont.get())
+            .onChanged(v -> StandardFont.markDirty())
+            .build()
+        );
+
+        StandardFont.size = sgFont.add(new DoubleSetting.Builder()
+            .name("standard-font-size")
+            .description("Font size in em pixels. The same size looks the same in every font.")
+            .defaultValue(9)
+            .range(4, 32)
+            .sliderMax(16)
+            .visible(() -> config.customFont.get() && StandardFont.isEnabled())
+            .onChanged(v -> StandardFont.markDirty())
+            .build()
+        );
+
+        StandardFont.sharpness = sgFont.add(new EnumSetting.Builder<FontSharpness>()
+            .name("standard-font-sharpness")
+            .description("Compress the antialiasing grey edges so small text reads as solid rather than washed out. Off keeps the raw rendering; the further right, the more solid the strokes.")
+            .defaultValue(FontSharpness.Light)
+            .visible(() -> config.customFont.get() && StandardFont.isEnabled())
+            .onChanged(v -> StandardFont.markDirty())
+            .build()
+        );
+
+        // 挪到第一个: 设置页最顶上就是「字体」
+        List<SettingGroup> groups = config.settings.groups;
+        groups.remove(sgFont);
+        groups.add(0, sgFont);
     }
 }

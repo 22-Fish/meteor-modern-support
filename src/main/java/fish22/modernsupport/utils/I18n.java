@@ -16,6 +16,8 @@ import meteordevelopment.meteorclient.settings.Setting;
 import meteordevelopment.meteorclient.settings.SettingGroup;
 import net.fabricmc.loader.api.FabricLoader;
 import net.fabricmc.loader.api.ModContainer;
+import fish22.modernsupport.mixin.GuiThemesAccessor;
+import meteordevelopment.meteorclient.gui.GuiTheme;
 import net.minecraft.client.Minecraft;
 import net.minecraft.locale.Language;
 
@@ -50,6 +52,8 @@ import java.util.Set;
 public class I18n {
     /** 游戏目录下的语言文件夹名 */
     public static final String LANG_FOLDER = "meteor-lang";
+    /** 本插件显示名 (翻译键里的 <插件名>) */
+    public static final String ADDON_NAME = "meteor现代化支持";
     /** 内置翻译资源所在命名空间 */
     public static final String NAMESPACE = "meteor-modern-support";
     /** 语言代码 -> 翻译键值表 (已合并内置 + 外部) */
@@ -172,6 +176,18 @@ public class I18n {
         return fallback;
     }
 
+    /** 界面文本翻译 (本模组自己界面上的文字), 键形如 Text.xxx */
+    public static String t(String key, String fallback) {
+        if (!initialized) init();
+        return get(key, fallback);
+    }
+
+    /** 设置分组标题翻译 (General / Colors / ...), 键形如 Group.Meteor.<分组名> */
+    public static String groupName(String name) {
+        if (!initialized) init();
+        return get("Group.Meteor." + name, name);
+    }
+
     /** 按模块归属计算翻译前缀: meteor 本体 addon 名 = "Meteor Client", 其他 addon 用各自显示名 */
     public static String modulePrefix(Module module) {
         if (module.addon == null) return "Meteor";
@@ -213,6 +229,43 @@ public class I18n {
             applyModule(module);
         }
         applyConfigSettings();
+        applyThemeSettings();
+        applyRenderSettings();
+    }
+
+    /** 翻译不属于模块的设置 (比如 Render 板块的设置), 前缀用本插件显示名 */
+    public static void applyAddonSetting(Setting<?> setting) {
+        if (!initialized) init();
+
+        String key = "Setting." + ADDON_NAME + "." + setting.name;
+        SettingAccessor accessor = (SettingAccessor) (Object) setting;
+        accessor.setTitle(get(key, accessor.getOriginalTitle()));
+        accessor.setDescription(get(key + ".Description", accessor.getOriginalDescription()));
+    }
+
+    /** 翻译 Render 板块的设置 */
+    private static void applyRenderSettings() {
+        RenderSettings renderSettings = RenderSettings.get();
+        if (renderSettings == null) return;
+
+        for (SettingGroup group : renderSettings.settings) {
+            for (Setting<?> setting : group) applyAddonSetting(setting);
+        }
+    }
+
+    /** 翻译各个 GUI 主题的设置 (主题设置属于主题自身, 不属于模块/Config, 前缀固定为 Meteor) */
+    public static void applyThemeSettings() {
+        try {
+            for (GuiTheme theme : GuiThemesAccessor.modernsupport$getThemes()) {
+                for (SettingGroup group : theme.settings) {
+                    for (Setting<?> setting : group) {
+                        applySetting(null, setting);
+                    }
+                }
+            }
+        } catch (Exception e) {
+            MeteorClient.LOG.error("Failed to apply translations to GUI theme settings", e);
+        }
     }
 
     /** 翻译 Meteor 设置主界面 (Config) 的非模块设置, 前缀固定为 Meteor */

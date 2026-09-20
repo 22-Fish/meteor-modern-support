@@ -1,6 +1,7 @@
 package fish22.modernsupport.gui;
 
 import fish22.modernsupport.utils.ModuleConfigs;
+import fish22.modernsupport.utils.I18n;
 import meteordevelopment.meteorclient.gui.GuiTheme;
 import meteordevelopment.meteorclient.gui.WindowScreen;
 import meteordevelopment.meteorclient.gui.widgets.containers.WHorizontalList;
@@ -27,7 +28,7 @@ public class ConfigDetailScreen extends WindowScreen {
     private final List<String> servers = new ArrayList<>();
 
     public ConfigDetailScreen(GuiTheme theme, String configName) {
-        super(theme, "配置设置 - " + configName);
+        super(theme, I18n.t("Text.config-detail-format", "配置设置 - %s").formatted(configName));
         this.configName = configName;
         servers.addAll(ModuleConfigs.servers(configName));
     }
@@ -36,23 +37,23 @@ public class ConfigDetailScreen extends WindowScreen {
     public void initWidgets() {
         // 自动应用配置勾选
         WHorizontalList autoRow = add(theme.horizontalList()).expandX().widget();
-        autoRow.add(theme.label("自动应用配置"));
+        autoRow.add(theme.label(I18n.t("Text.auto-apply", "自动应用配置")));
         WCheckbox autoCb = autoRow.add(theme.checkbox(ModuleConfigs.autoApplyEnabled(configName))).widget();
         autoCb.action = () -> {
             ModuleConfigs.setAutoApply(configName, autoCb.checked);
             rebuild();
         };
-        add(theme.label("连接匹配的服务器时，自动将配置切换到此配置").color(theme.textSecondaryColor())).expandX();
+        add(theme.label(I18n.t("Text.auto-apply-desc", "连接匹配的服务器时，自动将配置切换到此配置")).color(theme.textSecondaryColor())).expandX();
 
         // 服务器列表（仅勾选自动应用配置时显示和生效）
         if (ModuleConfigs.autoApplyEnabled(configName)) {
             add(theme.horizontalSeparator()).expandX();
 
             WHorizontalList addRow = add(theme.horizontalList()).expandX().widget();
-            addRow.add(theme.label("服务器"));
-            WButton addServer = addRow.add(theme.button("新增服务器")).expandCellX().right().widget();
-            addServer.action = () -> mc.setScreen(new ConfigNameInputScreen(theme, "新增服务器", "", url -> {
-                if (url.isEmpty()) return "服务器地址不能为空";
+            addRow.add(theme.label(I18n.t("Text.server", "服务器")));
+            WButton addServer = addRow.add(theme.button(I18n.t("Text.new-server", "新增服务器"))).expandCellX().right().widget();
+            addServer.action = () -> mc.setScreen(new ConfigNameInputScreen(theme, I18n.t("Text.new-server", "新增服务器"), "", url -> {
+                if (url.isEmpty()) return I18n.t("Text.server-empty", "服务器地址不能为空");
                 servers.add(url);
                 // 新增是低频操作，直接写盘（保证重进界面不丢）
                 ModuleConfigs.setServers(configName, servers);
@@ -68,7 +69,7 @@ public class ConfigDetailScreen extends WindowScreen {
                     servers.set(idx, box.get());
                 };
 
-                WButton del = table.add(theme.button("删除")).widget();
+                WButton del = table.add(theme.button(I18n.t("Text.delete", "删除"))).widget();
                 del.action = () -> {
                     servers.remove(idx);
                     rebuild();

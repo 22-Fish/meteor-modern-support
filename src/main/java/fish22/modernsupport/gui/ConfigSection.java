@@ -1,6 +1,7 @@
 package fish22.modernsupport.gui;
 
 import fish22.modernsupport.utils.ModuleConfigs;
+import fish22.modernsupport.utils.I18n;
 import meteordevelopment.meteorclient.gui.GuiTheme;
 import meteordevelopment.meteorclient.gui.widgets.containers.WContainer;
 import meteordevelopment.meteorclient.gui.widgets.containers.WHorizontalList;
@@ -23,7 +24,7 @@ public class ConfigSection extends WVerticalList {
 
     /** 在设置列表（WSettings）末尾追加"配置设置"分组 */
     public static void addToSettings(WContainer settingsContainer, GuiTheme theme) {
-        WSection section = settingsContainer.add(theme.section("配置设置", true)).expandX().widget();
+        WSection section = settingsContainer.add(theme.section(I18n.t("Text.config-section", "配置设置"), true)).expandX().widget();
         section.add(new ConfigSection()).expandX();
     }
 
@@ -37,11 +38,12 @@ public class ConfigSection extends WVerticalList {
 
         // 顶部：当前勾选配置 + 新增配置按钮
         WHorizontalList top = add(theme.horizontalList()).expandX().widget();
-        top.add(theme.label("当前配置: " + (ModuleConfigs.selected() != null ? ModuleConfigs.selected() : "未勾选")));
-        WButton addBtn = top.add(theme.button("新增配置")).expandCellX().right().widget();
-        addBtn.action = () -> mc.setScreen(new ConfigNameInputScreen(theme, "新增配置", "", name -> {
-            if (name.isEmpty()) return "配置名不能为空";
-            if (ModuleConfigs.list().contains(name)) return "已存在同名配置";
+        String current = ModuleConfigs.selected() != null ? ModuleConfigs.selected() : I18n.t("Text.none-selected", "未勾选");
+        top.add(theme.label(I18n.t("Text.current-config", "当前配置: ") + current));
+        WButton addBtn = top.add(theme.button(I18n.t("Text.new-config", "新增配置"))).expandCellX().right().widget();
+        addBtn.action = () -> mc.setScreen(new ConfigNameInputScreen(theme, I18n.t("Text.new-config", "新增配置"), "", name -> {
+            if (name.isEmpty()) return I18n.t("Text.config-name-empty", "配置名不能为空");
+            if (ModuleConfigs.list().contains(name)) return I18n.t("Text.config-name-exists", "已存在同名配置");
             ModuleConfigs.create(name);
             return null;
         }));
@@ -69,18 +71,18 @@ public class ConfigSection extends WVerticalList {
 
             table.add(theme.label(name)).expandCellX();
 
-            WButton settingsBtn = table.add(theme.button("设置")).widget();
+            WButton settingsBtn = table.add(theme.button(I18n.t("Text.settings", "设置"))).widget();
             settingsBtn.action = () -> mc.setScreen(new ConfigDetailScreen(theme, name));
 
-            WButton renameBtn = table.add(theme.button("重命名")).widget();
-            renameBtn.action = () -> mc.setScreen(new ConfigNameInputScreen(theme, "重命名配置", name, newName -> {
-                if (newName.isEmpty()) return "配置名不能为空";
-                if (!newName.equals(name) && ModuleConfigs.list().contains(newName)) return "已存在同名配置";
+            WButton renameBtn = table.add(theme.button(I18n.t("Text.rename", "重命名"))).widget();
+            renameBtn.action = () -> mc.setScreen(new ConfigNameInputScreen(theme, I18n.t("Text.rename-config", "重命名配置"), name, newName -> {
+                if (newName.isEmpty()) return I18n.t("Text.config-name-empty", "配置名不能为空");
+                if (!newName.equals(name) && ModuleConfigs.list().contains(newName)) return I18n.t("Text.config-name-exists", "已存在同名配置");
                 ModuleConfigs.rename(name, newName);
                 return null;
             }));
 
-            WButton delBtn = table.add(theme.button("删除")).widget();
+            WButton delBtn = table.add(theme.button(I18n.t("Text.delete", "删除"))).widget();
             delBtn.action = () -> {
                 // 仅有一个配置时无法删除
                 if (ModuleConfigs.list().size() > 1) {
