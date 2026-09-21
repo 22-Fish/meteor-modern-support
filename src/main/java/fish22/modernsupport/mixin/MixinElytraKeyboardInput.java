@@ -2,6 +2,7 @@ package fish22.modernsupport.mixin;
 
 import fish22.modernsupport.modules.ElytraBounce;
 import fish22.modernsupport.utils.ElytraFlySupport;
+import fish22.modernsupport.utils.GrimNoFallSupport;
 import net.minecraft.client.player.ClientInput;
 import net.minecraft.client.player.KeyboardInput;
 import net.minecraft.world.entity.player.Input;
@@ -36,7 +37,9 @@ public abstract class MixinElytraKeyboardInput extends ClientInput {
         // （按下包排在起飞包后面，正好是原版顺序）
         // 鞘翅弹跳的「兼容 grim 输入检测」同理：起飞那一 tick 按下，其余空中 tick 松开
         boolean pressJump = ElytraFlySupport.shouldPressJumpInput()
-            || ElytraBounce.shouldPressJumpInput();
+            || ElytraBounce.shouldPressJumpInput()
+            // 无摔伤 Grim 模式：落地救完补的那一跳也走输入包（服务端要看到跳跃键按下才算合法起跳）
+            || GrimNoFallSupport.shouldPressJumpInput();
 
         // 每 tick 都必须推进「服务端已看到松开」状态：它同时是「兼容 grim 输入检测」里
         // 下一次起飞包的放行条件（skipStartThisTick）。放行状态跟本地有没有按着空格无关，

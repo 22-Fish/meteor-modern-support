@@ -42,6 +42,14 @@ import static meteordevelopment.meteorclient.MeteorClient.mc;
  * <p>例：服务器朝向正右（90°）、客户端视觉朝正前（0°）时，
  * W 键映射为 A 键的效果，人物仍朝视觉正前方移动；
  * 斜向时按角度映射出 W+D 这类组合键效果。
+ *
+ * <p><b>本地正在滑翔时不映射</b>（见 {@code onTickTail} 里的判断）：
+ * 原版滑翔运算（{@code travelFallFlying} → {@code updateFallFlyingMovement}）
+ * 完全不读 WASD，方向只由朝向（合法转头的真实角度）决定，
+ * 映射改不了这种 tick 的移动方向，只会把输入包里的按键改成和玩家实际按的不一样的键
+ * （按 A 报成按 W）。无限鞘翅会把服务器的停滑广播改回滑翔，本地几乎全程都在滑翔，
+ * 于是这份「对不上的输入」被服务器/反作弊拿去预测时方向就和实际移动分叉（回弹）。
+ * 甲飞本地大多不是滑翔状态（滑翔窗口外走原版空中运算，那条路才吃 WASD），映射照旧生效。
  */
 @Mixin(KeyboardInput.class)
 public abstract class MixinKeyboardInput extends ClientInput {
@@ -50,6 +58,12 @@ public abstract class MixinKeyboardInput extends ClientInput {
     private void onTickTail(CallbackInfo ci) {
         // 仅静默模式生效
         if (!LegalRotation.isRotating() || LegalRotation.getMode() != LegalRotation.Mode.QUIET) {
+            return;
+        }
+
+        // 本地正在滑翔（真鞘翅 / 无限鞘翅 / 甲飞强制滑翔）：滑翔运算不看 WASD，
+        // 方向由真实角度决定，这里映射只会让输入包报出与真实按键不同的键
+        if (mc.player == null || mc.player.isFallFlying()) {
             return;
         }
 

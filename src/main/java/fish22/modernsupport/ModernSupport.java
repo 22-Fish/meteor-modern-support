@@ -3,6 +3,7 @@ package fish22.modernsupport;
 import fish22.modernsupport.gui.ItemPickerScreen;
 import fish22.modernsupport.aibot.AI;
 import fish22.modernsupport.commands.PearlCommand;
+import fish22.modernsupport.modules.AutoRepeat;
 import fish22.modernsupport.modules.AutoSugarcane;
 import fish22.modernsupport.modules.ElytraBounce;
 import fish22.modernsupport.modules.ElytraAutoReplace;
@@ -312,6 +313,8 @@ public class ModernSupport extends MeteorAddon {
         Modules.get().add(new OpenAI());
         // 珍珠点大管家（从 meteor-miku 移植）：私聊关键字 → 自动走过去点开珍珠点
         Modules.get().add(new PearlBot());
+        // 自动复读：白名单玩家在公屏发什么，就照着复读一条
+        Modules.get().add(new AutoRepeat());
 
         // 命令 .pearl <玩家名>：和私聊触发同样的效果，方便手动敲 / 别的程序调用
         Commands.add(new PearlCommand());

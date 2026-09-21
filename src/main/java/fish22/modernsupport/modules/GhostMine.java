@@ -19,6 +19,9 @@
 
 package fish22.modernsupport.modules;
 
+import fish22.modernsupport.mixin.MultiPlayerGameModeDelayAccessor;
+import fish22.modernsupport.mixin.MultiPlayerGameModeMiningAccessor;
+import fish22.modernsupport.utils.BreakData;
 import meteordevelopment.meteorclient.MeteorClient;
 import meteordevelopment.meteorclient.events.entity.player.DoAttackEvent;
 import meteordevelopment.meteorclient.events.entity.player.StartBreakingBlockEvent;
@@ -39,7 +42,6 @@ import meteordevelopment.meteorclient.utils.Utils;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
 import meteordevelopment.meteorclient.utils.player.PlayerUtils;
 import meteordevelopment.meteorclient.utils.render.color.SettingColor;
-import meteordevelopment.meteorclient.utils.world.BlockUtils;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
@@ -110,6 +112,22 @@ public class GhostMine extends Module {
                 .sliderRange(0, 20)
                 .build()
         );
+    public Setting<Boolean> syncVanillaCooldown = sgGeneral
+        .add(
+            new BoolSetting.Builder()
+                .name("跟原版冷却")
+                .description("原版那边还有破坏延迟时不开始新的挖掘（和「秒破」这类走原版路径的模块同开时用）")
+                .defaultValue(false)
+                .build()
+        );
+    public Setting<Boolean> swingPacket = sgGeneral
+        .add(
+            new BoolSetting.Builder()
+                .name("挥手")
+                .description("挖掘开始/收尾时把挥手包真发给服务端（反作弊就指望每次挖掘都有挥手）；关掉只有本地动画，包拦住不发")
+                .defaultValue(false)
+                .build()
+        );
 
     // ==================== 绕过 ====================
 
@@ -137,6 +155,25 @@ public class GhostMine extends Module {
                 .defaultValue(true)
                 .build()
         );
+    public Setting<Boolean> acFeedback = sgBypass
+        .add(
+            new BoolSetting.Builder()
+                .name("反馈闭环")
+                .description("像反作弊那样给自己记分：抢跑就加分、按原版节奏挖就衰减，分高了自动退回原版节奏，高空包也只在抢跑时发")
+                .defaultValue(true)
+                .build()
+        );
+    public Setting<Integer> acThreshold = sgBypass
+        .add(
+            new IntSetting.Builder()
+                .name("反馈阈值")
+                .description("分数超过这个数就退回原版节奏（6 tick 内不再开始新的挖掘）")
+                .defaultValue(300)
+                .min(50)
+                .sliderRange(50, 1000)
+                .visible(acFeedback::get)
+                .build()
+        );
 
     // ==================== 切换 ====================
 
@@ -144,7 +181,7 @@ public class GhostMine extends Module {
         .add(
             new IntSetting.Builder()
                 .name("挖掘方块阈值")
-                .description("达到此百分百挖掘方块")
+                .description("进度到这个百分比就发结束包收尾。进度就是服务端那套公式（收尾时会拿到手上的那把工具 × 开始包之后过了多少 tick + 1），服务端 70% 才会当场破坏，所以调 70 最快")
                 .defaultValue(95)
                 .min(1)
                 .sliderMax(100)
@@ -349,12 +386,24 @@ public class GhostMine extends Module {
     private Direction pendingStopFace = null;
     /** 本 tick 已经为哪个位置发过结束包（同一个 tick 里不重复发，免得被当成「一瞬间挖了两下」） */
     private BlockPos stopSentThisTick = null;
+    /** 本 tick 是不是已经挥过手了（同一个 tick 里只挥一次，免得连发两个挥手包） */
+    private boolean swingSentThisTick = false;
     // 挖掘挥手包控制：拦截下一个 swing 包 —— 挖掘开始/结束的挥手只有本地动画，不发包
     // （不依赖瞄准状态，避免挖掘开始/结束瞬间没瞄准方块时包漏拦）
     private boolean blockSwingPacket = false;
+    /** 已经过了多少 tick（自己数：收尾时机和抢跑计分都按它算） */
+    private int mineTicks = 0;
+    /** 上一次收尾（发结束包）是在第几 tick */
+    private int lastFinishTick = 0;
+    /** 抢跑计分：越大说明我们越「抢」，反馈闭环拿它决定要不要退回原版节奏 */
+    private double gainedAdvantage = 0.0;
 
     /** 服务端 STOP 立即破坏的进度线：ServerPlayerGameMode 里进度 ≥ 0.7 才会立即破坏，否则退回延迟破坏 */
     private static final int INSTANT_BREAK_PERCENT = 70;
+    /** 原版破坏延迟（tick）：反作弊眼里「上一块挖完到下一块开始」的合法间隔 */
+    private static final int VANILLA_BREAK_DELAY = 5;
+    /** 原版节奏的挖掘间隔（tick）：反馈超标后退回这个节奏 */
+    private static final int VANILLA_MINE_GAP = 6;
     /** 秒切模式（立即切回）的自动重试次数上限 */
     private static final int MAX_AUTO_RETRY = 5;
     /** 挖掘延迟只剩这么多 tick 时，点到的方块才排队等延迟结束（更早点的直接忽略） */
@@ -401,7 +450,11 @@ public class GhostMine extends Module {
         pendingStopPos = null;
         pendingStopFace = null;
         stopSentThisTick = null;
+        swingSentThisTick = false;
         blockSwingPacket = false;
+        mineTicks = 0;
+        lastFinishTick = 0;
+        gainedAdvantage = 0.0;
     }
 
     @Override
@@ -416,7 +469,10 @@ public class GhostMine extends Module {
         pendingStopPos = null;
         pendingStopFace = null;
         stopSentThisTick = null;
+        swingSentThisTick = false;
         blockSwingPacket = false;
+        lastFinishTick = 0;
+        gainedAdvantage = 0.0;
 
         // 恢复工具栏：从背包换到手上的工具换回背包，切过的热栏槽位切回去
         swapInvToolBack();
@@ -432,6 +488,8 @@ public class GhostMine extends Module {
     public void onTick(TickEvent.Pre event) {
         if (mineCooldownTicks > 0) mineCooldownTicks--;
         stopSentThisTick = null;
+        swingSentThisTick = false;
+        mineTicks++;
 
         // 上一 tick 安排的开局结束包：这一 tick 单独发（和 START、高空包分开，避免一个 tick 里两个位置）
         flushPendingStop();
@@ -466,7 +524,7 @@ public class GhostMine extends Module {
         }
 
         // 2. 开始挖掘（发 START）；「挖掘延迟」没走完的目标在这里排队等延迟结束
-        if (firstBlockDate != null && !firstBlockDate.isMining && mineCooldownTicks <= 0) {
+        if (firstBlockDate != null && !firstBlockDate.isMining && miningGateOpen()) {
             startTarget(firstBlockDate);
         }
 
@@ -496,10 +554,10 @@ public class GhostMine extends Module {
         // 2. 开始挖掘：主挖先发 START，副挖后发
         //    「挖掘延迟」没走完的目标在这里排队等延迟结束（副挖一定要在延迟之后才开始）
         //    服务端的挖掘槽位最后停在副挖上：副挖靠阈值 STOP 破坏，主挖靠 START 时占住的延迟破坏槽位破坏
-        if (firstBlockDate != null && !firstBlockDate.isMining && mineCooldownTicks <= 0) {
+        if (firstBlockDate != null && !firstBlockDate.isMining && miningGateOpen()) {
             startTarget(firstBlockDate);
         }
-        if (secondBlockDate != null && !secondBlockDate.isMining && mineCooldownTicks <= 0) {
+        if (secondBlockDate != null && !secondBlockDate.isMining && miningGateOpen()) {
             startTarget(secondBlockDate);
         }
 
@@ -517,16 +575,20 @@ public class GhostMine extends Module {
     /**
      * 单个目标的每 tick 处理
      * <p>
-     * 进度按真实时间累加（见 {@link BlockDate#freshProgress}）；进度达到阈值时切工具 + 发 STOP 收尾
-     * （{@link #finishTarget}）。
+     * 先按服务端那套公式重算进度（见 {@link BlockDate#freshProgress}），进度到阈值就切工具 + 发 STOP 收尾
+     * （{@link #finishTarget}）—— 判定用的进度和服务端收到结束包时算出来的就是同一个数，不另算一套
      */
     private void tickTarget(BlockDate block) {
         if (block == null || !block.isMining) return;
 
-        if (!block.done) block.freshProgress();
+        block.elapsedTicks++;
+        block.freshProgress();
 
         // 秒挖方块：开始包发出去服务端就把它破坏了，不切工具、不补结束包
-        if (!block.instaBreak && !block.switched && block.fraction() * 100.0 >= stopPercent()) {
+        if (block.instaBreak || block.switched) return;
+
+        // 进度到「挖掘方块阈值」就收尾：服务端 70% 才会当场破坏，阈值调 70 最快
+        if (block.fraction() * 100.0 >= stopPercent()) {
             finishTarget(block);
         }
     }
@@ -534,25 +596,6 @@ public class GhostMine extends Module {
     /** 实际开始收尾的进度百分比：就是「切换工具阈值」设置的数 */
     private int stopPercent() {
         return switchDamage.get();
-    }
-
-    /**
-     * 挖穿这个方块要多少 tick（LeavesHack 的算法：把单 tick 的进度取倒数）
-     * <p>
-     * 单 tick 进度用 BlockUtils.getBreakDelta（原版公式：工具挖掘速度 ÷ 硬度 ÷ 能不能收获 30|100，
-     * 已含效率附魔、急迫、挖掘疲劳、水中速度），工具按「最终会拿在手上的那把」算
-     * （背包切换会把背包那件换到手上）
-     * <p>
-     * 空中的 1/5 惩罚在这里乘回去：LeavesHack 是按「地面每秒 20 tick、空中每秒 4 tick」累计进度的，
-     * 惩罚放在累计那一步算（见 {@link BlockDate#freshProgress}）
-     */
-    private double ticksToBreak(BlockState state) {
-        int slot = getBestToolToUse(state);
-        double delta = BlockUtils.getBreakDelta(
-            slot != -1 ? slot : mc.player.getInventory().getSelectedSlot(), state);
-
-        if (!mc.player.onGround()) delta *= 5.0;
-        return delta <= 0 ? Double.MAX_VALUE : 1.0 / delta;
     }
 
     /**
@@ -651,6 +694,105 @@ public class GhostMine extends Module {
      */
     private void blockFinished() {
         mineCooldownTicks = mineCooldown.get();
+        lastFinishTick = mineTicks;
+    }
+
+    /**
+     * 现在能不能开始一次新的挖掘
+     * <p>
+     * 三个闸门：自己的挖掘冷却、原版那边的破坏延迟（可选，和走原版路径的模块共用一个）、
+     * 反馈分数超标后退回的原版节奏
+     */
+    private boolean miningGateOpen() {
+        if (mineCooldownTicks > 0) return false;
+        if (syncVanillaCooldown.get() && vanillaDestroyDelay() > 0) return false;
+        if (advantageOverThreshold() && mineTicks - lastFinishTick < VANILLA_MINE_GAP) return false;
+        return true;
+    }
+
+    /** 原版客户端的破坏延迟（原版挖掘、秒破模块用的就是这一个） */
+    private int vanillaDestroyDelay() {
+        if (mc.gameMode == null) return 0;
+        return ((MultiPlayerGameModeDelayAccessor) mc.gameMode).meteorsupport$getDestroyDelay();
+    }
+
+    /** 原版那条挖掘路正在挖别的方块（手动点、别的模块）：这一 tick 不抢着发我们的开始包 */
+    private boolean vanillaBusyOnOther(BlockPos pos) {
+        if (mc.gameMode == null) return false;
+
+        MultiPlayerGameModeMiningAccessor vanilla = (MultiPlayerGameModeMiningAccessor) mc.gameMode;
+        return vanilla.meteorsupport$isDestroying() && !pos.equals(vanilla.meteorsupport$getDestroyBlockPos());
+    }
+
+    /**
+     * 抢跑计分（照反作弊的思路给自己记分）
+     * <p>
+     * 距离上一次收尾越近加得越多（间隔 0 加 300，每多等 1 tick 少加 50），按原版节奏挖（≥6 tick）就乘 0.9 衰减
+     */
+    private void scoreAdvantage() {
+        if (!acFeedback.get() || lastFinishTick <= 0) return;
+
+        int since = mineTicks - lastFinishTick;
+        if (since >= VANILLA_MINE_GAP) gainedAdvantage *= 0.9;
+        else gainedAdvantage += 300 - since * 50;
+
+        gainedAdvantage = Mth.clamp(gainedAdvantage, -1000.0, 1000.0);
+    }
+
+    /** 分数超过阈值：该退回原版节奏了 */
+    private boolean advantageOverThreshold() {
+        return acFeedback.get() && gainedAdvantage > acThreshold.get();
+    }
+
+    /**
+     * 要不要发高空绕过包
+     * <p>
+     * 反馈闭环开着时只在「确实在抢跑」（分数 > 0）时发，完全按原版节奏挖的时候一个都不发；
+     * 反馈关掉就是老行为：只要开着「高空包绕过」就每次都发
+     */
+    private boolean bypassWanted() {
+        if (!fastBypass.get()) return false;
+        if (!acFeedback.get()) return true;
+        return gainedAdvantage > 0.0;
+    }
+
+    /** 服务端那边算的「人在不在面上」：在地面上，或者「滞空挖掘绕过」把空中骗成了地面 */
+    private boolean serverOnGround() {
+        return mc.player == null || mc.player.onGround() || bypassGround.get();
+    }
+
+    /** 收尾时会切到手上的那把工具（热栏没有就看背包，和 switchToBestTool 用同一套） */
+    private ItemStack bestToolStack(BlockState state) {
+        int slot = getBestToolToUse(state);
+        return slot < 0 ? mc.player.getMainHandItem() : mc.player.getInventory().getItem(slot);
+    }
+
+    /**
+     * 服务端这一刻收到结束包会算出来的进度（工具按「收尾时会切到手上的那把」算）
+     * <p>
+     * 全模块就这一套进度：显示、收尾判定、要等多久都用它，和服务端算的是同一个数
+     */
+    private double predictedStopProgress(BlockDate block) {
+        BlockState state = mc.level.getBlockState(block.pos);
+        if (state.isAir()) return 1.0;
+
+        return BreakData.stopProgress(state, block.pos, bestToolStack(state), block.elapsedTicks, serverOnGround());
+    }
+
+    /**
+     * 挖掘开始 / 收尾的挥手
+     * <p>
+     * 本地动画照旧（和手动挖一样）；「挥手」开着的时候顺手把这个挥手包真发出去 ——
+     * 反作弊是按「每次挖掘都该有一次挥手」看的，从头到尾不发就少了这一下
+     * <p>
+     * 一个 tick 只挥一次：结束包和开始包落在同一个 tick 时不会连发两个挥手包
+     */
+    private void swingForBreak() {
+        if (swingSentThisTick) return;
+
+        swingSentThisTick = true;
+        blockSwingPacket = !swingPacket.get();
+        mc.player.swing(InteractionHand.MAIN_HAND);
     }
 
     /** 进度走完后等待服务端确认破坏，等待超过「放弃等待」则放弃该方块 */
@@ -867,10 +1009,12 @@ public class GhostMine extends Module {
      * 停止挖掘指定位置（高空包抵消）
      */
     public static void stopMine(BlockPos pos) {
-        MeteorClient.mc.getConnection().send(
-            new ServerboundPlayerActionPacket(ServerboundPlayerActionPacket.Action.START_DESTROY_BLOCK, pos.above(300), Direction.UP));
-        MeteorClient.mc.getConnection().send(
-            new ServerboundPlayerActionPacket(ServerboundPlayerActionPacket.Action.STOP_DESTROY_BLOCK, pos.above(300), Direction.UP));
+        BlockPos bypassPos = pos.above(300);
+        // 也要走客户端的预测序列：自己构造包时 sequence 是 0，反作弊会当成「乱序的挖掘包」直接取消
+        MeteorClient.mc.gameMode.startPrediction(MeteorClient.mc.level, id ->
+            new ServerboundPlayerActionPacket(ServerboundPlayerActionPacket.Action.START_DESTROY_BLOCK, bypassPos, Direction.UP, id));
+        MeteorClient.mc.gameMode.startPrediction(MeteorClient.mc.level, id ->
+            new ServerboundPlayerActionPacket(ServerboundPlayerActionPacket.Action.STOP_DESTROY_BLOCK, bypassPos, Direction.UP, id));
     }
 
     /**
@@ -959,6 +1103,16 @@ public class GhostMine extends Module {
     private void startTarget(BlockDate block) {
         BlockState state = mc.level.getBlockState(block.pos);
 
+        // 原版那条挖掘路正在挖别的方块（手动点、别的模块）：这一 tick 不抢，等它那一套走完再由 tick 逻辑重试
+        if (vanillaBusyOnOther(block.pos)) return;
+
+        // 抢跑计分（反馈闭环拿它决定要不要退回原版节奏、要不要发高空包）
+        scoreAdvantage();
+
+        // 开始包和收尾包可能落在同一个 tick：服务端那时算的是「单 tick 进度 × 1」，
+        // 所以这里从 -1 起算，进 tick 逻辑加 1 之后正好是 0
+        block.elapsedTicks = -1;
+
         // 原版能秒挖的方块：只发一个开始包（服务端收到就当场破坏了），不走双挖/切工具阈值那套
         if (isInstaBreak(block.pos, state)) {
             mineInstaBlock(block);
@@ -968,8 +1122,6 @@ public class GhostMine extends Module {
         mineBlock(block.pos, block.direction);
         block.isMining = true;
         block.serverTracked = true;
-        block.mineStartMs = System.currentTimeMillis();
-        block.lastProgressMs = block.mineStartMs;
 
         if (firstBlockDate != null && firstBlockDate != block) firstBlockDate.serverTracked = false;
         if (secondBlockDate != null && secondBlockDate != block) secondBlockDate.serverTracked = false;
@@ -977,7 +1129,7 @@ public class GhostMine extends Module {
         // 延迟破坏名额只有一个、先占者得：已经被别的方块占着的时候，这个方块的 STOP 会被服务端直接忽略
         block.delayedDestroy = doubleBreak.get()
             && !otherDelayedDestroy(block)
-            && initialStopProgress(state) < INSTANT_BREAK_PERCENT / 100.0;
+            && initialStopProgress(state, block.pos) < INSTANT_BREAK_PERCENT / 100.0;
 
         mineCooldownTicks = mineCooldown.get();
     }
@@ -993,21 +1145,19 @@ public class GhostMine extends Module {
      * （Grim 的 FastBreak）按「挖穿这一格该用多久」算出提前收尾，往缓冲里加料。
      */
     private void mineInstaBlock(BlockDate block) {
-        // 挥手动画只留在本地：swing 包拦掉不发（见 onPacket）
-        blockSwingPacket = true;
-        mc.player.swing(InteractionHand.MAIN_HAND);
+        swingForBreak();
 
-        mc.getConnection().send(
+        // 开始包走客户端的预测序列（sequence 每次 +1，和原版一模一样）
+        Direction instaFace = breakFace(block.pos, block.direction);
+        mc.gameMode.startPrediction(mc.level, id ->
             new ServerboundPlayerActionPacket(ServerboundPlayerActionPacket.Action.START_DESTROY_BLOCK,
-                block.pos, breakFace(block.pos, block.direction)));
+                block.pos, instaFace, id));
 
         block.isMining = true;
         block.serverTracked = true;
         block.instaBreak = true;
         block.done = true;
-        block.progress = block.requiredTicks;   // 进度按 tick 计，直接顶到 100%
-        block.mineStartMs = System.currentTimeMillis();
-        block.lastProgressMs = block.mineStartMs;
+        block.progress = 1.0;   // 服务端收到开始包就当场破坏了，进度直接算满
 
         if (firstBlockDate != null && firstBlockDate != block) firstBlockDate.serverTracked = false;
         if (secondBlockDate != null && secondBlockDate != block) secondBlockDate.serverTracked = false;
@@ -1024,11 +1174,9 @@ public class GhostMine extends Module {
      * 双挖时紧跟在 START 后面那个 STOP 的进度：服务端用「收到 STOP 那一刻手上的工具」算，
      * 也就是「这个方块单 tick 的进度 × 1」
      */
-    private double initialStopProgress(BlockState state) {
-        double delta = BlockUtils.getBreakDelta(mc.player.getInventory().getSelectedSlot(), state);
-        // 滞空挖掘绕过：位置包已经把「踩在地上」发给服务端了，这里也要按地面速度算
-        if (bypassGround.get() && !mc.player.onGround()) delta *= 5.0;
-        return delta;
+    private double initialStopProgress(BlockState state, BlockPos pos) {
+        // 服务端算的是「单 tick 进度 × 1」，用的是收到这个结束包那一刻手上的工具
+        return BreakData.perTick(state, pos, mc.player.getMainHandItem(), serverOnGround());
     }
 
     /** 别的目标是不是已经占着服务端的「延迟破坏」名额 */
@@ -1056,16 +1204,15 @@ public class GhostMine extends Module {
         // 报的面按当前眼睛位置重算（这次点击点的面只在准星正好还指着它的时候才算数）
         Direction face = breakFace(pos, direction);
 
-        // 挥手动画只留在本地：swing 包拦掉不发（见 onPacket）
-        blockSwingPacket = true;
-        mc.player.swing(InteractionHand.MAIN_HAND);
+        swingForBreak();
 
-        // 1. 发送 START 包
-        mc.getConnection().send(
-            new ServerboundPlayerActionPacket(ServerboundPlayerActionPacket.Action.START_DESTROY_BLOCK, pos, face));
+        // 1. 发送 START 包：必须走客户端的预测序列（sequence 每次 +1）
+        //    自己构造包时 sequence 是 0，服务器那边每挖一次都要「上一个 +1」，0 号开始包会被当成乱序取消
+        mc.gameMode.startPrediction(mc.level, id ->
+            new ServerboundPlayerActionPacket(ServerboundPlayerActionPacket.Action.START_DESTROY_BLOCK, pos, face, id));
 
         // 2. 高空包绕过：向 Y=321 发送一个额外的 START 包（sequenced packet 保证顺序）
-        if (fastBypass.get()) {
+        if (bypassWanted()) {
             BlockPos bypassPos = new BlockPos(pos.getX(), 321, pos.getZ());
             mc.gameMode.startPrediction(mc.level, id ->
                 new ServerboundPlayerActionPacket(ServerboundPlayerActionPacket.Action.START_DESTROY_BLOCK, bypassPos, Direction.DOWN, id));
@@ -1101,6 +1248,8 @@ public class GhostMine extends Module {
      * 去掉它整个进度就按地面速度算），否则在空中这一下会被算成 1/5，进度不够 0.7 就被丢掉。
      */
     private void sendStopPacket(BlockPos pos, Direction direction) {
+        // 反作弊的 swing 检查：这一 tick 还没挥过手（比如这一下是补发的结束包）就补一个
+        swingForBreak();
         sendFakeGround();
 
         // 报的面按当前眼睛位置重算（挖掘期间人可能已经绕到方块另一边了）
@@ -1172,15 +1321,11 @@ public class GhostMine extends Module {
         sendStopPacket(pos, direction);
 
         // 高空 STOP 抵消
-        if (fastBypass.get()) {
+        if (bypassWanted()) {
             BlockPos bypassPos = new BlockPos(pos.getX(), 321, pos.getZ());
             mc.gameMode.startPrediction(mc.level, id ->
                 new ServerboundPlayerActionPacket(ServerboundPlayerActionPacket.Action.STOP_DESTROY_BLOCK, bypassPos, Direction.DOWN, id));
         }
-
-        // 挥手动画只留在本地：swing 包拦掉不发（见 onPacket）
-        blockSwingPacket = true;
-        mc.player.swing(InteractionHand.MAIN_HAND);
     }
 
     // ==================== 事件处理 ====================
@@ -1273,7 +1418,7 @@ public class GhostMine extends Module {
         }
 
         // 延迟还没结束：排队等 tick 逻辑补发 START
-        if (mineCooldownTicks > 0) return;
+        if (!miningGateOpen()) return;
 
         startTarget(target);
     }
@@ -1438,11 +1583,15 @@ public class GhostMine extends Module {
         public BlockPos pos;
         public Direction direction;
         public boolean done = false;
-        /** 已经累计了多少 tick 的挖掘进度（LeavesHack 的算法：进度就是「真实过了多少 tick」） */
+        /**
+         * 服务端那套进度（0-1，可能超过 1）：单 tick 进度（收尾时会拿到手上的那把工具）× (开始包之后过了多少 tick + 1)
+         * <p>
+         * 显示、收尾判定、要等多久都用这一个数，不再另算一套
+         */
         public double progress;
-        /** 挖穿这个方块要多少 tick（地面速度，按最终拿在手上的那把工具算） */
-        public double requiredTicks;
         public BlockState blockState;
+        /** 开始包发出去之后过了多少 tick（服务端就是从开始包那一刻开始数的） */
+        public int elapsedTicks = 0;
         public boolean isMining = false;
         /** 服务端当前记着的挖掘方块（最后发过 START 的那一个）；另一个方块只占着服务端的「延迟破坏」名额 */
         public boolean serverTracked = false;
@@ -1450,10 +1599,6 @@ public class GhostMine extends Module {
         public boolean delayedDestroy = false;
         /** 已经发过收尾的 STOP（原版挖掘那条流程走完了，不再需要拿工具等） */
         public boolean stopSent = false;
-        /** 开始包发出去的时刻（毫秒）：用来按真实时间估服务端转过了多少 tick */
-        public long mineStartMs = 0;
-        /** 上一次累加进度的时间（毫秒）：进度按真实时间累加，客户端补 tick 不会虚增 */
-        public long lastProgressMs = 0;
         /** 是否已经达到切换工具阈值（切过工具、发过 STOP） */
         public boolean switched = false;
         /** 秒切模式自动重试已经补发了几次结束包（到上限就不再补） */
@@ -1473,56 +1618,30 @@ public class GhostMine extends Module {
             this.direction = direction;
             this.done = false;
             this.progress = 0.0;
-            this.lastProgressMs = System.currentTimeMillis();
             blockState = mc.level.getBlockState(pos);
             this.rebreak = rebreak;
-            requiredTicks = ticksToBreak(blockState);
         }
 
         /**
-         * 进度累计（LeavesHack 的算法）
+         * 重算进度（每 tick 一次）
          * <p>
-         * 进度单位是 tick：在地面每秒算 20 tick，在空中每秒算 4 tick（原版空中的 1/5 惩罚）；
-         * 「滞空挖掘绕过」开着时空中也按地面算（位置包已经把 onGround 发给服务端了）。
-         * 累计到「挖穿需要的 tick 数」就算 100%，见 {@link #requiredTicks}
+         * 服务端就是这么算的：单 tick 进度 × (开始包之后过了多少 tick + 1)。工具、附魔、急迫、挖掘疲劳、
+         * 上没上地面变了它都跟着变，所以每一次都重新算，不缓存
          * <p>
-         * 客户端卡一下之后会一口气补好几 tick（几毫秒走完好几 tick），按 tick 数累加就会虚增，
-         * 模拟出来的进度会跑到服务端前面；按真实时间累加就不会
+         * tick 数是自己数的：服务端数的是它自己的 gameTicks，两边都是「开始包之后过了多少 tick」，同一个口径
          */
         public void freshProgress() {
-            // 需要的 tick 数每次都重算：挖的过程中换工具（背包切换）、吃效果都会变
-            requiredTicks = ticksToBreak(blockState);
+            blockState = mc.level.getBlockState(pos);
+            progress = predictedStopProgress(this);
 
-            // 瞬间破坏的方块（硬度 0）：需要的 tick 数是 0，直接算完成
-            if (requiredTicks <= 0) {
-                done = true;
-                lastProgressMs = System.currentTimeMillis();
-                return;
-            }
-
-            long now = System.currentTimeMillis();
-            double seconds = Math.max(0.0, (now - lastProgressMs) / 1000.0);
-            lastProgressMs = now;
-
-            progress += seconds * (serverOnGround() ? 20.0 : 4.0);
-            if (progress >= requiredTicks) {
-                done = true;
-                progress = requiredTicks;
-            }
+            // 进度到 100% 就是「该挖穿了」，剩下只是等服务端那边把它破坏掉
+            if (progress >= 1.0) done = true;
         }
 
-        /** 服务端那边算的「人在不在面上」：在地面上，或者「滞空挖掘绕过」把空中骗成了地面 */
-        private boolean serverOnGround() {
-            return mc.player == null || mc.player.onGround() || bypassGround.get();
-        }
-
-        /** 进度百分比（0-1）：累计的 tick 数 ÷ 需要的 tick 数 */
+        /** 进度百分比（0-1）：进度本身就是百分比，夹一下就行（拿着工具等延迟破坏的时候画满） */
         public double fraction() {
-            if (requiredTicks <= 0) return 1.0;
-
-            double f = progress / requiredTicks;
-            if (f < 0.0) return 0.0;
-            return f > 1.0 ? 1.0 : f;
+            double f = done ? Math.max(progress, 1.0) : progress;
+            return Mth.clamp(f, 0.0, 1.0);
         }
     }
 
