@@ -19,7 +19,6 @@
 
 package fish22.modernsupport.modules;
 
-import fish22.modernsupport.mixin.MultiPlayerGameModeDelayAccessor;
 import fish22.modernsupport.mixin.MultiPlayerGameModeMiningAccessor;
 import fish22.modernsupport.utils.BreakData;
 import meteordevelopment.meteorclient.MeteorClient;
@@ -58,7 +57,6 @@ import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 
 import net.minecraft.world.phys.HitResult;
-import net.minecraft.world.phys.Vec3;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -102,29 +100,42 @@ public class GhostMine extends Module {
                 .defaultValue(true)
                 .build()
         );
+    /** 挖完一块之后隔多久才能开始下一块：自定义 / 原版 / 反馈闭环 */
+    public Setting<CooldownMode> cooldownMode = sgGeneral
+        .add(
+            new EnumSetting.Builder<CooldownMode>()
+                .name("挖掘冷却")
+                .description("计算挖掘冷却的方法")
+                .defaultValue(CooldownMode.CUSTOM)
+                .build()
+        );
     public Setting<Integer> mineCooldown = sgGeneral
         .add(
             new IntSetting.Builder()
-                .name("挖掘冷却")
-                .description("挖掘的冷却")
+                .name("自定义冷却")
+                .description("「挖掘冷却」选自定义时用的 tick 数")
                 .defaultValue(6)
                 .min(0)
                 .sliderRange(0, 20)
+                .visible(() -> cooldownMode.get() == CooldownMode.CUSTOM)
                 .build()
         );
-    public Setting<Boolean> syncVanillaCooldown = sgGeneral
+    public Setting<Integer> feedbackThreshold = sgGeneral
         .add(
-            new BoolSetting.Builder()
-                .name("跟原版冷却")
-                .description("原版那边还有破坏延迟时不开始新的挖掘（和「秒破」这类走原版路径的模块同开时用）")
-                .defaultValue(false)
+            new IntSetting.Builder()
+                .name("反馈阈值")
+                .description("「挖掘冷却」分数阈值。超过这个阈值回退原版冷却")
+                .defaultValue(300)
+                .min(50)
+                .sliderRange(50, 1000)
+                .visible(() -> cooldownMode.get() == CooldownMode.FEEDBACK)
                 .build()
         );
     public Setting<Boolean> swingPacket = sgGeneral
         .add(
             new BoolSetting.Builder()
                 .name("挥手")
-                .description("挖掘开始/收尾时把挥手包真发给服务端（反作弊就指望每次挖掘都有挥手）；关掉只有本地动画，包拦住不发")
+                .description("挖掘开始/收尾时把挥手包发给服务端")
                 .defaultValue(false)
                 .build()
         );
@@ -135,7 +146,7 @@ public class GhostMine extends Module {
         .add(
             new BoolSetting.Builder()
                 .name("高空包绕过")
-                .description("发送 START 时额外向高空发送一个相同的包，用于绕过反作弊的跟踪")
+                .description("发送开始包/结束包时额外向高空发一个相同的包，用于绕过反作弊的跟踪")
                 .defaultValue(true)
                 .build()
         );
@@ -147,34 +158,6 @@ public class GhostMine extends Module {
                 .defaultValue(false)
                 .build()
         );
-    public Setting<Boolean> adaptiveFace = sgBypass
-        .add(
-            new BoolSetting.Builder()
-                .name("挖掘面自适应")
-                .description("确保挖掘瞄准面合法")
-                .defaultValue(true)
-                .build()
-        );
-    public Setting<Boolean> acFeedback = sgBypass
-        .add(
-            new BoolSetting.Builder()
-                .name("反馈闭环")
-                .description("像反作弊那样给自己记分：抢跑就加分、按原版节奏挖就衰减，分高了自动退回原版节奏，高空包也只在抢跑时发")
-                .defaultValue(true)
-                .build()
-        );
-    public Setting<Integer> acThreshold = sgBypass
-        .add(
-            new IntSetting.Builder()
-                .name("反馈阈值")
-                .description("分数超过这个数就退回原版节奏（6 tick 内不再开始新的挖掘）")
-                .defaultValue(300)
-                .min(50)
-                .sliderRange(50, 1000)
-                .visible(acFeedback::get)
-                .build()
-        );
-
     // ==================== 切换 ====================
 
     public Setting<Integer> switchDamage = sgSwitch
@@ -284,11 +267,29 @@ public class GhostMine extends Module {
                 .visible(rebreak::get)
                 .build()
         );
+    public Setting<Boolean> rebreakFastStop = sgRebreak
+        .add(
+            new BoolSetting.Builder()
+                .name("快速stop")
+                .description("每 tick 都无条件向重挖框补一个结束包（不等重挖延迟），包多但最快，适合 PvP")
+                .defaultValue(false)
+                .visible(rebreak::get)
+                .build()
+        );
+    public Setting<Boolean> rebreakSkipAir = sgRebreak
+        .add(
+            new BoolSetting.Builder()
+                .name("空中跳过")
+                .description("人在空中时不动重挖框（落地了再继续补）")
+                .defaultValue(false)
+                .visible(rebreak::get)
+                .build()
+        );
     public Setting<Integer> maxBreaks = sgRebreak
         .add(
             new IntSetting.Builder()
                 .name("放弃等待")
-                .description("超过这么多 tick 还没挖掉就放弃")
+                .description("重挖框上的方块出现之后，超过这么多 tick 还没挖掉就放弃这个位置")
                 .defaultValue(60)
                 .min(10)
                 .sliderRange(10, 300)
@@ -326,7 +327,7 @@ public class GhostMine extends Module {
             new ColorSetting.Builder()
                 .name("完成边框颜色")
                 .description("方块挖掘完成时边框的颜色")
-                .defaultValue(new SettingColor(255, 192, 203, 255))
+                .defaultValue(new SettingColor(255, 192, 203, 160))
                 .build()
         );
     private final Setting<SettingColor> sideColor = sgRender
@@ -342,7 +343,7 @@ public class GhostMine extends Module {
             new ColorSetting.Builder()
                 .name("边框颜色")
                 .description("正在挖掘方块边框的颜色")
-                .defaultValue(new SettingColor(255, 192, 203, 255))
+                .defaultValue(new SettingColor(255, 192, 203, 160))
                 .build()
         );
     private final Setting<SettingColor> rebreakSideColor = sgRender
@@ -350,7 +351,7 @@ public class GhostMine extends Module {
             new ColorSetting.Builder()
                 .name("重挖侧面颜色")
                 .description("重挖位置半透明框的侧面颜色")
-                .defaultValue(new SettingColor(255, 192, 203, 80))
+                .defaultValue(new SettingColor(255, 192, 203, 40))
                 .build()
         );
     private final Setting<SettingColor> rebreakLineColor = sgRender
@@ -358,7 +359,7 @@ public class GhostMine extends Module {
             new ColorSetting.Builder()
                 .name("重挖边框颜色")
                 .description("重挖位置半透明框的边框颜色")
-                .defaultValue(new SettingColor(255, 192, 203, 255))
+                .defaultValue(new SettingColor(255, 192, 203, 100))
                 .build()
         );
 
@@ -369,8 +370,8 @@ public class GhostMine extends Module {
     private BlockDate rebreakBlockDate = null;
     /** 重挖位置上的方块已经连续出现了多少 tick（方块消失/换新位置时清零） */
     private int rebreakTicks = 0;
-    /** 本轮重挖是否已经发过 STOP（方块消失后重置，避免每 tick 重复切工具/重复发包） */
-    private boolean rebreakTried = false;
+    /** 重挖位置下一次补结束包还要等多少 tick（0 = 现在就能补；补一次没生效不至于卡死） */
+    private int rebreakRetryTicks = 0;
     /** 挖掘延迟剩余 tick（>0 时不开始新的挖掘：延迟开头点的方块直接忽略，只剩最后 2 tick 时点的排队） */
     private int mineCooldownTicks = 0;
     /** 工具切换状态：是否已切到最佳工具等切回、已等待 tick 数 */
@@ -408,6 +409,8 @@ public class GhostMine extends Module {
     private static final int MAX_AUTO_RETRY = 5;
     /** 挖掘延迟只剩这么多 tick 时，点到的方块才排队等延迟结束（更早点的直接忽略） */
     private static final int QUEUE_WINDOW_TICKS = 2;
+    /** 重挖位置补过一次结束包之后，隔这么多 tick 方块还没掉就再补一个 */
+    private static final int REBREAK_RETRY_GAP = 5;
 
     public static final List<Block> unbreakableBlocks = Arrays.asList(
         Blocks.COMMAND_BLOCK,
@@ -440,7 +443,7 @@ public class GhostMine extends Module {
         secondBlockDate = null;
         rebreakBlockDate = null;
         rebreakTicks = 0;
-        rebreakTried = false;
+        rebreakRetryTicks = 0;
         mineCooldownTicks = 0;
         hasSwitch = false;
         switchTicks = 0;
@@ -463,7 +466,7 @@ public class GhostMine extends Module {
         secondBlockDate = null;
         rebreakBlockDate = null;
         rebreakTicks = 0;
-        rebreakTried = false;
+        rebreakRetryTicks = 0;
         mineCooldownTicks = 0;
         holdBlock = null;
         pendingStopPos = null;
@@ -518,7 +521,8 @@ public class GhostMine extends Module {
         // 1. 已被服务端破坏 → 清理并记录重挖位置
         if (firstBlockDate != null && isBroken(firstBlockDate.pos)) {
             // 不是我们自己发 STOP 收尾的（服务端自己挖掉的）：延迟从这一刻重新算
-            if (!firstBlockDate.switched) blockFinished();
+            // 秒破方块不吃这一套：原版挖这种方块（开始包过去就没了）本来就不进破坏延迟
+            if (!firstBlockDate.switched && !firstBlockDate.instaBreak) blockFinished();
             recordRebreak(firstBlockDate);
             firstBlockDate = null;
         }
@@ -541,12 +545,13 @@ public class GhostMine extends Module {
         // 1. 已被服务端破坏 → 清理并记录重挖位置
         if (firstBlockDate != null && isBroken(firstBlockDate.pos)) {
             // 不是我们自己发 STOP 收尾的（服务端自己挖掉的）：延迟从这一刻重新算
-            if (!firstBlockDate.switched) blockFinished();
+            // 秒破方块不吃这一套：原版挖这种方块（开始包过去就没了）本来就不进破坏延迟
+            if (!firstBlockDate.switched && !firstBlockDate.instaBreak) blockFinished();
             recordRebreak(firstBlockDate);
             firstBlockDate = null;
         }
         if (secondBlockDate != null && isBroken(secondBlockDate.pos)) {
-            if (!secondBlockDate.switched) blockFinished();
+            if (!secondBlockDate.switched && !secondBlockDate.instaBreak) blockFinished();
             recordRebreak(secondBlockDate);
             secondBlockDate = null;
         }
@@ -624,10 +629,10 @@ public class GhostMine extends Module {
         switchToBestTool(block);
         sendStop(block.pos, block.direction);
 
-        // 自动重挖：先记下位置，但要等这个方块真的掉了（rebreakTried = true 挡住"方块还在就补STOP"）
+        // 自动重挖：先记下位置，但要等这个方块真的掉了（刚发过 STOP，歇几 tick 才允许再补）
         if (rebreak.get() && block.rebreak && !block.instaBreak && block.serverTracked) {
             recordRebreak(block);
-            rebreakTried = true;
+            rebreakRetryTicks = REBREAK_RETRY_GAP;
         }
 
         // 原版挖掘这条流程：切工具 → STOP → 切回，一次做完。立即切回就是同一 tick 切回去，没有兜底
@@ -693,27 +698,34 @@ public class GhostMine extends Module {
      * 不管是收尾、双挖开局那个，还是重挖补的那个（见 {@link #sendStopPacket}）。
      */
     private void blockFinished() {
-        mineCooldownTicks = mineCooldown.get();
+        mineCooldownTicks = cooldownTicks();
         lastFinishTick = mineTicks;
+    }
+
+    /**
+     * 这一轮结束之后要等多少 tick 才能开始下一块（就是「挖掘冷却」那三个模式）
+     * <ul>
+     *   <li>自定义：固定用「自定义冷却」的 tick 数</li>
+     *   <li>原版：原版客户端挖完一块之后那 5 tick 破坏延迟（原版本来就这个节奏）</li>
+     *   <li>反馈闭环：分数没超标就一分钟都不多等，超标了退回原版节奏 6 tick（照反作弊的记分方式自检）</li>
+     * </ul>
+     */
+    private int cooldownTicks() {
+        return switch (cooldownMode.get()) {
+            case CUSTOM -> mineCooldown.get();
+            case VANILLA -> VANILLA_BREAK_DELAY;
+            case FEEDBACK -> advantageOverThreshold() ? VANILLA_MINE_GAP : 0;
+        };
     }
 
     /**
      * 现在能不能开始一次新的挖掘
      * <p>
-     * 三个闸门：自己的挖掘冷却、原版那边的破坏延迟（可选，和走原版路径的模块共用一个）、
-     * 反馈分数超标后退回的原版节奏
+     * 只看自己的挖掘冷却（「挖掘冷却」那三个模式算出来的）
      */
     private boolean miningGateOpen() {
         if (mineCooldownTicks > 0) return false;
-        if (syncVanillaCooldown.get() && vanillaDestroyDelay() > 0) return false;
-        if (advantageOverThreshold() && mineTicks - lastFinishTick < VANILLA_MINE_GAP) return false;
         return true;
-    }
-
-    /** 原版客户端的破坏延迟（原版挖掘、秒破模块用的就是这一个） */
-    private int vanillaDestroyDelay() {
-        if (mc.gameMode == null) return 0;
-        return ((MultiPlayerGameModeDelayAccessor) mc.gameMode).meteorsupport$getDestroyDelay();
     }
 
     /** 原版那条挖掘路正在挖别的方块（手动点、别的模块）：这一 tick 不抢着发我们的开始包 */
@@ -730,7 +742,7 @@ public class GhostMine extends Module {
      * 距离上一次收尾越近加得越多（间隔 0 加 300，每多等 1 tick 少加 50），按原版节奏挖（≥6 tick）就乘 0.9 衰减
      */
     private void scoreAdvantage() {
-        if (!acFeedback.get() || lastFinishTick <= 0) return;
+        if (cooldownMode.get() != CooldownMode.FEEDBACK || lastFinishTick <= 0) return;
 
         int since = mineTicks - lastFinishTick;
         if (since >= VANILLA_MINE_GAP) gainedAdvantage *= 0.9;
@@ -741,19 +753,17 @@ public class GhostMine extends Module {
 
     /** 分数超过阈值：该退回原版节奏了 */
     private boolean advantageOverThreshold() {
-        return acFeedback.get() && gainedAdvantage > acThreshold.get();
+        return cooldownMode.get() == CooldownMode.FEEDBACK && gainedAdvantage > feedbackThreshold.get();
     }
 
     /**
      * 要不要发高空绕过包
      * <p>
-     * 反馈闭环开着时只在「确实在抢跑」（分数 > 0）时发，完全按原版节奏挖的时候一个都不发；
-     * 反馈关掉就是老行为：只要开着「高空包绕过」就每次都发
+     * 只要开着「高空包绕过」就每次都发 —— 以前反馈闭环会把高空包按分数掐掉，
+     * 掐掉之后包的样子和原版对不上反而出问题，现在两个设置各管各的
      */
     private boolean bypassWanted() {
-        if (!fastBypass.get()) return false;
-        if (!acFeedback.get()) return true;
-        return gainedAdvantage > 0.0;
+        return fastBypass.get();
     }
 
     /** 服务端那边算的「人在不在面上」：在地面上，或者「滞空挖掘绕过」把空中骗成了地面 */
@@ -824,7 +834,7 @@ public class GhostMine extends Module {
         if (!block.serverTracked) return;
         rebreakBlockDate = new BlockDate(block.pos, block.direction);
         rebreakTicks = 0;
-        rebreakTried = false;
+        rebreakRetryTicks = 0;
     }
 
     /**
@@ -1045,6 +1055,10 @@ public class GhostMine extends Module {
      * 时机：方块一出现就立刻收尾（受「重挖延迟」限制，0 = 本 tick）。无条件执行，正在挖别的方块也照样收尾，
      * 不会去动那些方块的目标/进度，只是额外补一个 STOP。
      * <p>
+     * 补的这一下不是「一次没生效就卡死」：包可能被反作弊取消（人跳起来、位置变了、报的面不成立），
+     * 也可能服务端这一下没认，所以方块还在就不停补，一直补到方块被破坏或超过「放弃等待」。
+     * 重挖不看「挖掘冷却」（它有自己的节奏）：「快速stop」就是每 tick 无条件补一个，「重挖延迟」管头一下。
+     * <p>
      * 方块出现后超过「放弃等待」这么久仍未挖掉，说明服务端已经不认这个位置了，直接放弃并删除该重挖位置。
      */
     private void handleRebreak() {
@@ -1054,7 +1068,7 @@ public class GhostMine extends Module {
         if (state.getBlock() == Blocks.AIR || state.getBlock() == Blocks.WATER || state.getBlock() == Blocks.LAVA) {
             // 方块还没（重新）出现：等待期间不计时，也不重复收尾
             rebreakTicks = 0;
-            rebreakTried = false;
+            rebreakRetryTicks = 0;
             return;
         }
 
@@ -1066,10 +1080,25 @@ public class GhostMine extends Module {
             return;
         }
 
-        if (rebreakTried) return;   // 本轮已经发过 STOP，等方块被破坏
-        if (rebreakTicks <= rebreakDelay.get()) return;   // 重挖延迟
+        // 空中跳过：人在空中就什么都不做，等落地
+        if (rebreakSkipAir.get() && !mc.player.onGround()) {
+            rebreakTicks--;
+            return;
+        }
 
-        rebreakTried = true;
+        // 快速stop：每 tick 无条件补一个，不等重挖延迟
+        if (rebreakFastStop.get()) {
+            rebreakNow();
+            return;
+        }
+
+        if (rebreakTicks <= rebreakDelay.get()) return;   // 重挖延迟
+        if (rebreakRetryTicks > 0) {
+            rebreakRetryTicks--;
+            return;   // 补过一个了，歇几 tick 再补
+        }
+
+        rebreakRetryTicks = REBREAK_RETRY_GAP;
         rebreakNow();
     }
 
@@ -1106,14 +1135,14 @@ public class GhostMine extends Module {
         // 原版那条挖掘路正在挖别的方块（手动点、别的模块）：这一 tick 不抢，等它那一套走完再由 tick 逻辑重试
         if (vanillaBusyOnOther(block.pos)) return;
 
-        // 抢跑计分（反馈闭环拿它决定要不要退回原版节奏、要不要发高空包）
+        // 抢跑计分（「挖掘冷却」选反馈闭环时拿它决定要不要退回原版节奏）
         scoreAdvantage();
 
         // 开始包和收尾包可能落在同一个 tick：服务端那时算的是「单 tick 进度 × 1」，
         // 所以这里从 -1 起算，进 tick 逻辑加 1 之后正好是 0
         block.elapsedTicks = -1;
 
-        // 原版能秒挖的方块：只发一个开始包（服务端收到就当场破坏了），不走双挖/切工具阈值那套
+        // 原版能秒破的方块：切工具 → 一个开始包服务端当场就破坏了 → 切回，不记冷却
         if (isInstaBreak(block.pos, state)) {
             mineInstaBlock(block);
             return;
@@ -1131,20 +1160,26 @@ public class GhostMine extends Module {
             && !otherDelayedDestroy(block)
             && initialStopProgress(state, block.pos) < INSTANT_BREAK_PERCENT / 100.0;
 
-        mineCooldownTicks = mineCooldown.get();
+        // 开始挖掘时也占一次冷却，不然挖掘当中点到的方块会立刻插进来
+        // （冷却模式算出 0 的也留一个排队窗口，免得单挖模式被刚点到的方块顶掉）
+        mineCooldownTicks = Math.max(cooldownTicks(), QUEUE_WINDOW_TICKS + 1);
     }
 
     /**
-     * 原版能秒挖的方块：挥手 + 一个开始包，剩下交给服务端
+     * 原版能秒破的方块：切工具 → 挥手 + 一个开始包 →（按切工具模式）切回，不记冷却
      * <p>
      * 26.1 服务端的开始包分支：方块不空、用当前手持工具算出的单 tick 进度 ≥ 1.0 → 直接
      * {@code destroyAndAck(pos, seq, "insta mine")} 并 return（不记 destroyPos，也不进挖掘/延迟破坏流程）。
      * 原版客户端秒挖时同样只发一个开始包（进度够了就本地破坏，不补结束包）。
      * <p>
-     * 所以这里不安排「双挖开局结束包」、也不等切换工具阈值：多发一个结束包反而会被反作弊
-     * （Grim 的 FastBreak）按「挖穿这一格该用多久」算出提前收尾，往缓冲里加料。
+     * 原版挖完这种方块**不进破坏延迟**（那 5 tick 只给「挖了一会才挖穿」的方块），所以这里也不记冷却，
+     * 连着挖一排火把/草不会被上一块拖住。也不安排「双挖开局结束包」、不等切换工具阈值：多发一个结束包
+     * 反而会被反作弊（Grim 的 FastBreak）按「挖穿这一格该用多久」算出提前收尾，往缓冲里加料。
      */
     private void mineInstaBlock(BlockDate block) {
+        // 服务端是按「收到开始包那一刻手上的工具」算单 tick 进度的，所以先把最合适的工具换到手上
+        switchToBestTool(block);
+
         swingForBreak();
 
         // 开始包走客户端的预测序列（sequence 每次 +1，和原版一模一样）
@@ -1162,12 +1197,14 @@ public class GhostMine extends Module {
         if (firstBlockDate != null && firstBlockDate != block) firstBlockDate.serverTracked = false;
         if (secondBlockDate != null && secondBlockDate != block) secondBlockDate.serverTracked = false;
 
-        mineCooldownTicks = mineCooldown.get();
+        // 不记冷却；「立即切回」模式下现在就把工具换回去
+        if (switchBackMode.get() == SwitchBackMode.IMMEDIATE) switchBackNow();
     }
 
-    /** 原版能秒挖的方块：硬度 0（单 tick 进度就是 1.0） */
+    /** 原版能秒破的方块：拿着最合适的工具时单 tick 进度就 ≥ 1（硬度 0 的方块单 tick 进度本来就是满的） */
     private boolean isInstaBreak(BlockPos pos, BlockState state) {
-        return state.getDestroySpeed(mc.level, pos) == 0;
+        if (BreakData.hardness(state, pos) == 0.0) return true;
+        return BreakData.perTick(state, pos, bestToolStack(state), serverOnGround()) >= 1.0;
     }
 
     /**
@@ -1289,23 +1326,35 @@ public class GhostMine extends Module {
      * Grim 的 PositionBreakA 在「报的面位于玩家眼睛的反面」时会标记 + 取消这个包（表现就是方块挖不掉），
      * 而挖掘期间人一动（绕到方块另一边、跳起来、被活塞顶开）原来点的那个面就可能不成立了。
      * 挑不出面（人就在方块里）时用原来点的那个面 —— 那种情况反作弊本来就直接放行。
+     * <p>
+     * 挖掘包是先于这个 tick 的位置包发出去的，反作弊那边可能拿「上一 tick 的位置」判这个面
+     * （跳跃时一上一下差半格），所以两只眼睛都得在外面才算数 —— 只对一边成立的面会被取消
      */
     private Direction breakFace(BlockPos pos, Direction fallback) {
-        if (!adaptiveFace.get() || mc.player == null) return fallback;
+        if (mc.player == null) return fallback;
 
-        Vec3 eye = mc.player.getEyePosition();
+        // 上一 tick 的眼睛位置：xo/yo/zo 就是上一 tick 结束时的位置，也就是最后发给服务端的那一个
+        double eyeOffset = mc.player.getEyeY() - mc.player.getY();
+        double minX = Math.min(mc.player.getX(), mc.player.xo);
+        double maxX = Math.max(mc.player.getX(), mc.player.xo);
+        double minY = Math.min(mc.player.getY(), mc.player.yo) + eyeOffset;
+        double maxY = Math.max(mc.player.getY(), mc.player.yo) + eyeOffset;
+        double minZ = Math.min(mc.player.getZ(), mc.player.zo);
+        double maxZ = Math.max(mc.player.getZ(), mc.player.zo);
+
         double x1 = pos.getX(), y1 = pos.getY(), z1 = pos.getZ();
 
-        // 每个方向算「眼睛在这个面外面多远」，取最外面的那个；必须真的在外面（留一点余量，免得贴面时抖）
+        // 每个方向算「眼睛最靠里的那一次也在这个面外面多远」，取最外面的那个
+        // 必须两只眼睛都在外面（留一点余量，免得贴面时抖）
         double best = 1.0e-3;
         Direction face = fallback;
 
-        if (x1 - eye.x > best) { best = x1 - eye.x; face = Direction.WEST; }
-        if (eye.x - (x1 + 1.0) > best) { best = eye.x - (x1 + 1.0); face = Direction.EAST; }
-        if (y1 - eye.y > best) { best = y1 - eye.y; face = Direction.DOWN; }
-        if (eye.y - (y1 + 1.0) > best) { best = eye.y - (y1 + 1.0); face = Direction.UP; }
-        if (z1 - eye.z > best) { best = z1 - eye.z; face = Direction.NORTH; }
-        if (eye.z - (z1 + 1.0) > best) { best = eye.z - (z1 + 1.0); face = Direction.SOUTH; }
+        if (x1 - maxX > best) { best = x1 - maxX; face = Direction.WEST; }
+        if (minX - (x1 + 1.0) > best) { best = minX - (x1 + 1.0); face = Direction.EAST; }
+        if (y1 - maxY > best) { best = y1 - maxY; face = Direction.DOWN; }
+        if (minY - (y1 + 1.0) > best) { best = minY - (y1 + 1.0); face = Direction.UP; }
+        if (z1 - maxZ > best) { best = z1 - maxZ; face = Direction.NORTH; }
+        if (minZ - (z1 + 1.0) > best) { best = minZ - (z1 + 1.0); face = Direction.SOUTH; }
 
         return face;
     }
@@ -1642,6 +1691,24 @@ public class GhostMine extends Module {
         public double fraction() {
             double f = done ? Math.max(progress, 1.0) : progress;
             return Mth.clamp(f, 0.0, 1.0);
+        }
+    }
+
+    /** 「挖掘冷却」的三种模式 */
+    public enum CooldownMode {
+        CUSTOM("自定义"),
+        VANILLA("原版"),
+        FEEDBACK("反馈闭环");
+
+        private final String displayName;
+
+        CooldownMode(String displayName) {
+            this.displayName = displayName;
+        }
+
+        @Override
+        public String toString() {
+            return displayName;
         }
     }
 
