@@ -1,14 +1,17 @@
 package fish22.modernsupport;
 
 import fish22.modernsupport.gui.ItemPickerScreen;
+import fish22.modernsupport.gui.PotionPickerScreen;
 import fish22.modernsupport.aibot.AI;
 import fish22.modernsupport.commands.PearlCommand;
 import fish22.modernsupport.modules.AutoRepeat;
 import fish22.modernsupport.modules.AutoSugarcane;
+import fish22.modernsupport.modules.AutoCity;
 import fish22.modernsupport.modules.ElytraBounce;
 import fish22.modernsupport.modules.ElytraAutoReplace;
 import fish22.modernsupport.modules.ElytraGrimAccelerate;
 import fish22.modernsupport.modules.ElytraPitch40;
+import fish22.modernsupport.modules.EatModify;
 import fish22.modernsupport.modules.EntityList;
 import fish22.modernsupport.modules.FireworkUse;
 import fish22.modernsupport.modules.Freeze;
@@ -16,6 +19,8 @@ import fish22.modernsupport.modules.FireworkBoost;
 import fish22.modernsupport.modules.GhostMine;
 import fish22.modernsupport.modules.ItemUse;
 import fish22.modernsupport.modules.LegalRotationConfig;
+import fish22.modernsupport.modules.OneKeyPotion;
+import fish22.modernsupport.modules.OneKeyWallClip;
 import fish22.modernsupport.modules.OpenAI;
 import fish22.modernsupport.modules.PearlBot;
 import fish22.modernsupport.modules.Printer;
@@ -24,6 +29,7 @@ import fish22.modernsupport.modules.SpearNoise;
 import fish22.modernsupport.modules.Spin;
 import fish22.modernsupport.settings.ActionSetting;
 import fish22.modernsupport.settings.ItemUseListSetting;
+import fish22.modernsupport.settings.PotionPickSetting;
 import fish22.modernsupport.settings.PearlPointSetting;
 import fish22.modernsupport.settings.ScheduledTaskListSetting;
 import fish22.modernsupport.settings.WhiteListSetting;
@@ -51,6 +57,7 @@ import meteordevelopment.meteorclient.gui.widgets.pressable.WButton;
 import meteordevelopment.meteorclient.gui.widgets.pressable.WCheckbox;
 import meteordevelopment.meteorclient.settings.Setting;
 import meteordevelopment.meteorclient.systems.Systems;
+import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.systems.modules.Modules;
 import meteordevelopment.meteorclient.utils.misc.Keybind;
 import meteordevelopment.meteorclient.utils.misc.Names;
@@ -137,6 +144,15 @@ public class ModernSupport extends MeteorAddon {
 
                 itemTable.row();
             }
+        });
+
+        // 注册「药水种类」设置 (PotionPickSetting) 的 GUI 渲染:
+        // 按钮显示药水名（喷溅型迅捷药水这种），点开选择药水界面
+        SettingsWidgetFactory.registerCustomFactory(PotionPickSetting.class, theme -> (table, setting) -> {
+            PotionPickSetting potionSetting = (PotionPickSetting) setting;
+            WButton button = table.add(theme.button(potionSetting.displayName())).expandCellX().widget();
+            button.action = () -> mc.setScreen(new PotionPickerScreen(theme, "选择药水",
+                potionSetting::set, potionSetting.form()));
         });
 
         // 注册「openAI 白名单用户」列表设置的 GUI 渲染:
@@ -306,8 +322,13 @@ public class ModernSupport extends MeteorAddon {
 
         // 杂项模块
         Modules.get().add(new ItemUse());
+        // 进食修改（进食进度条 / 长按只吃一个 / 工具自动进食 / 单次点击进食）
+        Modules.get().add(new EatModify());
         // 一键烟花（从「鞘翅飞行」模块拆出来的独立模块，排在「一键使用物品」下面）
         Modules.get().add(new FireworkUse());
+        // 一键药水（往正下方扔一瓶药水）/ 一键卡墙（按配置角度扔末影珍珠）
+        Modules.get().add(new OneKeyPotion());
+        Modules.get().add(new OneKeyWallClip());
         Modules.get().add(new LegalRotationConfig());
         // openAI: 把 AEBot (服务端 AI 假人) 搬到客户端, 走自己的聊天栏收发
         Modules.get().add(new OpenAI());
@@ -332,6 +353,10 @@ public class ModernSupport extends MeteorAddon {
         // 世界模块
         // 发包挖掘（从 meteor-miku 移植）
         Modules.get().add(new GhostMine());
+        // 挖脚（重构 meteor 原版挖脚：位置由它挑，挖掘交给「发包挖掘」）
+        Modules.get().add(new AutoCity());
+        // 屏蔽 meteor 原版挖脚：本 mod 的「挖脚」完全替代它
+        disableMeteorAutoCity();
         // 自动收甘蔗（由官方「核爆」简化：只收甘蔗/竹子，留下最下面一节）
         Modules.get().add(new AutoSugarcane());
         // 鞘翅自动替换（滑翔中快坏的鞘翅自动换成背包里耐久最高的那把）
@@ -364,6 +389,22 @@ public class ModernSupport extends MeteorAddon {
     @EventHandler
     private static void onActiveModulesChanged(ActiveModulesChangedEvent event) {
         AutoSave.onChanged();
+    }
+
+    /**
+     * 屏蔽 meteor 原版挖脚（auto-city）
+     * <p>本 mod 的「挖脚」完全替代它：模块列表里直接去掉，配置加载也不会再把它激活，
+     * 免得它和「发包挖掘」抢挖掘、互相顶掉方块
+     */
+    private static void disableMeteorAutoCity() {
+        Module oldAutoCity = Modules.get().get("auto-city");
+        if (oldAutoCity == null) return;
+
+        if (oldAutoCity.isActive()) oldAutoCity.toggle();
+        oldAutoCity.settings.unregisterColorSettings();
+
+        Modules.get().getAll().remove(oldAutoCity);
+        Modules.get().getGroup(oldAutoCity.category).remove(oldAutoCity);
     }
 
     /** 进入世界/服务器：配置分块按服务器自动应用 */

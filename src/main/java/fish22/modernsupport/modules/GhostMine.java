@@ -50,6 +50,7 @@ import net.minecraft.network.protocol.game.ServerboundPlayerActionPacket;
 import net.minecraft.network.protocol.game.ServerboundSwingPacket;
 import net.minecraft.tags.ItemTags;
 import net.minecraft.world.InteractionHand;
+import net.minecraft.world.item.ItemUseAnimation;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.enchantment.Enchantments;
 import net.minecraft.world.level.block.Block;
@@ -58,7 +59,6 @@ import net.minecraft.world.level.block.state.BlockState;
 
 import net.minecraft.world.phys.HitResult;
 
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
@@ -98,6 +98,14 @@ public class GhostMine extends Module {
                 .name("双挖")
                 .description("同时挖掘两个方块以提高效率")
                 .defaultValue(true)
+                .build()
+        );
+    public Setting<Boolean> pauseWhileEating = sgGeneral
+        .add(
+            new BoolSetting.Builder()
+                .name("进食时暂停")
+                .description("进食时暂停挖掘")
+                .defaultValue(false)
                 .build()
         );
     /** 挖完一块之后隔多久才能开始下一块：自定义 / 原版 / 反馈闭环 */
@@ -399,8 +407,6 @@ public class GhostMine extends Module {
     /** 抢跑计分：越大说明我们越「抢」，反馈闭环拿它决定要不要退回原版节奏 */
     private double gainedAdvantage = 0.0;
 
-    /** 服务端 STOP 立即破坏的进度线：ServerPlayerGameMode 里进度 ≥ 0.7 才会立即破坏，否则退回延迟破坏 */
-    private static final int INSTANT_BREAK_PERCENT = 70;
     /** 原版破坏延迟（tick）：反作弊眼里「上一块挖完到下一块开始」的合法间隔 */
     private static final int VANILLA_BREAK_DELAY = 5;
     /** 原版节奏的挖掘间隔（tick）：反馈超标后退回这个节奏 */
@@ -494,30 +500,36 @@ public class GhostMine extends Module {
         swingSentThisTick = false;
         mineTicks++;
 
+        // 26.1 服务端收到 START/STOP 不会中断物品使用，所以进食时照常开始和累计进度，
+        // 只延迟切槽位与收尾（切工具会打断进食）；吃完后普通目标补 STOP，延迟破坏槽切工具补完
+        boolean pauseFinishing = shouldPauseForEating();
+
         // 上一 tick 安排的开局结束包：这一 tick 单独发（和 START、高空包分开，避免一个 tick 里两个位置）
+        // 这一发不吃「进食时暂停」：它只是一个包、不碰快捷栏，往后拖会让服务端记的「延迟破坏」名额和
+        // 客户端这边对不上，那块方块之后就一直等不到切工具（只能手动切一下才掉）
         flushPendingStop();
 
         rangeCheck();
 
         // 切工具后的切回。放在挖掘逻辑之前：切回计时不包含切换发生的那个 tick
-        handleSwitchBack();
+        if (!pauseFinishing) handleSwitchBack();
 
         // 收尾 STOP 没把方块挖掉：冷却过后补一个（放在新目标之前，补的结束包不会被新方块的开始包顶掉位置）
-        retryStop();
+        if (!pauseFinishing) retryStop();
 
         if (!doubleBreak.get()) {
-            tickSingle();
+            tickSingle(pauseFinishing);
         } else {
-            tickDouble();
+            tickDouble(pauseFinishing);
         }
 
         // 重挖逻辑
-        handleRebreak();
+        if (!pauseFinishing) handleRebreak();
     }
 
     // ==================== 单挖模式 ====================
 
-    private void tickSingle() {
+    private void tickSingle(boolean pauseFinishing) {
         // 1. 已被服务端破坏 → 清理并记录重挖位置
         if (firstBlockDate != null && isBroken(firstBlockDate.pos)) {
             // 不是我们自己发 STOP 收尾的（服务端自己挖掉的）：延迟从这一刻重新算
@@ -536,12 +548,12 @@ public class GhostMine extends Module {
         tickTarget(firstBlockDate);
 
         // 4. 超时未确认破坏 → 放弃
-        if (firstBlockDate != null && giveUp(firstBlockDate)) firstBlockDate = null;
+        if (firstBlockDate != null && giveUp(firstBlockDate, pauseFinishing)) firstBlockDate = null;
     }
 
     // ==================== 双挖模式 ====================
 
-    private void tickDouble() {
+    private void tickDouble(boolean pauseFinishing) {
         // 1. 已被服务端破坏 → 清理并记录重挖位置
         if (firstBlockDate != null && isBroken(firstBlockDate.pos)) {
             // 不是我们自己发 STOP 收尾的（服务端自己挖掉的）：延迟从这一刻重新算
@@ -571,8 +583,8 @@ public class GhostMine extends Module {
         tickTarget(secondBlockDate);
 
         // 4. 超时未确认破坏 → 放弃
-        if (firstBlockDate != null && giveUp(firstBlockDate)) firstBlockDate = null;
-        if (secondBlockDate != null && giveUp(secondBlockDate)) secondBlockDate = null;
+        if (firstBlockDate != null && giveUp(firstBlockDate, pauseFinishing)) firstBlockDate = null;
+        if (secondBlockDate != null && giveUp(secondBlockDate, pauseFinishing)) secondBlockDate = null;
     }
 
     // ==================== 挖掘目标处理 ====================
@@ -594,8 +606,16 @@ public class GhostMine extends Module {
 
         // 进度到「挖掘方块阈值」就收尾：服务端 70% 才会当场破坏，阈值调 70 最快
         if (block.fraction() * 100.0 >= stopPercent()) {
+            if (shouldPauseForEating()) return;
             finishTarget(block);
         }
+    }
+
+    /** 「进食时暂停」当前是否生效 */
+    public boolean shouldPauseForEating() {
+        if (!pauseWhileEating.get() || mc.player == null || !mc.player.isUsingItem()) return false;
+        if (mc.player.getUseItemRemainingTicks() <= 0) return false;
+        return mc.player.getUseItem().getUseAnimation() == ItemUseAnimation.EAT;
     }
 
     /** 实际开始收尾的进度百分比：就是「切换工具阈值」设置的数 */
@@ -805,9 +825,15 @@ public class GhostMine extends Module {
         mc.player.swing(InteractionHand.MAIN_HAND);
     }
 
-    /** 进度走完后等待服务端确认破坏，等待超过「放弃等待」则放弃该方块 */
-    private boolean giveUp(BlockDate block) {
+    /**
+     * 进度走完后等待服务端确认破坏，等待超过「放弃等待」则放弃该方块
+     * <p>
+     * 进食暂停期间不算：那段时间工具没切过去（切了会打断进食），方块掉不掉不由我们说了算，
+     * 算进去的话吃久一点就会把一个本来还能挖掉的方块丢掉
+     */
+    private boolean giveUp(BlockDate block, boolean pauseFinishing) {
         if (!block.done) return false;
+        if (pauseFinishing) return false;
 
         block.timeoutTicks++;
         if (block.timeoutTicks < maxBreaks.get()) return false;
@@ -986,14 +1012,18 @@ public class GhostMine extends Module {
      * <p>
      * 服务端还记着这个位置的时候不用拿工具等：直接补一个结束包，服务端按「手上的工具」重算进度、
      * ≥ 70% 当场就破坏了（{@link #finishTarget}）
+     * <p>
+     * 这里不看「延迟破坏」那个预测标记：它是开始包那一刻按手上物品估的，中途换了手（切工具、进食、
+     * 别的模块动槽位）或者名额归属和服务端不一样时都会估错，按标记决定拿不拿工具的话偶尔会漏掉一块
+     * （表现就是那块方块一直不切工具、只能手动切一下才掉，重开模块才恢复）
      */
     private boolean needsHelp(BlockDate block) {
         return block != null
             && block.isMining
-            && block.delayedDestroy
             && !block.stopSent
             && !block.serverTracked
             && block.done
+            && !block.instaBreak
             && !isBroken(block.pos);
     }
 
@@ -1143,8 +1173,13 @@ public class GhostMine extends Module {
         block.elapsedTicks = -1;
 
         // 原版能秒破的方块：切工具 → 一个开始包服务端当场就破坏了 → 切回，不记冷却
-        if (isInstaBreak(block.pos, state)) {
-            mineInstaBlock(block);
+        // 进食时不为秒破切工具，硬度 0 仍可直接发 START；其它方块走普通开始，吃完再收尾
+        if (BreakData.hardness(state, block.pos) == 0.0) {
+            mineInstaBlock(block, false);
+            return;
+        }
+        if (!shouldPauseForEating() && isInstaBreak(block.pos, state)) {
+            mineInstaBlock(block, true);
             return;
         }
 
@@ -1154,11 +1189,6 @@ public class GhostMine extends Module {
 
         if (firstBlockDate != null && firstBlockDate != block) firstBlockDate.serverTracked = false;
         if (secondBlockDate != null && secondBlockDate != block) secondBlockDate.serverTracked = false;
-
-        // 延迟破坏名额只有一个、先占者得：已经被别的方块占着的时候，这个方块的 STOP 会被服务端直接忽略
-        block.delayedDestroy = doubleBreak.get()
-            && !otherDelayedDestroy(block)
-            && initialStopProgress(state, block.pos) < INSTANT_BREAK_PERCENT / 100.0;
 
         // 开始挖掘时也占一次冷却，不然挖掘当中点到的方块会立刻插进来
         // （冷却模式算出 0 的也留一个排队窗口，免得单挖模式被刚点到的方块顶掉）
@@ -1176,9 +1206,9 @@ public class GhostMine extends Module {
      * 连着挖一排火把/草不会被上一块拖住。也不安排「双挖开局结束包」、不等切换工具阈值：多发一个结束包
      * 反而会被反作弊（Grim 的 FastBreak）按「挖穿这一格该用多久」算出提前收尾，往缓冲里加料。
      */
-    private void mineInstaBlock(BlockDate block) {
+    private void mineInstaBlock(BlockDate block, boolean switchTool) {
         // 服务端是按「收到开始包那一刻手上的工具」算单 tick 进度的，所以先把最合适的工具换到手上
-        switchToBestTool(block);
+        if (switchTool) switchToBestTool(block);
 
         swingForBreak();
 
@@ -1198,28 +1228,13 @@ public class GhostMine extends Module {
         if (secondBlockDate != null && secondBlockDate != block) secondBlockDate.serverTracked = false;
 
         // 不记冷却；「立即切回」模式下现在就把工具换回去
-        if (switchBackMode.get() == SwitchBackMode.IMMEDIATE) switchBackNow();
+        if (switchTool && switchBackMode.get() == SwitchBackMode.IMMEDIATE) switchBackNow();
     }
 
     /** 原版能秒破的方块：拿着最合适的工具时单 tick 进度就 ≥ 1（硬度 0 的方块单 tick 进度本来就是满的） */
     private boolean isInstaBreak(BlockPos pos, BlockState state) {
         if (BreakData.hardness(state, pos) == 0.0) return true;
         return BreakData.perTick(state, pos, bestToolStack(state), serverOnGround()) >= 1.0;
-    }
-
-    /**
-     * 双挖时紧跟在 START 后面那个 STOP 的进度：服务端用「收到 STOP 那一刻手上的工具」算，
-     * 也就是「这个方块单 tick 的进度 × 1」
-     */
-    private double initialStopProgress(BlockState state, BlockPos pos) {
-        // 服务端算的是「单 tick 进度 × 1」，用的是收到这个结束包那一刻手上的工具
-        return BreakData.perTick(state, pos, mc.player.getMainHandItem(), serverOnGround());
-    }
-
-    /** 别的目标是不是已经占着服务端的「延迟破坏」名额 */
-    private boolean otherDelayedDestroy(BlockDate self) {
-        return (firstBlockDate != null && firstBlockDate != self && firstBlockDate.delayedDestroy)
-            || (secondBlockDate != null && secondBlockDate != self && secondBlockDate.delayedDestroy);
     }
 
     /**
@@ -1626,6 +1641,18 @@ public class GhostMine extends Module {
         return new BlockDate(pos, direction, rebreak);
     }
 
+    // ==================== 重挖框查询（给别的模块用，例如挖脚） ====================
+
+    /** 当前重挖框的位置（没有就返回 null）；重挖框同时只存在一个 */
+    public BlockPos getRebreakPos() {
+        return rebreakBlockDate == null ? null : rebreakBlockDate.pos;
+    }
+
+    /** 这个位置是不是当前的重挖框 */
+    public boolean hasRebreakFrame(BlockPos pos) {
+        return rebreakBlockDate != null && rebreakBlockDate.pos.equals(pos);
+    }
+
     // ==================== 内部类 ====================
 
     public class BlockDate {
@@ -1644,8 +1671,6 @@ public class GhostMine extends Module {
         public boolean isMining = false;
         /** 服务端当前记着的挖掘方块（最后发过 START 的那一个）；另一个方块只占着服务端的「延迟破坏」名额 */
         public boolean serverTracked = false;
-        /** 占着服务端「延迟破坏」名额（START 后的那个 STOP 进度 < 70%）：服务端要拿「手上的工具」自己把它补完 */
-        public boolean delayedDestroy = false;
         /** 已经发过收尾的 STOP（原版挖掘那条流程走完了，不再需要拿工具等） */
         public boolean stopSent = false;
         /** 是否已经达到切换工具阈值（切过工具、发过 STOP） */

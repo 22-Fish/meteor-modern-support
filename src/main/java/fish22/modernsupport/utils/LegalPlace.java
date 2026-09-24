@@ -573,6 +573,31 @@ public final class LegalPlace {
     }
 
     /**
+     * 这个角度能不能点一个「马上会被放下的方块」的面。
+     *
+     * <p>给「支持块」用：支撑块和目标是同一 tick 放下的两块，放目标那一下在客户端本地世界里
+     * 支撑块还不存在，走不了原版准星那条射线，所以判定退一档 —— 眼睛在要点的这一面外侧、
+     * 射线打进它的碰撞箱就算数（和 {@link #compute} 里等级 2 一个标准）。服务器那边两块是
+     * 按顺序放下的，轮到目标时支撑块已经在了，这条射线自然成立。
+     *
+     * @param clicked     支撑块的位置（此刻还是空气）
+     * @param clickedFace 要点的面（支撑块朝目标的那一面）
+     */
+    public static boolean canHitFuture(BlockPos clicked, Direction clickedFace, float yaw, float pitch, double reach) {
+        if (mc.player == null || clicked == null || clickedFace == null) return false;
+
+        Vec3 eye = eyePosition(true, 0.0);
+        AABB box = new AABB(clicked);
+        if (box.distanceToSqr(eye) > reach * reach) return false;
+
+        if (eyeBox(eye, EPSILON).intersects(box)) return true;
+        if (!eyeOnVisibleSide(eye, box, clickedFace)) return false;
+
+        Vec3 end = eye.add(mc.player.calculateViewVector(pitch, yaw).scale(reach));
+        return rayHitsBox(eye, end, box);
+    }
+
+    /**
      * 目标位置所有「能点的面」：邻居不是空气、不是可替换方块（草/雪层这些）、不含流体；
      * 可交互方块（箱子/门/按钮这些点了会开界面）默认不算，但潜行时算
      * （原版潜行右键它们不会开界面，会照常放方块）。
@@ -601,6 +626,21 @@ public final class LegalPlace {
     /** 原版的方块交互距离（生存 4.5、创造 5.0）；玩家还没加载时按 4.5 算 */
     public static double defaultReach() {
         return mc.player == null ? 4.5 : mc.player.blockInteractionRange();
+    }
+
+    /**
+     * 把偏航量化到「相对服务器当前角度差整数格鼠标灵敏度」。
+     *
+     * <p>给调用方自己算角度时对齐 {@link #compute} 那套用（Grim 的旋转检查要的是「差的鼠标格数
+     * 是整数」）。量化基准是 {@link LegalRotation#getServerYaw()}，和 {@link #compute} 一致。
+     */
+    public static float snapYaw(float yaw) {
+        return snapAngle(LegalRotation.getServerYaw(), yaw, sensitivityStep(), true);
+    }
+
+    /** 把俯仰量化到「相对服务器当前角度差整数格鼠标灵敏度」，语义同 {@link #snapYaw} */
+    public static float snapPitch(float pitch) {
+        return snapAngle(LegalRotation.getServerPitch(), pitch, sensitivityStep(), false);
     }
 
     /**
@@ -636,7 +676,7 @@ public final class LegalPlace {
      * 这些点了会开界面或被使用的）默认也不行，但<b>潜行时允许</b>：原版潜行右键点它们不会
      * 开界面，会照常把方块放上去（服务器按「潜行 + 手上有方块」走放置那一支）。
      */
-    private static boolean isValidSupport(BlockPos pos) {
+    public static boolean isValidSupport(BlockPos pos) {
         if (mc.level == null || !mc.level.isLoaded(pos)) return false;
 
         BlockState state = mc.level.getBlockState(pos);
@@ -748,8 +788,11 @@ public final class LegalPlace {
      * <p>原版这一 tick 的位移就是「起始速度 + moveRelative 的输入加速度」（重力是移动之后才加的，
      * 不算在里面），所以这两项加起来就是移动包里那个位置。走路时输入那项差不多 0.1 格 —— 
      * 搭路时正好是「眼睛刚越过脚下方块侧面」这种边界情况下差的那一点点。
+     *
+     * <p>公开给「自己算射线」的调用方用（例如包围的「一个角度放两块」，要拿射线去求交点）：
+     * 和 {@link #compute} 内部用的完全是同一个起点。
      */
-    private static Vec3 predictedEye() {
+    public static Vec3 predictedEye() {
         return eyePosition(true, 0.0);
     }
 
@@ -840,12 +883,12 @@ public final class LegalPlace {
     }
 
     /** 眼睛 → 点的偏航 */
-    private static double yawTo(Vec3 eye, Vec3 point) {
+    public static double yawTo(Vec3 eye, Vec3 point) {
         return Math.toDegrees(Math.atan2(point.z - eye.z, point.x - eye.x)) - 90.0;
     }
 
     /** 眼睛 → 点的俯仰（正数向下看，和 Player#getXRot 同向） */
-    private static double pitchTo(Vec3 eye, Vec3 point) {
+    public static double pitchTo(Vec3 eye, Vec3 point) {
         double dx = point.x - eye.x;
         double dy = point.y - eye.y;
         double dz = point.z - eye.z;

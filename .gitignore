@@ -32,6 +32,14 @@ bin/
 
 run/
 
+# 运行日志 (游戏日志里有服务器地址/聊天内容, 不进仓库)
+
+logs/
+
+# 反编译出来参考用的散装 class (不是本项目的编译产物)
+
+meteordevelopment/
+
 # agents
 
 agents.md

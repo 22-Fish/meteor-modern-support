@@ -11,6 +11,7 @@ import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.phys.BlockHitResult;
 
+import java.util.List;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
 
@@ -136,6 +137,38 @@ public class BackpackUse {
     }
 
     /**
+     * 带角度的使用（一键药水 / 一键卡墙）：交换流程和 {@link #use} 完全一样，
+     * 只是「使用」那一下把发给服务端的视角换成 {@code yaw}/{@code pitch}。
+     * 原版使用包会把玩家视角一起发出去，服务端按包里这个角度算投掷方向，所以客户端不用真的转头。
+     */
+    public static boolean useAngled(Predicate<ItemStack> target, Mode mode, TargetSlot targetSlot, float yaw, float pitch) {
+        return operate(target, mode, targetSlot, 1, hand -> useAngled(hand, yaw, pitch));
+    }
+
+    /**
+     * 一次带角度的使用：临时把视角换成投掷角度 → 原版使用（发包 + 本地预测，物品数量和冷却都跟着走）
+     * → 视角换回来。
+     *
+     * <p>使用包自带角度（投掷方向就取包里这个），所以本地视角只是临时改一下让它带上目标角度，
+     * 用完立刻换回来就行，不用另外补旋转包。
+     */
+    public static void useAngled(InteractionHand hand, float yaw, float pitch) {
+        if (mc.player == null) return;
+
+        float oldYaw = mc.player.getYRot();
+        float oldPitch = mc.player.getXRot();
+
+        try {
+            mc.player.setYRot(yaw);
+            mc.player.setXRot(pitch);
+            mc.gameMode.useItem(mc.player, hand);
+        } finally {
+            mc.player.setYRot(oldYaw);
+            mc.player.setXRot(oldPitch);
+        }
+    }
+
+    /**
      * 交换放置：逻辑同 {@link #use}，只是把"使用"换成"放置"（右键方块）。
      *
      * @param hitResult 放置目标（点击位置/面/方块），由调用方计算
@@ -158,6 +191,28 @@ public class BackpackUse {
         });
     }
 
+    /**
+     * 一次换装放好几块（同一个角度、同一 tick）：物品只「移动一次」—— 换到目标槽位后，
+     * 按顺序把 {@code hits} 里的放置包一次性发完，最后再换回一次。
+     *
+     * <p>给「一个角度同 tick 放两块」用（包围的双重高度）：前后两下的命中点是同一条射线上的两个点，
+     * 后一下点的是「前一下刚放下的方块」，所以顺序不能反。每块都单独换进换出一次会多发一倍背包点击包，
+     * 也没必要（见 {@link #use(Predicate, Mode, TargetSlot, int)} 里说的那点）。
+     *
+     * @param hits 放置目标（点击位置 / 面 / 方块），按顺序发
+     */
+    public static boolean place(Predicate<ItemStack> target, List<BlockHitResult> hits, Mode mode, TargetSlot targetSlot,
+                                boolean swing) {
+        if (hits.isEmpty()) return false;
+
+        return operate(target, mode, targetSlot, 1, hand -> {
+            for (BlockHitResult hit : hits) {
+                mc.gameMode.useItemOn(mc.player, hand, hit);
+                if (swing) mc.player.swing(hand);
+            }
+        });
+    }
+
     /** 统一的交换操作：快捷栏静默方案，或背包交换（同一 tick 内发完，操作连做 times 次） */
     private static boolean operate(Predicate<ItemStack> target, Mode mode, TargetSlot targetSlot,
                                    int times, Consumer<InteractionHand> action) {
@@ -166,27 +221,10 @@ public class BackpackUse {
         int count = Math.max(1, times);
 
         // 快捷栏（副手/主手/热栏）：静默切换操作后换回，优先于背包交换
-        FindItemResult result = InvUtils.findInHotbar(target);
-        if (result.found()) {
-            if (result.isOffhand()) {
-                act(action, InteractionHand.OFF_HAND, count);
-                return true;
-            }
-            if (result.isMainHand()) {
-                act(action, InteractionHand.MAIN_HAND, count);
-                return true;
-            }
-            InvUtils.swap(result.slot(), true);
-            try {
-                act(action, InteractionHand.MAIN_HAND, count);
-            } finally {
-                InvUtils.swapBack();
-            }
-            return true;
-        }
+        if (fromHotbar(target, hand -> act(action, hand, count))) return true;
 
         // 背包主区找目标物品
-        result = InvUtils.find(target);
+        FindItemResult result = InvUtils.find(target);
         if (!result.found()) return false;
 
         int invSlot = result.slot();
@@ -214,6 +252,34 @@ public class BackpackUse {
     /** 连做 count 次操作（同一 tick 内一次性发完所有使用/放置包） */
     private static void act(Consumer<InteractionHand> action, InteractionHand hand, int count) {
         for (int i = 0; i < count; i++) action.accept(hand);
+    }
+
+    /**
+     * 只用快捷栏操作一次：副手优先，其次当前手持格，再其次热栏格（静默切换后换回）。
+     * 背包里有目标物品也不换（调用方自己决定要不要再走背包交换）。
+     *
+     * @return 快捷栏里有没有目标物品；没有时什么都没做
+     */
+    public static boolean fromHotbar(Predicate<ItemStack> target, Consumer<InteractionHand> action) {
+        FindItemResult result = InvUtils.findInHotbar(target);
+        if (!result.found()) return false;
+
+        if (result.isOffhand()) {
+            action.accept(InteractionHand.OFF_HAND);
+            return true;
+        }
+        if (result.isMainHand()) {
+            action.accept(InteractionHand.MAIN_HAND);
+            return true;
+        }
+
+        InvUtils.swap(result.slot(), true);
+        try {
+            action.accept(InteractionHand.MAIN_HAND);
+        } finally {
+            InvUtils.swapBack();
+        }
+        return true;
     }
 
     /**

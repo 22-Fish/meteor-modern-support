@@ -514,8 +514,13 @@ public class LegalRotation {
     /**
      * 移动包发出前：换成「本 tick 移动运算用过的角度」，让服务器收到的朝向
      * 和客户端算出来的移动方向一致（这一份旋转就跟着本 tick 的移动包发出去）。
+     *
+     * <p>优先级给 {@link EventPriority#LOWEST}（最后跑）：Meteor 自己的 {@code Rotations}
+     * 还有「保持上一次朝向」那套，它会在同一个事件里把旧角度写回玩家身上，跑早了我们这份
+     * 就被它盖掉，服务器收到的是旧朝向、交互包却按新角度发的，会被服务端当成"没看那儿"
+     * 直接拒掉。我们没在旋转时（{@link #isRotating()} 为假）这里什么都不做，不影响它。
      */
-    @EventHandler
+    @EventHandler(priority = EventPriority.LOWEST)
     private static void onSendMovementPacketsPre(SendMovementPacketsEvent.Pre event) {
         if (mc.player == null || !isRotating()) return;
 

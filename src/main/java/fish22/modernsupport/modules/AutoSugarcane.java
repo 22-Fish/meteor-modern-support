@@ -123,7 +123,7 @@ public class AutoSugarcane extends Module {
         .add(
             new IntSetting.Builder()
                 .name("每tick破坏数量")
-                .description("延迟为 0 时，一个 tick 内最多破坏多少个方块（甘蔗/竹子是秒破方块，可以一次收很多）")
+                .description("延迟为 0 时，一个 tick 内最多破坏多少个方块")
                 .defaultValue(10)
                 .range(1, 100)
                 .sliderRange(1, 100)
@@ -135,7 +135,7 @@ public class AutoSugarcane extends Module {
         .add(
             new BoolSetting.Builder()
                 .name("旋转")
-                .description("挖掘时把视角转向目标方块（发包旋转）")
+                .description("挖掘时把视角转向目标方块")
                 .defaultValue(true)
                 .build()
         );
