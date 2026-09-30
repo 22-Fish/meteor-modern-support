@@ -6,6 +6,7 @@ import fish22.modernsupport.utils.BackpackUse;
 import fish22.modernsupport.utils.LegalCrystal;
 import fish22.modernsupport.utils.LegalPlace;
 import fish22.modernsupport.utils.LegalRotation;
+import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.settings.BoolSetting;
 import meteordevelopment.meteorclient.settings.EnumSetting;
 import meteordevelopment.meteorclient.settings.IntSetting;
@@ -218,6 +219,10 @@ public abstract class MixinCrystalAura {
     @Unique
     private boolean legitAimRequired;
 
+    /** 这一下本来要走合法转头，但被更高优先级的合法转头顶掉了（这一下就别放了，朝向和命中点对不上） */
+    @Unique
+    private boolean legitRotationRefused;
+
     /** 正在被破坏的那颗水晶（破坏那个调用点算合法角度要用它，见 redirectBreakRotate） */
     @Unique
     private Entity breakTarget;
@@ -395,6 +400,26 @@ public abstract class MixinCrystalAura {
         supportBestIsSupport = false;
         supportCandidateIsSupport = false;
         supportIsSupportAtomic = null;
+        legitRotationRefused = false;
+    }
+
+    /**
+     * 模块开着时每 tick 刷一次「合法转头开着就别让 Meteor 保持上一次朝向」
+     *
+     * <p>Meteor 自带的 {@code rotation-hold}（默认 4 tick）会把上一次经过官方 {@code Rotations}
+     * 的角度继续塞进后面几 tick 的移动包，客户端那几 tick 是按视角走的 → 服务端移动预测分叉 → 拉回。
+     * 水晶光环自己的旋转已经全走合法转头了，这里把别的模块留下的保持也一起关掉
+     *（本体是 {@link MixinRotations} 里那个「保持时长当 0」的拦截）
+     */
+    @Inject(method = "onPreTick", at = @At("HEAD"))
+    private void onPreTickHoldSuppress(TickEvent.Pre event, CallbackInfo ci) {
+        LegalCrystal.suppressRotationHold = legitRotationOn();
+    }
+
+    /** 模块关掉就恢复 Meteor 原来的保持行为 */
+    @Inject(method = "onDeactivate", at = @At("HEAD"))
+    private void onDeactivateHoldSuppress(CallbackInfo ci) {
+        LegalCrystal.suppressRotationHold = false;
     }
 
     /** 背包里有水晶时，官方那条「快捷栏没有水晶直接退」放行 */
@@ -795,6 +820,13 @@ public abstract class MixinCrystalAura {
         // 仅合法模式下算不出合法角度 → 这一下不放（宁可少放一下，也不发一个对不上的包）
         if (isOnlyLegit() && legitAimRequired && !legitAimFound) {
             ci.cancel();
+            return;
+        }
+
+        // 本来要走合法转头却被更高优先级顶掉 → 这一下也不放
+        // （移动包带的是别人的朝向，交互包按这一下的命中点发出去就是「没看着方块」）
+        if (legitRotationRefused) {
+            ci.cancel();
         }
     }
 
@@ -941,8 +973,12 @@ public abstract class MixinCrystalAura {
      * 破坏跟杀戮光环一样：本 tick 先算合法角度（瞄水晶碰撞箱上离眼睛最近的点），
      * 再把它交给合法转头，回调（攻击包）自然排在移动包之后。
      *
-     * <p>直接替换官方的 {@code Rotations.rotate} 调用点，不经过 Meteor 那套静默旋转
-     *（全局拦截那条留作兜底，见 {@link MixinRotations}）。
+     * <p>直接替换官方的 {@code Rotations.rotate} 调用点。合法转头开着时这里<b>绝不</b>
+     * 回退官方那套：官方会把这次角度记成「上一次旋转」，随后 {@code rotation-hold}（默认 4 tick）
+     * 继续把它塞进移动包，那几 tick 客户端是按视角走的 → 服务端移动预测分叉 → 拉回（卡脚）。
+     *
+     * <p>被更高优先级的合法转头顶掉时，这一下不转，攻击包照旧排在移动包之后发出去
+     *（不发的话官方外层已经把这一颗当成打过了，会把水晶记进 removed）
      */
     @Redirect(
         method = "doBreak(Lnet/minecraft/world/entity/Entity;)V",
@@ -951,14 +987,30 @@ public abstract class MixinCrystalAura {
             target = "Lmeteordevelopment/meteorclient/utils/player/Rotations;rotate(DDILjava/lang/Runnable;)V"
         )
     )
-    private void redirectBreakRotate(double yaw, double pitch, int priority, Runnable callback) {
-        if (prepareBreakRotation() && useLegitRotation(callback, "破坏")) return;
-        Rotations.rotate(yaw, pitch, priority, callback);
+    private void redirectBreakRotateCall(double yaw, double pitch, int priority, Runnable callback) {
+        if (!legitRotationOn()) {
+            Rotations.rotate(yaw, pitch, priority, callback);
+            return;
+        }
+
+        if (!prepareBreakRotation()) {
+            // 拿不到目标碰撞箱：用官方角度，这一下也走合法转头
+            LegalCrystal.setPending(yaw, pitch, legitMode.get(), legitPriority.get());
+        }
+
+        if (useLegitRotation(callback, "破坏")) return;
+
+        LegalRotation.runAfterSend(callback);
+        LegalCrystal.log("破坏 转头: 被更高优先级顶掉，这一下不转");
     }
 
     /**
      * 放置那条一样：官方挑完位置、算好角度之后调 {@code Rotations.rotate}，
      * 这里换成合法转头（角度是 {@link #onGetPlaceInfo} 提前算好的那份）。
+     *
+     * <p>合法转头开着时这里一律不落到官方那条上：算到合法角度就用合法角度，
+     * 算不到（或这条路径的旋转开关关着，官方那边本来也照样在转）就用官方角度，
+     * 两种都走合法转头；只有「仅合法」模式算不出角度、或者被更高优先级顶掉时才不放。
      *
      * <p>{@code require = 0}：这是编译生成的 lambda 方法名，万一哪天换了名字，
      * 这一条安静地不生效，还有 {@link MixinRotations} 那个稳定的全局兜底。
@@ -972,8 +1024,56 @@ public abstract class MixinCrystalAura {
         require = 0
     )
     private void redirectPlaceRotate(double yaw, double pitch, int priority, Runnable callback) {
+        if (!legitRotationOn()) {
+            Rotations.rotate(yaw, pitch, priority, callback);
+            return;
+        }
+
+        if (!legitAimFound) {
+            if (isOnlyLegit() && legitAimRequired) {
+                // 仅合法：算不出角度这一下本来就不放，别白转
+                legitRotationRefused = true;
+                LegalCrystal.log("放置: 仅合法且算不出角度，这一下不放");
+                return;
+            }
+
+            // 算不出合法角度：用官方角度（和官方命中点是同一份）走合法转头
+            LegalCrystal.setPending(yaw, pitch, legitMode.get(), legitPriority.get());
+        }
+
         if (useLegitRotation(callback, "放置")) return;
-        Rotations.rotate(yaw, pitch, priority, callback);
+
+        // 被更高优先级的合法转头顶掉：这一下不放（朝向和命中点就对不上了）
+        legitRotationRefused = true;
+        LegalCrystal.log("放置 转头: 被更高优先级顶掉，这一下不放");
+    }
+
+    /**
+     * 偏航步骤（yaw-steps）那条 -100 的旋转也没走官方：那是一个「这一 tick 只转一点点」的
+     * 中间角度，官方发出去同样会被 {@code Rotations} 保持几 tick，客户端那几 tick 是按视角走的
+     * → 分叉 → 卡脚。合法转头开着时把它交给 {@link LegalRotation}（移动方向、输入包、发包朝向同帧）
+     */
+    @Redirect(
+        method = "doYawSteps(DD)Z",
+        at = @At(
+            value = "INVOKE",
+            target = "Lmeteordevelopment/meteorclient/utils/player/Rotations;rotate(DDILjava/lang/Runnable;)V"
+        )
+    )
+    private void redirectYawStepRotate(double yaw, double pitch, int priority, Runnable callback) {
+        if (!legitRotationOn()) {
+            Rotations.rotate(yaw, pitch, priority, callback);
+            return;
+        }
+
+        if (LegalRotation.rotate(yaw, pitch, legitMode.get(), legitPriority.get())) {
+            LegalCrystal.log("偏航步骤 转头: 走合法转头API yaw=%.1f pitch=%.1f 模式=%s",
+                yaw, pitch, legitMode.get());
+            return;
+        }
+
+        // 被更高优先级顶掉就不转（yaw-steps 返回 false，这一 tick 本来也不动手）
+        LegalCrystal.log("偏航步骤 转头: 被更高优先级顶掉，这一 tick 不转");
     }
 
     /** 破坏用的合法角度：瞄碰撞箱上离眼睛最近的点 */
@@ -993,7 +1093,7 @@ public abstract class MixinCrystalAura {
     /**
      * 把排好的合法角度交给 {@link LegalRotation}（朝向跟着移动包走、回调排在移动包之后）。
      *
-     * @return true = 已经走合法转头，调用方不要再调官方那句；false = 没角度或被顶掉，回退官方
+     * @return true = 走了合法转头，调用方不要再动；false = 没角度或被更高优先级顶掉
      */
     @Unique
     private boolean useLegitRotation(Runnable callback, String what) {
@@ -1007,7 +1107,7 @@ public abstract class MixinCrystalAura {
             return true;
         }
 
-        LegalCrystal.log("%s 转头: 被更高优先级顶掉，回退官方旋转", what);
+        LegalCrystal.log("%s 转头: 被更高优先级顶掉", what);
         return false;
     }
 

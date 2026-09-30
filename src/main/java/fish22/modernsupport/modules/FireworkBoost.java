@@ -28,6 +28,11 @@ import static meteordevelopment.meteorclient.MeteorClient.mc;
  * 只发包转头的模块也不会受影响。
  *
  * <p>生效条件：自己身上有活跃烟花 + 正在滑翔（甲飞看「服务器认滑翔」的窗口）。
+ *
+ * <p><b>重缩放算法 V3</b>（史莱姆的 {@code applyAxisLimit3}）：盒子照抄 Grim 的烟花盒
+ * （当前朝向 + 上一 tick 朝向两个 look 相加，逐轴 ±范围封顶），然后把速度逐轴顶到盒子边界 ——
+ * 垂直与水平能同时吃满，所以爬升极快。抬头比最佳爬升角更陡时还会把「服务器朝向」的俯仰
+ * 压回最佳角（视角不动），运算都在 {@link ElytraFlySupport} 里。
  */
 public class FireworkBoost extends Module {
 
@@ -66,11 +71,47 @@ public class FireworkBoost extends Module {
     private final Setting<ElytraFlySupport.FireworkRescaleAlgorithm> fireworkRescaleAlgorithm =
         sgGeneral.add(new EnumSetting.Builder<ElytraFlySupport.FireworkRescaleAlgorithm>()
             .name("重缩放算法")
-            .description("V1：按当前/上一视角和重力限制。V2：再叠加滑翔模拟与前一 tick 真实移动速度")
+            .description("V1：按当前/上一视角和重力限制。V2：再叠加滑翔模拟与前一 tick 真实移动速度。"
+                + "V3：逐轴顶满 Grim 的烟花盒子（爬升最快）")
             .defaultValue(ElytraFlySupport.FireworkRescaleAlgorithm.V1)
             .visible(fireworkRescale::get)
             .build()
         );
+
+    /** 史莱姆的 auto-rescale-firework-anti-lag-threshold（V3 专用） */
+    private final Setting<Double> fireworkRescaleV3Margin = sgGeneral.add(new DoubleSetting.Builder()
+        .name("V3盒子余量")
+        .description("V3 专用：盒子两侧各收缩的余量（史莱姆的防延迟阈值），越大越保守")
+        .defaultValue(0.002)
+        .range(0.0, 1.0)
+        .noSlider()
+        .visible(() -> fireworkRescale.get()
+            && fireworkRescaleAlgorithm.get() == ElytraFlySupport.FireworkRescaleAlgorithm.V3)
+        .build()
+    );
+
+    /** 史莱姆的 auto-rescale-axis-zero-point-three（V3 专用） */
+    private final Setting<Double> fireworkRescaleV3ExtraY = sgGeneral.add(new DoubleSetting.Builder()
+        .name("V3垂直额外补偿")
+        .description("V3 专用：近乎垂直抬升时给 Y 轴额外放宽的量（史莱姆的 0.03）")
+        .defaultValue(0.03)
+        .range(0.0, 1.0)
+        .noSlider()
+        .visible(() -> fireworkRescale.get()
+            && fireworkRescaleAlgorithm.get() == ElytraFlySupport.FireworkRescaleAlgorithm.V3)
+        .build()
+    );
+
+    /** 史莱姆的 auto-rescale-best-climbing-speed（V3 专用） */
+    private final Setting<Boolean> fireworkRescaleV3BestAngle = sgGeneral.add(new BoolSetting.Builder()
+        .name("V3爬升角校正")
+        .description("V3 专用：抬头比最佳爬升角还陡时把服务器朝向的俯仰压回最佳角（视角不动），"
+            + "垂直照样吃满、水平也能吃满")
+        .defaultValue(true)
+        .visible(() -> fireworkRescale.get()
+            && fireworkRescaleAlgorithm.get() == ElytraFlySupport.FireworkRescaleAlgorithm.V3)
+        .build()
+    );
 
     /** 史莱姆的 auto-rescale-axis-zero-point-three（Y 轴分支） */
     private final Setting<Double> fireworkRescaleExtraY = sgGeneral.add(new DoubleSetting.Builder()
@@ -120,6 +161,9 @@ public class FireworkBoost extends Module {
         ElytraFlySupport.fireworkRescaleExtraY = fireworkRescaleExtraY;
         ElytraFlySupport.fireworkRescaleExtraXZ = fireworkRescaleExtraXZ;
         ElytraFlySupport.fireworkBoostUseRescale = fireworkBoostUseRescale;
+        ElytraFlySupport.fireworkRescaleV3Margin = fireworkRescaleV3Margin;
+        ElytraFlySupport.fireworkRescaleV3ExtraY = fireworkRescaleV3ExtraY;
+        ElytraFlySupport.fireworkRescaleV3BestAngle = fireworkRescaleV3BestAngle;
     }
 
     @Override

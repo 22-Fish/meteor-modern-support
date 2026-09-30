@@ -30,8 +30,10 @@ import net.minecraft.nbt.StringTag;
 import net.minecraft.nbt.Tag;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -43,6 +45,8 @@ import java.util.Set;
  *   <li>自定义页面最多 {@link #MAX_PAGES} 个，英文名，不能重名</li>
  *   <li>每个页面勾选的是<b>分类（分组）</b>，勾选的分类下所有模块在该页展示；
  *       一个分类可以同时勾选到多个页面，删除页面只影响该页自己的名单</li>
+ *   <li>板块里单个模块的显隐按"页 + 分类"存（右键该板块标题栏设置），
+ *       同一分类出现在多个页面时各页面互不影响；板块模块全隐藏也照样保留，方便恢复</li>
  *   <li>启动时检查：没被记录过的分类（新插件的分类）自动勾进主界面并登记；
  *       已登记过的分类即使没有任何页面展示也不再自动处理</li>
  * </ul>
@@ -52,6 +56,8 @@ public class ModulePages extends System<ModulePages> {
     public static final int MAX_PAGES = 5;
     /** 主界面默认名（保持原 Modules 标签名，不改名） */
     public static final String DEFAULT_MAIN_NAME = "Modules";
+    /** 分类窗口 id 前缀：modulepage_<页索引>_<分类名>（MixinModulesScreen 生成，板块显隐靠它认分类） */
+    public static final String CATEGORY_WINDOW_ID_PREFIX = "modulepage_";
 
     private static ModulePages INSTANCE;
 
@@ -63,6 +69,8 @@ public class ModulePages extends System<ModulePages> {
     public static class Page {
         public String name;
         public final Set<String> categories = new HashSet<>();
+        /** 分类名 -> 该分类里被隐藏的模块内部名（板块显隐界面设置，只对本页的这个板块生效） */
+        public final Map<String, Set<String>> hiddenModules = new HashMap<>();
     }
 
     private final List<Page> pages = new ArrayList<>();
@@ -122,7 +130,30 @@ public class ModulePages extends System<ModulePages> {
     /** 当前页是否展示该模块（该模块的分类在当前页勾选，叠加原 hiddenModules 隐藏设置） */
     public boolean shouldShow(Module module) {
         if (Config.get().hiddenModules.get().contains(module)) return false;
-        return pages.get(current).categories.contains(module.category.name);
+        if (!isCategorySelected(module.category.name)) return false;
+        return !isModuleHidden(current, module.category.name, module.name);
+    }
+
+    /** 当前页是否勾选了这个分类（板块要不要出现只看它，模块自己的显隐不算） */
+    public boolean isCategorySelected(String categoryName) {
+        return pages.get(current).categories.contains(categoryName);
+    }
+
+    /** 某页某分类里这个模块是否被隐藏（板块显隐界面设置的） */
+    public boolean isModuleHidden(int pageIdx, String categoryName, String moduleName) {
+        Set<String> hidden = pages.get(pageIdx).hiddenModules.get(categoryName);
+        return hidden != null && hidden.contains(moduleName);
+    }
+
+    /** 设置某页某分类里某个模块的显隐，只影响这一页的这个板块 */
+    public void setModuleHidden(int pageIdx, String categoryName, String moduleName, boolean hidden) {
+        Page page = pages.get(pageIdx);
+        Set<String> set = page.hiddenModules.computeIfAbsent(categoryName, key -> new HashSet<>());
+
+        if (hidden ? !set.add(moduleName) : !set.remove(moduleName)) return;
+
+        if (set.isEmpty()) page.hiddenModules.remove(categoryName);
+        save();
     }
 
     // ====== 修改 ======
@@ -212,6 +243,15 @@ public class ModulePages extends System<ModulePages> {
             ListTag categoriesTag = new ListTag();
             for (String name : page.categories) categoriesTag.add(StringTag.valueOf(name));
             pageTag.put("categories", categoriesTag);
+
+            CompoundTag hiddenTag = new CompoundTag();
+            for (Map.Entry<String, Set<String>> entry : page.hiddenModules.entrySet()) {
+                ListTag modulesTag = new ListTag();
+                for (String name : entry.getValue()) modulesTag.add(StringTag.valueOf(name));
+                hiddenTag.put(entry.getKey(), modulesTag);
+            }
+            pageTag.put("hiddenModules", hiddenTag);
+
             pagesTag.add(pageTag);
         }
         tag.put("pages", pagesTag);
@@ -234,6 +274,14 @@ public class ModulePages extends System<ModulePages> {
             Page page = createPage(pageTag.getStringOr("name", ""));
             ListTag categoriesTag = pageTag.getListOrEmpty("categories");
             for (Tag ct : categoriesTag) page.categories.add(ct.asString().orElse(""));
+
+            CompoundTag hiddenTag = pageTag.getCompoundOrEmpty("hiddenModules");
+            for (String categoryName : hiddenTag.keySet()) {
+                Set<String> hidden = new HashSet<>();
+                for (Tag mt : hiddenTag.getListOrEmpty(categoryName)) hidden.add(mt.asString().orElse(""));
+                if (!hidden.isEmpty()) page.hiddenModules.put(categoryName, hidden);
+            }
+
             pages.add(page);
         }
 

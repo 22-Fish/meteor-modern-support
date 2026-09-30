@@ -9,7 +9,9 @@ import fish22.modernsupport.modules.AutoSugarcane;
 import fish22.modernsupport.modules.AutoCity;
 import fish22.modernsupport.modules.ElytraBounce;
 import fish22.modernsupport.modules.ElytraAutoReplace;
+import fish22.modernsupport.modules.ElytraAutoPullup;
 import fish22.modernsupport.modules.ElytraGrimAccelerate;
+import fish22.modernsupport.modules.ElytraFlyPlus;
 import fish22.modernsupport.modules.ElytraPitch40;
 import fish22.modernsupport.modules.EatModify;
 import fish22.modernsupport.modules.EntityList;
@@ -59,6 +61,7 @@ import meteordevelopment.meteorclient.settings.Setting;
 import meteordevelopment.meteorclient.systems.Systems;
 import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.systems.modules.Modules;
+import meteordevelopment.meteorclient.systems.modules.movement.elytrafly.ElytraFly;
 import meteordevelopment.meteorclient.utils.misc.Keybind;
 import meteordevelopment.meteorclient.utils.misc.Names;
 import meteordevelopment.orbit.EventHandler;
@@ -348,7 +351,11 @@ public class ModernSupport extends MeteorAddon {
         Modules.get().add(new ElytraBounce());
         // 鞘翅滑翔加速（从史莱姆 SlimefunHelper 的 ElytraGrimAcc 移植：压原版位置包 + 补假包触发拉回）
         Modules.get().add(new ElytraGrimAccelerate());
-        // 鞘翅飞行增强已通过 MixinElytraFly 注入 Meteor 官方 ElytraFly 模块
+        // 鞘翅飞行（独立模块，官方的那个直接关掉）
+        Modules.get().add(new ElytraFlyPlus());
+        disableMeteorElytraFly();
+        // 鞘翅自动拉升（最佳爬升角 + 自动烟花，配合「烟花加速」用）
+        Modules.get().add(new ElytraAutoPullup());
 
         // 世界模块
         // 发包挖掘（从 meteor-miku 移植）
@@ -405,6 +412,25 @@ public class ModernSupport extends MeteorAddon {
 
         Modules.get().getAll().remove(oldAutoCity);
         Modules.get().getGroup(oldAutoCity.category).remove(oldAutoCity);
+    }
+
+    /**
+     * 把 Meteor 自带的「鞘翅飞行」从模块列表里摘掉
+     *
+     * <p>注意<b>只摘列表、留着实例</b>：meteor 自己的 mixin
+     * （{@code LivingEntityMixin} / {@code EntityMixin}）会直接
+     * {@code Modules.get().get(ElytraFly.class).canPacketEfly()}，实例删了就是空指针刷屏。
+     * 它的行为已经由 {@link fish22.modernsupport.mixin.MixinDisableMeteorElytraFly} 全部关掉，
+     * 设置也不再写盘（serialize = false）。
+     */
+    private static void disableMeteorElytraFly() {
+        Module oldElytraFly = Modules.get().get(ElytraFly.class);
+        if (oldElytraFly == null) return;
+
+        if (oldElytraFly.isActive()) oldElytraFly.toggle();
+        oldElytraFly.serialize = false;
+        oldElytraFly.settings.unregisterColorSettings();
+        Modules.get().getGroup(oldElytraFly.category).remove(oldElytraFly);
     }
 
     /** 进入世界/服务器：配置分块按服务器自动应用 */

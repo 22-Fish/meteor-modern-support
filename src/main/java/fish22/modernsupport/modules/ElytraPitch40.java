@@ -7,7 +7,6 @@ import meteordevelopment.meteorclient.settings.SettingGroup;
 import meteordevelopment.meteorclient.systems.modules.Categories;
 import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.systems.modules.Modules;
-import meteordevelopment.meteorclient.systems.modules.movement.elytrafly.ElytraFly;
 import meteordevelopment.orbit.EventHandler;
 
 import static meteordevelopment.meteorclient.MeteorClient.mc;
@@ -79,7 +78,7 @@ public class ElytraPitch40 extends Module {
     @Override
     public void onActivate() {
         // 两边都在控制滑翔，同时开只会互相打架：开这个就把「鞘翅飞行」关掉
-        Module elytraFly = Modules.get().get(ElytraFly.class);
+        Module elytraFly = Modules.get().get(ElytraFlyPlus.class);
         if (elytraFly != null && elytraFly.isActive()) elytraFly.toggle();
 
         if (mc.player == null) return;

@@ -31,6 +31,7 @@ import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.settings.BlockListSetting;
 import meteordevelopment.meteorclient.settings.BoolSetting;
 import meteordevelopment.meteorclient.settings.ColorSetting;
+import meteordevelopment.meteorclient.settings.DoubleSetting;
 import meteordevelopment.meteorclient.settings.EnumSetting;
 import meteordevelopment.meteorclient.settings.IntSetting;
 import meteordevelopment.meteorclient.settings.Setting;
@@ -67,6 +68,7 @@ import static meteordevelopment.meteorclient.MeteorClient.mc;
 
 public class GhostMine extends Module {
     private final SettingGroup sgGeneral = settings.getDefaultGroup();   // 挖掘（Meteor 默认组）
+    private final SettingGroup sgDelay = settings.createGroup("延迟");
     private final SettingGroup sgBypass = settings.createGroup("绕过");
     private final SettingGroup sgSwitch = settings.createGroup("切换");
     private final SettingGroup sgRebreak = settings.createGroup("重挖");
@@ -75,13 +77,14 @@ public class GhostMine extends Module {
 
     // ==================== 挖掘 ====================
 
-    public Setting<Integer> range = sgGeneral
+    public Setting<Double> range = sgGeneral
         .add(
-            new IntSetting.Builder()
+            new DoubleSetting.Builder()
                 .name("挖掘范围")
-                .description("挖掘方块的最大距离")
+                .description("挖掘方块的最大距离，支持三位小数")
                 .sliderRange(1, 6)
-                .defaultValue(6)
+                .defaultValue(6.0)
+                .decimalPlaces(3)
                 .build()
         );
     public Setting<Boolean> ignoreRangeWhileMining = sgGeneral
@@ -108,8 +111,19 @@ public class GhostMine extends Module {
                 .defaultValue(false)
                 .build()
         );
-    /** 挖完一块之后隔多久才能开始下一块：自定义 / 原版 / 反馈闭环 */
-    public Setting<CooldownMode> cooldownMode = sgGeneral
+    public Setting<Boolean> swingPacket = sgGeneral
+        .add(
+            new BoolSetting.Builder()
+                .name("挥手")
+                .description("挖掘开始/收尾时把挥手包发给服务端")
+                .defaultValue(false)
+                .build()
+        );
+
+    // ==================== 延迟 ====================
+
+    /** 挖完一块之后隔多久才能开始下一块：自定义 / 原版 / grim动态延迟 */
+    public Setting<CooldownMode> cooldownMode = sgDelay
         .add(
             new EnumSetting.Builder<CooldownMode>()
                 .name("挖掘冷却")
@@ -117,7 +131,7 @@ public class GhostMine extends Module {
                 .defaultValue(CooldownMode.CUSTOM)
                 .build()
         );
-    public Setting<Integer> mineCooldown = sgGeneral
+    public Setting<Integer> mineCooldown = sgDelay
         .add(
             new IntSetting.Builder()
                 .name("自定义冷却")
@@ -128,23 +142,36 @@ public class GhostMine extends Module {
                 .visible(() -> cooldownMode.get() == CooldownMode.CUSTOM)
                 .build()
         );
-    public Setting<Integer> feedbackThreshold = sgGeneral
+    public Setting<Integer> feedbackThreshold = sgDelay
         .add(
             new IntSetting.Builder()
                 .name("反馈阈值")
-                .description("「挖掘冷却」分数阈值。超过这个阈值回退原版冷却")
-                .defaultValue(300)
+                .description("「挖掘冷却」选 grim动态延迟 时的分数阈值，超过这个阈值回退原版冷却")
+                .defaultValue(850)
                 .min(50)
                 .sliderRange(50, 1000)
                 .visible(() -> cooldownMode.get() == CooldownMode.FEEDBACK)
                 .build()
         );
-    public Setting<Boolean> swingPacket = sgGeneral
+    /** 双挖的第二挖隔多久开始：跟随正常延迟 / 自定义 */
+    public Setting<DoubleDelayMode> doubleDelayMode = sgDelay
         .add(
-            new BoolSetting.Builder()
-                .name("挥手")
-                .description("挖掘开始/收尾时把挥手包发给服务端")
-                .defaultValue(false)
+            new EnumSetting.Builder<DoubleDelayMode>()
+                .name("双挖延迟模式")
+                .description("双挖的第二挖隔多久开始")
+                .defaultValue(DoubleDelayMode.FOLLOW)
+                .visible(doubleBreak::get)
+                .build()
+        );
+    public Setting<Integer> doubleDelay = sgDelay
+        .add(
+            new IntSetting.Builder()
+                .name("双挖自定义延迟")
+                .description("「双挖延迟模式」选自定义时第二挖等多少 tick，0 就是第一块的结束包之后隔一个 tick 开始")
+                .defaultValue(0)
+                .min(0)
+                .sliderRange(0, 20)
+                .visible(() -> doubleBreak.get() && doubleDelayMode.get() == DoubleDelayMode.CUSTOM)
                 .build()
         );
 
@@ -382,6 +409,8 @@ public class GhostMine extends Module {
     private int rebreakRetryTicks = 0;
     /** 挖掘延迟剩余 tick（>0 时不开始新的挖掘：延迟开头点的方块直接忽略，只剩最后 2 tick 时点的排队） */
     private int mineCooldownTicks = 0;
+    /** 副挖延迟剩余 tick（「双挖延迟模式」选自定义时用：每个结束包重新计时，数到 0 副挖才发开始包） */
+    private int secondDelayTicks = 0;
     /** 工具切换状态：是否已切到最佳工具等切回、已等待 tick 数 */
     private boolean hasSwitch = false;
     private int switchTicks = 0;
@@ -404,12 +433,12 @@ public class GhostMine extends Module {
     private int mineTicks = 0;
     /** 上一次收尾（发结束包）是在第几 tick */
     private int lastFinishTick = 0;
-    /** 抢跑计分：越大说明我们越「抢」，反馈闭环拿它决定要不要退回原版节奏 */
+    /** 抢跑计分：越大说明我们越「抢」，grim动态延迟拿它决定要不要退回原版节奏 */
     private double gainedAdvantage = 0.0;
 
     /** 原版破坏延迟（tick）：反作弊眼里「上一块挖完到下一块开始」的合法间隔 */
     private static final int VANILLA_BREAK_DELAY = 5;
-    /** 原版节奏的挖掘间隔（tick）：反馈超标后退回这个节奏 */
+    /** 原版节奏的挖掘间隔（tick）：分数超标后退回这个节奏 */
     private static final int VANILLA_MINE_GAP = 6;
     /** 秒切模式（立即切回）的自动重试次数上限 */
     private static final int MAX_AUTO_RETRY = 5;
@@ -451,6 +480,7 @@ public class GhostMine extends Module {
         rebreakTicks = 0;
         rebreakRetryTicks = 0;
         mineCooldownTicks = 0;
+        secondDelayTicks = 0;
         hasSwitch = false;
         switchTicks = 0;
         invToolSlot = -1;
@@ -474,6 +504,7 @@ public class GhostMine extends Module {
         rebreakTicks = 0;
         rebreakRetryTicks = 0;
         mineCooldownTicks = 0;
+        secondDelayTicks = 0;
         holdBlock = null;
         pendingStopPos = null;
         pendingStopFace = null;
@@ -496,6 +527,7 @@ public class GhostMine extends Module {
     @EventHandler
     public void onTick(TickEvent.Pre event) {
         if (mineCooldownTicks > 0) mineCooldownTicks--;
+        if (secondDelayTicks > 0) secondDelayTicks--;
         stopSentThisTick = null;
         swingSentThisTick = false;
         mineTicks++;
@@ -505,8 +537,8 @@ public class GhostMine extends Module {
         boolean pauseFinishing = shouldPauseForEating();
 
         // 上一 tick 安排的开局结束包：这一 tick 单独发（和 START、高空包分开，避免一个 tick 里两个位置）
-        // 这一发不吃「进食时暂停」：它只是一个包、不碰快捷栏，往后拖会让服务端记的「延迟破坏」名额和
-        // 客户端这边对不上，那块方块之后就一直等不到切工具（只能手动切一下才掉）
+        // 这一发不吃「进食时暂停」：往后拖会让服务端记的「延迟破坏」名额和客户端这边对不上，
+        // 那块方块之后就一直等不到切工具（只能手动切一下才掉）
         flushPendingStop();
 
         rangeCheck();
@@ -570,11 +602,12 @@ public class GhostMine extends Module {
 
         // 2. 开始挖掘：主挖先发 START，副挖后发
         //    「挖掘延迟」没走完的目标在这里排队等延迟结束（副挖一定要在延迟之后才开始）
+        //    「双挖延迟模式」选自定义时副挖不等冷却，按自己的延迟数完就开始（第一块的结束包单独占一个 tick）
         //    服务端的挖掘槽位最后停在副挖上：副挖靠阈值 STOP 破坏，主挖靠 START 时占住的延迟破坏槽位破坏
         if (firstBlockDate != null && !firstBlockDate.isMining && miningGateOpen()) {
             startTarget(firstBlockDate);
         }
-        if (secondBlockDate != null && !secondBlockDate.isMining && miningGateOpen()) {
+        if (secondBlockDate != null && !secondBlockDate.isMining && secondGateOpen()) {
             startTarget(secondBlockDate);
         }
 
@@ -632,9 +665,8 @@ public class GhostMine extends Module {
      * 收尾只发一次：目标留着（掉没掉由 {@link #isBroken} 清理），没生效由 {@link #retryStop()} 过冷却再补
      */
     private void finishTarget(BlockDate block) {
-        // 这一 tick 已经为这个位置发过结束包了（双挖那个「开局结束包」，用的是当时手上的物品，
-        // 进度不够 70% 的话只占了个延迟破坏名额）→ 这一 tick 不再发第二个（同一个 tick 里两个结束包
-        // 会被反作弊连着记账），也**不能**标成已收尾：下一 tick 再按真正的收尾发一个
+        // 这一 tick 已经为这个位置发过结束包了（双挖那个「开局结束包」）→ 这一 tick 不再发第二个
+        // （同一个 tick 里两个结束包会被反作弊连着记账），也**不能**标成已收尾：下一 tick 再按真正的收尾发一个
         if (block.pos.equals(stopSentThisTick)) return;
 
         block.switched = true;
@@ -719,6 +751,7 @@ public class GhostMine extends Module {
      */
     private void blockFinished() {
         mineCooldownTicks = cooldownTicks();
+        secondDelayTicks = doubleDelay.get();
         lastFinishTick = mineTicks;
     }
 
@@ -727,7 +760,7 @@ public class GhostMine extends Module {
      * <ul>
      *   <li>自定义：固定用「自定义冷却」的 tick 数</li>
      *   <li>原版：原版客户端挖完一块之后那 5 tick 破坏延迟（原版本来就这个节奏）</li>
-     *   <li>反馈闭环：分数没超标就一分钟都不多等，超标了退回原版节奏 6 tick（照反作弊的记分方式自检）</li>
+     *   <li>grim动态延迟：分数没超标就一分钟都不多等，超标了退回原版节奏 6 tick（照 grim 的记分方式自检）</li>
      * </ul>
      */
     private int cooldownTicks() {
@@ -746,6 +779,25 @@ public class GhostMine extends Module {
     private boolean miningGateOpen() {
         if (mineCooldownTicks > 0) return false;
         return true;
+    }
+
+    /**
+     * 副挖现在能不能发开始包（「双挖延迟模式」那两个模式）
+     * <ul>
+     *   <li>跟随正常延迟：和主挖一样等「挖掘冷却」走完</li>
+     *   <li>自定义：不看「挖掘冷却」，第一块的结束包之后数「双挖自定义延迟」个 tick 就开始</li>
+     * </ul>
+     * 自定义那条也要排在主挖的开局结束包之后：
+     * 一个 tick 里对两个不同位置发挖掘包（结束包 + 开始包）是反作弊眼里的「一秒点了两下」，
+     * 所以第一块的结束包单独占一个 tick，副挖再下个 tick 发开始包（本 tick 发过结束包就再等一 tick）；
+     * 主挖还没开始时也不让副挖插队，顺序还是主挖先、副挖后
+     */
+    private boolean secondGateOpen() {
+        if (doubleDelayMode.get() != DoubleDelayMode.CUSTOM) return miningGateOpen();
+
+        return secondDelayTicks <= 0
+            && stopSentThisTick == null
+            && (firstBlockDate == null || firstBlockDate.isMining);
     }
 
     /** 原版那条挖掘路正在挖别的方块（手动点、别的模块）：这一 tick 不抢着发我们的开始包 */
@@ -779,7 +831,7 @@ public class GhostMine extends Module {
     /**
      * 要不要发高空绕过包
      * <p>
-     * 只要开着「高空包绕过」就每次都发 —— 以前反馈闭环会把高空包按分数掐掉，
+     * 只要开着「高空包绕过」就每次都发 —— 以前 grim动态延迟 会把高空包按分数掐掉，
      * 掐掉之后包的样子和原版对不上反而出问题，现在两个设置各管各的
      */
     private boolean bypassWanted() {
@@ -859,6 +911,13 @@ public class GhostMine extends Module {
         if (block.instaBreak) return;
         if (!block.serverTracked) return;
         rebreakBlockDate = new BlockDate(block.pos, block.direction);
+        rebreakTicks = 0;
+        rebreakRetryTicks = 0;
+    }
+
+    /** 清掉重挖框和它的等待计时（开启新挖掘后旧位置已经无法瞬间破坏） */
+    private void clearRebreak() {
+        rebreakBlockDate = null;
         rebreakTicks = 0;
         rebreakRetryTicks = 0;
     }
@@ -1064,13 +1123,13 @@ public class GhostMine extends Module {
     public void rangeCheck() {
         if (ignoreRangeWhileMining.get()) return;
 
-        if (firstBlockDate != null && PlayerUtils.distanceTo(firstBlockDate.pos) > range.get().intValue()) {
+        if (firstBlockDate != null && PlayerUtils.distanceTo(firstBlockDate.pos) > range.get()) {
             firstBlockDate = null;
         }
-        if (secondBlockDate != null && PlayerUtils.distanceTo(secondBlockDate.pos) > range.get().intValue()) {
+        if (secondBlockDate != null && PlayerUtils.distanceTo(secondBlockDate.pos) > range.get()) {
             secondBlockDate = null;
         }
-        if (rebreakBlockDate != null && PlayerUtils.distanceTo(rebreakBlockDate.pos) > range.get().intValue()) {
+        if (rebreakBlockDate != null && PlayerUtils.distanceTo(rebreakBlockDate.pos) > range.get()) {
             rebreakBlockDate = null;
         }
     }
@@ -1165,8 +1224,16 @@ public class GhostMine extends Module {
         // 原版那条挖掘路正在挖别的方块（手动点、别的模块）：这一 tick 不抢，等它那一套走完再由 tick 逻辑重试
         if (vanillaBusyOnOther(block.pos)) return;
 
-        // 抢跑计分（「挖掘冷却」选反馈闭环时拿它决定要不要退回原版节奏）
+        // 本 tick 已经开始过一个方块（它的「开局结束包」还没发出去）：不连着发第二个开始包。
+        // 连着发会把前一个的「开局结束包」顶掉（只存得下一个），前一个方块会被服务端中止、再也挖不掉。
+        // 目标留着不标已开始，下个 tick 由 tick 逻辑补发 START
+        if (pendingStopPos != null) return;
+
+        // 抢跑计分（「挖掘冷却」选 grim动态延迟 时拿它决定要不要退回原版节奏）
         scoreAdvantage();
+
+        // 开新挖掘会把服务端的进度计时清零，旧的重挖框再也无法瞬间破坏，立即清掉（秒破的开始包也一样清零）
+        clearRebreak();
 
         // 开始包和收尾包可能落在同一个 tick：服务端那时算的是「单 tick 进度 × 1」，
         // 所以这里从 -1 起算，进 tick 逻辑加 1 之后正好是 0
@@ -1238,9 +1305,9 @@ public class GhostMine extends Module {
     }
 
     /**
-     * 开始挖掘（发 START；双挖模式下补一个「下一 tick 才发」的 STOP）
+     * 开始挖掘（发 START，并安排一个「下一 tick 才发」的开局结束包）
      * <p>
-     * 双挖原理（对应 26.1 原版服务端 ServerPlayerGameMode.handleBlockBreakAction）：
+     * 服务端规则（对应 26.1 原版服务端 ServerPlayerGameMode.handleBlockBreakAction）：
      * - 服务端只有「一个」挖掘槽位：收到 START 就记录 destroyPos，并中止上一个方块
      * - 收到 STOP 时用当前手持工具重算进度 = 单tick进度 * (gameTicks - destroyProgressStart + 1)：
      * - 进度 ≥ 0.7 → 立即破坏；进度 < 0.7 → 交给服务端 hasDelayedDestroy 自己走完
@@ -1270,16 +1337,23 @@ public class GhostMine extends Module {
                 new ServerboundPlayerActionPacket(ServerboundPlayerActionPacket.Action.START_DESTROY_BLOCK, bypassPos, Direction.DOWN, id));
         }
 
-        // 3. 双挖模式：安排一个下一 tick 的 STOP，让服务端接管这个方块
-        //    - 进度 < 0.7 时：服务端记录 hasDelayedDestroy，之后按原版进度自己把方块破坏掉
-        //    - 进度 ≥ 0.7 时（软方块）：服务端直接破坏
-        if (doubleBreak.get()) {
-            pendingStopPos = pos;
-            pendingStopFace = face;
-        }
+        // 3. 安排一个下一 tick 的「开局结束包」：服务端的进度计时比本模块的模拟快一拍
+        //    （开始包是 tick 中途发的，服务端 gameTicks 多走一格），下一 tick 这个结束包正好
+        //    踩在服务端进度刚过阈值的时刻，软方块当场破坏；不够 0.7 就退回延迟破坏名额，
+        //    由达到阈值的收尾兜底，不会更糟。双挖时它还顺带给先点的方块占住延迟破坏名额
+        pendingStopPos = pos;
+        pendingStopFace = face;
     }
 
-    /** 上一 tick 安排的「开局结束包」：这一 tick 单独发出去（不带挥手、不带高空包） */
+    /**
+     * 上一 tick 安排的「开局结束包」：这一 tick 单独发出去（不带挥手、不带高空包）
+     * <p>
+     * 和收尾一样要先把最佳工具换到手上再发：服务端是用「收到结束包那一刻手上的工具」重算进度的，
+     * 不切工具时这个包算出来够不到 0.7，方块会被丢进服务端的「延迟破坏」名额而不是当场破坏，
+     * 表现就是切工具挖软方块时「进度满了才被破坏」；手持工具时这个包当场破坏，所以看不出问题
+     * <p>
+     * 进食时例外：切槽位会打断进食，这一发照旧不碰快捷栏，吃完由收尾补完
+     */
     private void flushPendingStop() {
         if (pendingStopPos == null) return;
 
@@ -1288,7 +1362,21 @@ public class GhostMine extends Module {
         pendingStopPos = null;
         pendingStopFace = null;
 
+        BlockDate block = stopOwner(pos);
+        boolean switchTool = block != null && !shouldPauseForEating();
+        if (switchTool) switchToBestTool(block);
+
         sendStopPacket(pos, face);
+
+        // 原版挖掘那条流程：和收尾一个节奏，「立即切回」现在就换回去，其余交给 handleSwitchBack
+        if (switchTool && switchBackMode.get() == SwitchBackMode.IMMEDIATE) switchBackNow();
+    }
+
+    /** 这个位置现在归哪个挖掘目标管（开局结束包要按它的方块挑工具）；没了就返回 null，那种情况照旧原样发包 */
+    private BlockDate stopOwner(BlockPos pos) {
+        if (firstBlockDate != null && firstBlockDate.pos.equals(pos)) return firstBlockDate;
+        if (secondBlockDate != null && secondBlockDate.pos.equals(pos)) return secondBlockDate;
+        return null;
     }
 
     /**
@@ -1452,7 +1540,7 @@ public class GhostMine extends Module {
         event.cancel();
 
         if (unbreakableBlocks.contains(mc.level.getBlockState(pos).getBlock())
-            || PlayerUtils.distanceTo(pos) > range.get().intValue()) {
+            || PlayerUtils.distanceTo(pos) > range.get()) {
             return;
         }
 
@@ -1462,10 +1550,14 @@ public class GhostMine extends Module {
             return;
         }
 
+        // 这一下点的是副挖（双挖的第二块）
+        boolean secondSlot = firstBlockDate != null && doubleBreak.get();
+
         // 挖掘延迟还没走完：延迟开头点的方块直接忽略（不记目标，也不动正在挖的那个）；
         // 只剩最后 2 tick 时点的方块才排队，等延迟走完由 tick 逻辑补发 START
         // （双挖的第二个走这条路，所以它一定在延迟之后才开始，不会连着发两个开始包）
-        if (mineCooldownTicks > QUEUE_WINDOW_TICKS) return;
+        // 「双挖延迟模式」选自定义时副挖不看挖掘冷却：照样收下排队，由 tick 逻辑按自定义延迟补发 START
+        if (!(secondSlot && doubleDelayMode.get() == DoubleDelayMode.CUSTOM) && mineCooldownTicks > QUEUE_WINDOW_TICKS) return;
 
         BlockDate target;
         if (firstBlockDate == null) {
@@ -1481,8 +1573,8 @@ public class GhostMine extends Module {
             target = firstBlockDate;
         }
 
-        // 延迟还没结束：排队等 tick 逻辑补发 START
-        if (!miningGateOpen()) return;
+        // 延迟还没结束：排队等 tick 逻辑补发 START（副挖按「双挖延迟模式」那套算）
+        if (secondSlot ? !secondGateOpen() : !miningGateOpen()) return;
 
         startTarget(target);
     }
@@ -1573,18 +1665,27 @@ public class GhostMine extends Module {
     /**
      * 最终拿在手上的那把工具：热栏里那把不如背包里那把时（「背包切换」会把它换到手上）给背包里的槽位
      * <p>
+     * 手上那把已经是最佳就直接用手上那个槽位：选出来的不比手上这把好（一样快或更差）就不再换，
+     * 免得手上明明是最佳工具还切到另一把一样快的工具上
+     * <p>
      * 进度模拟和收尾前的切工具都用这个，两边必须一致：模拟用哪把算，收尾时就得把哪把换到手上
      */
     private int getBestToolToUse(BlockState state) {
         int slot = getBestTool(state);
-        if (!inventorySwitch.get()) return slot;
 
-        int invSlot = getBestInventoryTool(state);
-        if (invSlot == -1) return slot;
+        if (inventorySwitch.get()) {
+            int invSlot = getBestInventoryTool(state);
+            if (invSlot != -1) {
+                ItemStack invStack = mc.player.getInventory().getItem(invSlot);
+                ItemStack hotbarStack = slot == -1 ? ItemStack.EMPTY : mc.player.getInventory().getItem(slot);
+                if (isBetterTool(invStack, state, hotbarStack, wantSilkTouch(state))) slot = invSlot;
+            }
+        }
 
-        ItemStack invStack = mc.player.getInventory().getItem(invSlot);
-        ItemStack hotbarStack = slot == -1 ? ItemStack.EMPTY : mc.player.getInventory().getItem(slot);
-        return isBetterTool(invStack, state, hotbarStack, wantSilkTouch(state)) ? invSlot : slot;
+        if (slot >= 0 && !isBetterTool(mc.player.getInventory().getItem(slot), state, mc.player.getMainHandItem(), wantSilkTouch(state))) {
+            return mc.player.getInventory().getSelectedSlot();
+        }
+        return slot;
     }
 
     /** 这个方块要不要优先用带精准采集的工具 */
@@ -1595,7 +1696,7 @@ public class GhostMine extends Module {
     /**
      * a 是不是比 b 更适合挖这个方块：先看精准采集（列表里的方块，带精准采集的赢），一样再看挖掘速度
      * <p>
-     * 用于「背包里那把和热栏里那把哪个更好」，两边都是各自范围里挑出来的最好的，所以这样比就够了
+     * 用来比两把工具谁更适合这个方块（背包那把 vs 热栏那把、选出来的那把 vs 手上那把）
      */
     private boolean isBetterTool(ItemStack a, BlockState state, ItemStack b, boolean silk) {
         boolean silkA = silk && Utils.getEnchantmentLevel(a, Enchantments.SILK_TOUCH) > 0;
@@ -1609,6 +1710,7 @@ public class GhostMine extends Module {
     private int findBestTool(BlockState state, int from, int to, boolean onlySilk) {
         double bestScore = -1.0;
         int bestSlot = -1;
+        int selected = mc.player.getInventory().getSelectedSlot();
 
         for (int i = from; i <= to; i++) {
             ItemStack stack = mc.player.getInventory().getItem(i);
@@ -1616,7 +1718,8 @@ public class GhostMine extends Module {
             if (onlySilk && Utils.getEnchantmentLevel(stack, Enchantments.SILK_TOUCH) <= 0) continue;
 
             double score = stack.getDestroySpeed(state);
-            if (score > bestScore) {
+            // 手上那把已经是最佳时就不换：挖速并列时优先用手上那个槽位，免得在两把一样快的工具间来回切
+            if (score > bestScore || (score == bestScore && i == selected)) {
                 bestScore = score;
                 bestSlot = i;
             }
@@ -1723,11 +1826,28 @@ public class GhostMine extends Module {
     public enum CooldownMode {
         CUSTOM("自定义"),
         VANILLA("原版"),
-        FEEDBACK("反馈闭环");
+        FEEDBACK("grim动态延迟");
 
         private final String displayName;
 
         CooldownMode(String displayName) {
+            this.displayName = displayName;
+        }
+
+        @Override
+        public String toString() {
+            return displayName;
+        }
+    }
+
+    /** 「双挖延迟模式」的两种模式 */
+    public enum DoubleDelayMode {
+        FOLLOW("跟随正常延迟"),
+        CUSTOM("自定义");
+
+        private final String displayName;
+
+        DoubleDelayMode(String displayName) {
             this.displayName = displayName;
         }
 

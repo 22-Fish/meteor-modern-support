@@ -3,7 +3,7 @@ package fish22.modernsupport.utils;
 import meteordevelopment.meteorclient.events.packets.PacketEvent;
 import meteordevelopment.meteorclient.settings.Setting;
 import meteordevelopment.meteorclient.systems.modules.Modules;
-import meteordevelopment.meteorclient.systems.modules.movement.elytrafly.ElytraFly;
+import fish22.modernsupport.modules.ElytraFlyPlus;
 import meteordevelopment.meteorclient.utils.player.SlotUtils;
 import net.minecraft.core.component.DataComponents;
 import net.minecraft.network.protocol.game.ServerboundPlayerCommandPacket;
@@ -35,15 +35,43 @@ import static meteordevelopment.meteorclient.MeteorClient.mc;
  * 在客户端拦截这次停滑广播（把 FALL_FLYING 标志位和 POSE 改回滑翔状态），
  * 使客户端视觉上滑翔不闪断，同时服务端已完成 fallFlyTicks 归零。
  *
- * <p>设置由 {@link fish22.modernsupport.mixin.MixinElytraFly} 注入；
- * 本板块只在「鞘翅飞行」模块开着时生效（与「甲飞」互斥、「发包」模式互斥，见 MixinElytraFly）。
+ * <p>设置由 {@link fish22.modernsupport.modules.ElytraFlyPlus} 注入；
+ * 本类只服务「无限鞘翅·换甲」这一个模式（模式 = 发包 时是模块里那套 Meteor 发包平飞，
+ * 与本类无关），模块也得处于开启状态。
  */
 public class InfiniteElytraSupport {
 
-    // ====== 设置（MixinElytraFly 创建后注入） ======
+    // ====== 设置（鞘翅飞行模块创建后注入） ======
 
-    /** 「无限鞘翅」总开关 */
-    public static Setting<Boolean> infiniteElytra;
+    /** 「无限鞘翅模式」（关闭 / 换甲 / 发包） */
+    public static Setting<InfiniteMode> mode;
+
+    /**
+     * 无限鞘翅模式
+     *
+     * <ul>
+     *   <li><b>关闭</b>：不做事；</li>
+     *   <li><b>换甲</b>：滑翔时定期脱下再穿上鞘翅刷新服务端滑翔计时（鞘翅无限耐久，本类的逻辑）；</li>
+     *   <li><b>发包</b>：Meteor 官方发包模式那套平飞，逻辑在
+     *       {@link fish22.modernsupport.modules.ElytraFlyPlus} 里。</li>
+     * </ul>
+     */
+    public enum InfiniteMode {
+        Off("关闭"),
+        Swap("换甲"),
+        Packet("发包");
+
+        private final String displayName;
+
+        InfiniteMode(String displayName) {
+            this.displayName = displayName;
+        }
+
+        @Override
+        public String toString() {
+            return displayName;
+        }
+    }
 
     /** 刷新周期（tick）：滑翔累计达到该值就脱鞘翅刷新一次 */
     public static Setting<Integer> period;
@@ -78,10 +106,10 @@ public class InfiniteElytraSupport {
 
     private InfiniteElytraSupport() {}
 
-    /** 板块是否生效：开关打开 且「鞘翅飞行」模块处于开启状态 */
+    /** 是否生效：模式 = 换甲 且「鞘翅飞行」模块处于开启状态 */
     public static boolean isActive() {
-        if (infiniteElytra == null || !infiniteElytra.get()) return false;
-        ElytraFly module = Modules.get().get(ElytraFly.class);
+        if (mode == null || mode.get() != InfiniteMode.Swap) return false;
+        ElytraFlyPlus module = Modules.get().get(ElytraFlyPlus.class);
         return module != null && module.isActive();
     }
 
@@ -100,7 +128,7 @@ public class InfiniteElytraSupport {
         return isActive() && mute != null && mute.get();
     }
 
-    /** 每 tick 主逻辑（由 MixinElytraFly 在官方 onTick 最前面调用，不分模式） */
+    /** 每 tick 主逻辑（由鞘翅飞行模块调用，不分简单控制模式） */
     public static void onTick() {
         if (!isActive() || mc.player == null) return;
 

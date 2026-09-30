@@ -19,6 +19,7 @@
 
 package fish22.modernsupport.modules;
 
+import fish22.modernsupport.utils.BreakFace;
 import meteordevelopment.meteorclient.events.entity.player.BlockBreakingCooldownEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.renderer.ShapeMode;
@@ -44,7 +45,6 @@ import net.minecraft.network.protocol.game.ServerboundSwingPacket;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
-import net.minecraft.world.phys.Vec3;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -72,6 +72,7 @@ import static meteordevelopment.meteorclient.MeteorClient.mc;
  * 从眼睛位置根本看不到的面。GrimAC 的 PositionBreakA（"Tried to break a block face from an
  * impossible eye position"）遇到这种包会直接取消，表现就是「平地站着挖不动，跳一下才好用」
  * （跳起来时眼睛进到方块里，Grim 对「人已经在方块里」的情况直接放行）。
+ * 挖掘面的算法放在 {@link BreakFace}（射线面），「核爆」的「挖掘面」设置也用同一套。
  */
 public class AutoSugarcane extends Module {
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
@@ -197,6 +198,8 @@ public class AutoSugarcane extends Module {
     private boolean breaking;
     /** 本 tick 是否挖了方块 */
     private boolean breakingThisTick;
+    /** 正在走本模块自己的挖掘调用（挖掘冷却事件只发生在这中间，见 {@link #onBlockBreakingCooldown}） */
+    private boolean selfBreaking;
 
     public AutoSugarcane() {
         super(Categories.World, "自动收甘蔗", "自动收割身边的甘蔗/竹子，只收下面还是同一种方块的那部分（最下面一节留着继续长）");
@@ -208,6 +211,7 @@ public class AutoSugarcane extends Module {
         timer = 0;
         breaking = false;
         breakingThisTick = false;
+        selfBreaking = false;
     }
 
     @Override
@@ -219,6 +223,7 @@ public class AutoSugarcane extends Module {
         if (breaking && mc.gameMode != null) mc.gameMode.stopDestroyBlock();
         breaking = false;
         breakingThisTick = false;
+        selfBreaking = false;
     }
 
     // ==================== 核心 Tick 处理 ====================
@@ -304,13 +309,18 @@ public class AutoSugarcane extends Module {
     }
 
     /**
-     * 取消原版「挖掉一个方块后要等 5 tick 才能挖下一个」的限制（核爆也是这么干的）。
+     * 取消原版「挖掉一个方块后要等 5 tick 才能挖下一个」的限制
      * <p>
      * 不取消的话，「每tick破坏数量」设多少都没用：原版 {@code MultiPlayerGameMode} 里那个
      * destroyDelay 会把后续的挖掘全部挡掉，实际只能 ~6 tick 一个方块。
+     * <p>
+     * <b>只在本模块自己挖的时候取消</b>（看 {@link #selfBreaking} 标记）：这个事件只会在
+     * startDestroyBlock / continueDestroyBlock 中间发出来，标记只在本模块的挖掘调用里是开的。
+     * 无条件取消的话，模块开着时手动挖掘的冷却也会跟着消失（原版挖掘冷却整个没了）。
      */
     @EventHandler
     private void onBlockBreakingCooldown(BlockBreakingCooldownEvent event) {
+        if (!selfBreaking) return;
         event.cooldown = 0;
     }
 
@@ -328,54 +338,24 @@ public class AutoSugarcane extends Module {
     }
 
     /**
-     * 走原版挖掘流程（和 {@link BlockUtils#breakBlock} 同一套调用），区别只在挖掘面用自己算的
+     * 走原版挖掘流程（和 {@link BlockUtils#breakBlock} 同一套调用），区别只在挖掘面用自己算的射线面
      */
     private void mine(BlockPos blockPos) {
-        Direction direction = getBreakDirection(blockPos);
+        Direction direction = BreakFace.ray(blockPos);
 
-        if (mc.gameMode.isDestroying()) mc.gameMode.continueDestroyBlock(blockPos, direction);
-        else mc.gameMode.startDestroyBlock(blockPos, direction);
+        // 挖掘冷却事件只可能发生在下面这两个调用中间：进出都把标记打上/收掉
+        selfBreaking = true;
+        try {
+            if (mc.gameMode.isDestroying()) mc.gameMode.continueDestroyBlock(blockPos, direction);
+            else mc.gameMode.startDestroyBlock(blockPos, direction);
+        } finally {
+            selfBreaking = false;
+        }
 
         if (swing.get()) mc.player.swing(InteractionHand.MAIN_HAND);
         else mc.getConnection().send(new ServerboundSwingPacket(InteractionHand.MAIN_HAND));
 
         breaking = true;
         breakingThisTick = true;
-    }
-
-    /**
-     * 算出应该报给服务端的挖掘面：从眼睛朝方块中心打一条射线，取射线「进入方块」的那一个面。
-     * <p>
-     * 这个面必须是眼睛真正能看到的面（比如挖头顶上方的方块要报底面），否则 Grim 的 PositionBreakA
-     * 会判定玩家不可能从那个角度挖这一面，直接把包取消掉。
-     */
-    private Direction getBreakDirection(BlockPos pos) {
-        Vec3 eye = mc.player.getEyePosition();
-
-        double dx = pos.getX() + 0.5 - eye.x();
-        double dy = pos.getY() + 0.5 - eye.y();
-        double dz = pos.getZ() + 0.5 - eye.z();
-
-        // 每个轴各算一个「射线进入方块」的参数，参数最大的那个轴就是真正的进入面
-        double tx = entryT(eye.x(), dx, pos.getX());
-        double ty = entryT(eye.y(), dy, pos.getY());
-        double tz = entryT(eye.z(), dz, pos.getZ());
-
-        if (tx >= ty && tx >= tz) return dx > 0 ? Direction.WEST : Direction.EAST;
-        if (ty >= tx && ty >= tz) return dy > 0 ? Direction.DOWN : Direction.UP;
-        return dz > 0 ? Direction.NORTH : Direction.SOUTH;
-    }
-
-    /**
-     * 射线在某个轴上进入方块的参数 t。
-     * <p>
-     * 眼睛已经落在方块这个轴的范围内（t &lt; 0）或者射线和这个轴平行时返回 -∞，
-     * 表示这个轴不决定进入面，由别的轴决定。
-     */
-    private double entryT(double eyeCoord, double dir, int blockMin) {
-        if (dir == 0) return Double.NEGATIVE_INFINITY;
-
-        double t = ((dir > 0 ? blockMin : blockMin + 1) - eyeCoord) / dir;
-        return t < 0 ? Double.NEGATIVE_INFINITY : t;
     }
 }

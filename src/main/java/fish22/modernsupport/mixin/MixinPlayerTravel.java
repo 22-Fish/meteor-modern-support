@@ -1,6 +1,7 @@
 package fish22.modernsupport.mixin;
 
 import fish22.modernsupport.modules.FireworkBoost;
+import fish22.modernsupport.modules.ElytraAutoPullup;
 import fish22.modernsupport.utils.LegalRotation;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.phys.Vec3;
@@ -27,6 +28,7 @@ public class MixinPlayerTravel {
 
     @Inject(method = "travel", at = @At("HEAD"))
     private void onTravel(Vec3 movementInput, CallbackInfo ci) {
+        ElytraAutoPullup.beforeMove((Player) (Object) this);
         FireworkBoost.beforeMove((Player) (Object) this);
     }
 

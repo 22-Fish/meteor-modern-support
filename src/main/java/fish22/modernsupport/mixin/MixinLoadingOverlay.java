@@ -23,6 +23,7 @@ import com.mojang.blaze3d.pipeline.RenderPipeline;
 import fish22.modernsupport.ModernSupport;
 import fish22.modernsupport.utils.MeteorLogoPainter;
 import fish22.modernsupport.utils.MeteorLogoRenderer;
+import fish22.modernsupport.utils.RenderSettings;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.client.gui.screens.LoadingOverlay;
 import net.minecraft.resources.Identifier;
@@ -34,11 +35,13 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.Redirect;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
+import java.util.function.IntSupplier;
+
 /**
  * 加载画面（资源包重载 / 游戏启动）：把 Mojang logo 换成 meteor logo 动画。
  *
  * <p>原版在这个方法里先铺淡紫背景，再把 mojangstudios.png 分两半贴出来，
- * 最后画进度条。这里把那两次贴图顶掉，换成自己画的动画，背景和进度条保持不变。
+ * 最后画进度条。这里把那两次贴图顶掉，换成自己画的动画，背景色可以自定义，进度条保持不变。
  * 动画没播完之前拦住淡出，保证「加载完成」正好是点亮那一下。
  */
 @Mixin(value = LoadingOverlay.class, remap = false)
@@ -50,6 +53,16 @@ public abstract class MixinLoadingOverlay {
     /** 自己画失败过就退回原版 logo，别再每帧重试 */
     @Unique
     private boolean meteorsupport$failed;
+
+    /** 原版铺背景：颜色换成设置里的，透明度还是用原版算好的淡入淡出值 */
+    @Redirect(method = "extractRenderState", at = @At(value = "INVOKE",
+        target = "Ljava/util/function/IntSupplier;getAsInt()I"))
+    private int meteorsupport$background(IntSupplier brandBackground) {
+        int original = brandBackground.getAsInt();
+        if (!MeteorLogoRenderer.enabled()) return original;
+
+        return (original & 0xFF000000) | RenderSettings.loadingAnimationBackgroundRgb();
+    }
 
     /** 原版 logo 上半部分：改成画我们的动画（位置按原版条带算） */
     @Redirect(method = "extractRenderState", at = @At(value = "INVOKE",

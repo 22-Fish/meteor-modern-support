@@ -81,19 +81,28 @@ import static meteordevelopment.meteorclient.MeteorClient.mc;
  * 再挑相对「服务器此刻记录的角度」转得最少的那个（见 {@link LegalRotation#getServerYaw()}）；
  * 如果和上一次发出去的角度完全一样，会优先换一个同样合法、但角度不同的采样点。
  *
- * <h3>「合法」的判定（对齐 Grim 的放置检查，GPL-3.0）</h3>
+ * <h3>「合法」的判定（照搬 Grim 的放置检查，不加自己的余量）</h3>
  *
- * 放置包里点的是<b>被点击的那个方块</b>（支撑方块），目标位置是它朝 face 方向的邻居：
+ * 放置包里点的是<b>被点击的那个方块</b>（支撑方块），目标位置是它朝 face 方向的邻居。
+ * Grim 对一个放置包查四条，这里逐条对上：
  *
  * <ol>
  *   <li>被点方块有效（空气 / 可替换方块 / 流体不行 —— 原版点到可替换方块时会把方块放进那一格，
  *       目标位置就歪了；可交互方块（箱子/熔炉/门这些）平时也不行，点了会开界面，
  *       但<b>潜行时允许</b>，原版潜行右键不会开界面、会照常把方块放上去）；</li>
- *   <li>够得着：眼睛到被点方块碰撞箱最近点 ≤ 方块交互距离（生存 4.5、创造 5.0）；</li>
- *   <li>豁免：眼睛点（± {@link #EPSILON}）就在被点方块碰撞箱里时直接放行
- *       （人就在这一格里，反作弊判不了朝向）；</li>
- *   <li>不豁免时：眼睛要在点击面这一侧，并且射线要能打进被点方块的碰撞箱
- *       （所以瞄准点从点击面往被点方块里推 {@link #INSIDE_OFFSET} 格）；</li>
+ *   <li>够得着（Grim FarPlace）：眼睛到被点方块整格碰撞箱最近点 ≤ 方块交互距离
+ *       （生存 4.5、创造 5.0）；</li>
+ *   <li>命中点在被点方块那格里（Grim FabricatedPlace）：面上的采样点天然满足，不做别的余量。
+ *       压力板 / 玻璃板这些「面比格子小」的方块不拦 —— Grim 就是按整格判的，压边照样过；</li>
+ *   <li>眼睛点（± {@link #EPSILON}）就在被点方块碰撞箱里时下面两条直接放行
+ *       （人就站在这一格里，Grim 也判不了朝向）；</li>
+ *   <li>眼睛在点击面这一侧（Grim PositionPlace 的「hidden face」）：人站在方块正上方想点它侧面
+ *       就是这条拦的 —— 眼睛没跨过点击面所在的平面就点不到那一面。比较用的框按方块
+ *       <b>真实形状</b>各部件求交（Grim 同款），所以台阶 / 压力板 / 玻璃板这些形状小的方块
+ *       要求更松；</li>
+ *   <li>射线打进被点方块的<b>整格</b>碰撞箱（Grim RotationPlace）：只要求打进去，
+ *       不要求射线第一个打到它、也不要求打到哪一面（瞄准点从点击面往里推
+ *       {@link #INSIDE_OFFSET} 格就是让射线确实插进去）；</li>
  *   <li>角度可量化：返回的角度相对「服务器此刻记录的角度」差整数格鼠标灵敏度
  *       （{@link #sensitivityStep()}，原版 0.15 × 8 × (0.6 × 灵敏度 + 0.2)³ 度）。</li>
  * </ol>
@@ -291,8 +300,11 @@ public final class LegalPlace {
             AABB clickedBox = new AABB(clicked);
             if (clickedBox.distanceToSqr(eye) > reach * reach) continue;
 
+            // grim PositionPlace：眼睛要在点击面这一侧（站在方块正上方点侧面就是这里拦的）
+            AABB posBox = positionBox(clicked);
+            if (posBox != null && !eyeBox.intersects(posBox) && !eyeOnVisibleSide(eye, posBox, face.getOpposite())) continue;
+
             boolean exempt = eyeBox.intersects(clickedBox);
-            if (!exempt && !eyeOnVisibleSide(eye, clickedBox, face.getOpposite())) continue;
 
             Vec3 planeCenter = faceCenter(target, face);
 
@@ -310,8 +322,9 @@ public final class LegalPlace {
                     float pitch = snapAngle(basePitch, pitchTo(eye, aimPoint), step, false);
                     Vec3 end = eye.add(mc.player.calculateViewVector(pitch, yaw).scale(reach));
 
-                    // 先做便宜的碰撞箱判定，过了才走真正的准星射线
+                    // grim RotationPlace：射线打进整格碰撞箱就行，不要求第一个打到它
                     if (!exempt && !rayHitsBox(eye, end, clickedBox)) continue;
+                    // 真人准星点不点得到只当「挑哪个」的偏好，不当合法性（grim 不查这条）
                     boolean realClick = firstHitIs(eye, end, clicked, face.getOpposite());
 
                     int tier = realClick ? 0 : (exempt ? 1 : 2);
@@ -833,27 +846,31 @@ public final class LegalPlace {
         return new Vec3(vx * cos - vz * sin, 0.0, vz * cos + vx * sin);
     }
 
-    /** 给定角度能不能合法地点到这个面 */
+    /** 给定角度能不能合法地点到这个面（和采样那条路完全同一套判定） */
     private static boolean faceIsLegal(BlockPos target, Direction face, Vec3 eye, Vec3 dir, double reach, AABB eyeBox) {
         BlockPos clicked = target.relative(face);
         if (!isValidSupport(clicked)) return false;
 
         AABB clickedBox = new AABB(clicked);
         if (clickedBox.distanceToSqr(eye) > reach * reach) return false;
-        if (eyeBox.intersects(clickedBox)) return true;
-        if (!eyeOnVisibleSide(eye, clickedBox, face.getOpposite())) return false;
-        return rayHitsBox(eye, eye.add(dir.scale(reach)), clickedBox);
+
+        // grim PositionPlace：眼睛要在点击面这一侧
+        AABB posBox = positionBox(clicked);
+        if (posBox != null && !eyeBox.intersects(posBox) && !eyeOnVisibleSide(eye, posBox, face.getOpposite())) return false;
+
+        // grim RotationPlace：射线打进整格碰撞箱就行
+        return eyeBox.intersects(clickedBox) || rayHitsBox(eye, eye.add(dir.scale(reach)), clickedBox);
     }
 
-    /** 眼睛在不在点击面这一侧（能不能看见这个面） */
+    /** 眼睛在不在点击面这一侧（能不能看见这个面），按 grim 那样严格比、不留余量 */
     private static boolean eyeOnVisibleSide(Vec3 eye, AABB box, Direction clickedFace) {
         return switch (clickedFace) {
-            case UP -> eye.y >= box.maxY - EPSILON;
-            case DOWN -> eye.y <= box.minY + EPSILON;
-            case NORTH -> eye.z <= box.minZ + EPSILON;
-            case SOUTH -> eye.z >= box.maxZ - EPSILON;
-            case WEST -> eye.x <= box.minX + EPSILON;
-            case EAST -> eye.x >= box.maxX - EPSILON;
+            case UP -> eye.y >= box.maxY;
+            case DOWN -> eye.y <= box.minY;
+            case NORTH -> eye.z <= box.minZ;
+            case SOUTH -> eye.z >= box.maxZ;
+            case WEST -> eye.x <= box.minX;
+            case EAST -> eye.x >= box.maxX;
         };
     }
 
@@ -869,6 +886,33 @@ public final class LegalPlace {
     private static boolean rayHitsBox(Vec3 eye, Vec3 end, AABB box) {
         if (box.contains(eye)) return true;
         return box.clip(eye, end).isPresent();
+    }
+
+    /**
+     * grim PositionPlace 用的「被点方块框」：把方块真实形状的各个部件求交（照抄 Grim 的 getCombinedBox）。
+     *
+     * <p>整块方块交出来就是整格；台阶 / 压力板 / 玻璃板这些形状小的方块，框也跟着小，
+     * 点击面那条判定就更松 —— 它们面窄不窄根本不用管，Grim 是按形状和整格判的。
+     * 几个部件错开、交出来是空的（楼梯、栅栏这些）就返回 {@code null}：
+     * Grim 那种情况直接放行，不查点击面。
+     */
+    private static AABB positionBox(BlockPos clicked) {
+        List<AABB> parts = mc.level.getBlockState(clicked).getShape(mc.level, clicked).toAabbs();
+        if (parts.isEmpty()) return new AABB(clicked);
+
+        AABB combined = new AABB(clicked);
+        for (AABB part : parts) {
+            AABB box = part.move(clicked);
+            double minX = Math.max(box.minX, combined.minX);
+            double minY = Math.max(box.minY, combined.minY);
+            double minZ = Math.max(box.minZ, combined.minZ);
+            double maxX = Math.min(box.maxX, combined.maxX);
+            double maxY = Math.min(box.maxY, combined.maxY);
+            double maxZ = Math.min(box.maxZ, combined.maxZ);
+            if (minX > maxX || minY > maxY || minZ > maxZ) return null;
+            combined = new AABB(minX, minY, minZ, maxX, maxY, maxZ);
+        }
+        return combined;
     }
 
     /** 面内偏移向量（面法线方向的分量为 0，另外两个轴各按 u / v 偏移） */

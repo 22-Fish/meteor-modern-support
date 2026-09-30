@@ -71,6 +71,18 @@ public final class LegalCrystal {
     /** 水晶光环的「调试输出」开关（排查用，默认关） */
     public static boolean debug;
 
+    /**
+     * 水晶光环「合法转头」开着时，把 Meteor 自带的「保持上一次朝向」（{@code rotation-hold}）关掉。
+     *
+     * <p>那套保持会在随后的几 tick（默认 4）里把上一次经过官方 {@code Rotations} 的瞄准角度
+     * 继续塞进移动包，而客户端那几 tick 的移动方向和输入包是按视角算的
+     * → 服务端移动预测分叉 → 攒够 offset 就拉回（卡脚）。
+     *
+     * <p>由 {@code MixinCrystalAura} 每 tick 按「模块开着 + 合法转头不是关闭」刷新，
+     * {@code MixinRotations} 在 Meteor 读保持时长时把它当成 0
+     */
+    public static boolean suppressRotationHold;
+
     /** 调试输出：开启时往聊天栏打一行（不带坐标） */
     public static void log(String format, Object... args) {
         if (!debug) return;

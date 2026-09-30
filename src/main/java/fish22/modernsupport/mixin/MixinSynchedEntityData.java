@@ -1,6 +1,7 @@
 package fish22.modernsupport.mixin;
 
 import fish22.modernsupport.modules.ElytraBounce;
+import fish22.modernsupport.utils.ElytraLagSyncSupport;
 import fish22.modernsupport.utils.InfiniteElytraSupport;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.network.syncher.SyncedDataHolder;
@@ -26,6 +27,10 @@ import static meteordevelopment.meteorclient.MeteorClient.mc;
  * {@link InfiniteElytraSupport}）在脱鞘翅期间，服务端会广播「停止滑翔」
  * （FALL_FLYING 位清零 + 姿态变站立），这里把这两项改回滑翔状态，
  * 让客户端视觉上滑翔不闪断，同时服务端已完成 fallFlyTicks 归零。
+ *
+ * <p>「Grim Lag」甲飞（{@link ElytraLagSyncSupport}）同样：服务端把「停止滑翔」同步过来时
+ * 本地不认这个位（史莱姆 {@code handleEntityDataUpdate} 那一手），客户端全程滑翔，
+ * 换甲时机另由这一包触发。
  */
 @Mixin(SynchedEntityData.class)
 public abstract class MixinSynchedEntityData {
@@ -38,20 +43,21 @@ public abstract class MixinSynchedEntityData {
     private List<SynchedEntityData.DataValue<?>> modernsupport$rewriteStopGliding(List<SynchedEntityData.DataValue<?>> items) {
         boolean infiniteElytra = InfiniteElytraSupport.isActive();
         boolean keepGlide = ElytraBounce.isKeepingGlide();
+        boolean grimLag = ElytraLagSyncSupport.isKeepingGlide();
 
         // 只处理本地玩家
         if (!(this.entity instanceof LocalPlayer player) || player != mc.player) return items;
 
-        if (!infiniteElytra && !keepGlide) return items;
+        if (!infiniteElytra && !keepGlide && !grimLag) return items;
         // 下面两个改写只针对「客户端本地仍在滑翔」的停滑广播
         if (!player.isFallFlying()) return items;
 
         List<SynchedEntityData.DataValue<?>> result = new ArrayList<>(items.size());
         for (SynchedEntityData.DataValue<?> item : items) {
             // 鞘翅弹跳的「落地维持滑翔」：落地那几 tick 把停滑广播改回滑翔，本地不闪断
-            result.add(keepGlide && !infiniteElytra
-                ? ElytraBounce.keepGlideDataValue(item)
-                : InfiniteElytraSupport.processDataValue(item));
+            if (infiniteElytra) result.add(InfiniteElytraSupport.processDataValue(item));
+            else if (grimLag) result.add(ElytraLagSyncSupport.keepGlideDataValue(item));
+            else result.add(ElytraBounce.keepGlideDataValue(item));
         }
         return result;
     }

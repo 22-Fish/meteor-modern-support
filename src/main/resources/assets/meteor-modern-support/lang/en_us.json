@@ -9,6 +9,8 @@
   "Group.Meteor.Slider": "Slider",
   "Group.Meteor.Starscript": "Starscript",
   "Group.Meteor.Font": "Font",
+  "Group.Meteor.修改": "Modify",
+  "Group.Meteor.优化": "Optimize",
 
   "Setting.Meteor.scale": "Scale",
   "Setting.Meteor.scale.Description": "Scale of the GUI.",
@@ -136,6 +138,7 @@
   "Text.delete-page-note": "Categories checked for this page will be removed from it only; other pages are not affected.",
   "Text.invalid-page-name": "Invalid name: it cannot be empty or duplicate another page",
   "Text.category-list-format": "Categories - %s",
+  "Text.module-visibility-format": "Module Visibility - %s",
   "Text.config-section": "Config Settings",
   "Text.current-config": "Current config: ",
   "Text.none-selected": "none",
@@ -1886,7 +1889,7 @@
   "Module.Meteor Client.auto-shearer": "auto-shearer",
   "Module.Meteor Client.auto-shearer.Description": "Automatically shears sheep.",
   "Module.Meteor Client.auto-sign": "auto-sign",
-  "Module.Meteor Client.auto-sign.Description": "Automatically writes signs. The first sign\u0027s text will be used.",
+  "Module.Meteor Client.auto-sign.Description": "Automatically writes signs. Copy mode reuses the first sign\u0027s text, preset mode writes a custom 4-line template.",
   "Module.Meteor Client.auto-smelter": "auto-smelter",
   "Module.Meteor Client.auto-smelter.Description": "Automatically smelts items from your inventory",
   "Setting.Meteor Client.fuel-items": "fuel-items",
@@ -2657,6 +2660,14 @@
   "Setting.meteor现代化支持.随机整合时间.Description": "Randomizes both aggregate windows by 1-10 ticks in either direction (1 tick = 50 ms).",
   "Setting.meteor现代化支持.强制触发": "Force Trigger",
   "Setting.meteor现代化支持.强制触发.Description": "Forces one AI call using the latest 10 public chat messages as user messages. The reply always goes to public chat.",
-  "Setting.meteor现代化支持.启用meteor加载动画": "Meteor Loading Animation",
-  "Setting.meteor现代化支持.启用meteor加载动画.Description": "Replaces the Mojang logo on the loading screen with the Meteor logo draw-in and light-up animation."
+  "Setting.meteor现代化支持.启用meteor资源包加载动画": "Meteor Resource Pack Loading Animation",
+  "Setting.meteor现代化支持.启用meteor资源包加载动画.Description": "Replaces the Mojang logo on the loading screen with the Meteor logo draw-in and light-up animation.",
+  "Setting.meteor现代化支持.资源包加载动画背景颜色": "Loading Animation Background Color",
+  "Setting.meteor现代化支持.资源包加载动画背景颜色.Description": "Custom background color of the loading screen. Ignored when the loading animation is off.",
+  "Module.meteor现代化支持.鞘翅飞行": "Elytra Fly",
+  "Module.meteor现代化支持.鞘翅飞行.Description": "Gives you more control over your elytra.",
+  "Setting.meteor现代化支持.simple-mode": "Simple Mode",
+  "Setting.meteor现代化支持.simple-mode.Description": "Off (default): the module does no flight control at all, armor-fly / infinite-elytra still work. Vanilla is the vendored Meteor vanilla control (not exclusive with armor-fly), Legal is our legal flat flight (can be combined with armor-fly). The old packet flat flight now lives in Infinite Elytra > Packet.",
+  "Setting.meteor现代化支持.无限鞘翅模式": "Infinite Elytra Mode",
+  "Setting.meteor现代化支持.无限鞘翅模式.Description": "Swap: unequip and re-equip the elytra periodically to reset the server glide timer (elytra never breaks); Packet: the vendored Meteor packet flat flight (no fireworks, keeps sending start-flying + move packets)."
 }

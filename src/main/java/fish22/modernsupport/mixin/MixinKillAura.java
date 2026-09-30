@@ -2,6 +2,7 @@ package fish22.modernsupport.mixin;
 
 import fish22.modernsupport.utils.LegalRotation;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
+import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.renderer.Renderer3D;
 import meteordevelopment.meteorclient.settings.BoolSetting;
 import meteordevelopment.meteorclient.settings.ColorSetting;
@@ -18,6 +19,7 @@ import meteordevelopment.meteorclient.utils.render.color.Color;
 import meteordevelopment.meteorclient.utils.render.color.SettingColor;
 import meteordevelopment.meteorclient.utils.world.TickRate;
 import meteordevelopment.orbit.EventHandler;
+import meteordevelopment.orbit.EventPriority;
 import net.minecraft.client.multiplayer.MultiPlayerGameMode;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.util.Mth;
@@ -62,6 +64,10 @@ public abstract class MixinKillAura {
     @Shadow
     private Setting<Double> range;
 
+    /** 穿墙（看不见目标）时的攻击范围 */
+    @Shadow
+    private Setting<Double> wallsRange;
+
     @Shadow
     private Setting<Boolean> tpsSync;
 
@@ -73,6 +79,10 @@ public abstract class MixinKillAura {
 
     @Unique
     private Setting<Integer> legalRotationPriority;
+
+    /** 原版攻击伪造：攻击/挥手包排到移动包之前（原版顺序）。默认关闭 */
+    @Unique
+    private Setting<Boolean> vanillaAttackSpoof;
 
     @Unique
     private Setting<Boolean> aimAndRangeOptimization;
@@ -94,6 +104,17 @@ public abstract class MixinKillAura {
     /** 延迟到移动包发送后执行的目标（攻击包必须晚于旋转包发出，服务器视角到位后才能命中） */
     @Unique
     private final List<Entity> pendingAttacks = new ArrayList<>();
+
+    /** 原版攻击伪造：扣到下一 tick 开头（移动包之前）再发的目标 */
+    @Unique
+    private final List<Entity> spoofPendingAttacks = new ArrayList<>();
+
+    /** 原版攻击伪造：tick 计数与「本 tick 刚排进来的攻击」的 tick，用来保证至少隔一 tick 再发 */
+    @Unique
+    private int spoofTickCounter;
+
+    @Unique
+    private int spoofPendingTick = -1;
 
     /** entityCheck 当前正在判定的目标（范围判定改为眼位距离时用，见 redirectRangeCheck） */
     @Unique
@@ -123,10 +144,18 @@ public abstract class MixinKillAura {
             .build()
         );
 
+        vanillaAttackSpoof = sg.add(new BoolSetting.Builder()
+            .name("原版攻击伪造")
+            .description("攻击与挥手包排到移动包之前发（原版顺序：先攻击、后移动）。这一 tick 只转身、下一 tick 开头才打，所以换目标的第一击可能空")
+            .defaultValue(false)
+            .visible(() -> rotation.get() != KillAura.RotationMode.None)
+            .build()
+        );
+
         // 瞄准点与范围优化：插到默认分组的「旋转」(rotate) 下面，改的是瞄准角度与范围判定
         aimAndRangeOptimization = new BoolSetting.Builder()
             .name("瞄准点与范围优化")
-            .description("同时优化瞄准点与攻击范围：瞄准碰撞箱上最靠近玩家的点（而非中心），范围按眼睛到碰撞箱距离判定")
+            .description("同时优化瞄准点与攻击范围：瞄准碰撞箱上最靠近玩家的点（而非中心），范围按眼睛到碰撞箱距离判定，穿墙时的墙壁范围判定也一样")
             .defaultValue(true)
             .build();
         insertAfter(self.settings.getDefaultGroup(), "rotate", aimAndRangeOptimization);
@@ -288,9 +317,79 @@ public abstract class MixinKillAura {
         )
     )
     private void redirectGameModeAttack(MultiPlayerGameMode gameMode, Player player, Entity target) {
+        // 原版攻击伪造：这一 tick 只转身，攻击先扣下，下一 tick 开头（移动包之前）再和挥手一起发
+        if (vanillaAttackSpoof.get()) {
+            spoofPendingAttacks.add(target);
+            spoofPendingTick = spoofTickCounter;
+            return;
+        }
+
         // 不立即发包，记录目标，等移动包发送完毕后统一攻击
         pendingAttacks.add(target);
         LegalRotation.runAfterSend(this::doPendingAttacks);
+    }
+
+    // ====== 原版攻击伪造：攻击/挥手排到移动包之前发 ======
+    //
+    // 原版玩家左键是这样发的：handleKeybinds（tick 最前面，比移动包早）里发攻击包 + 挥手包，
+    // 之后才 tick 玩家、才把移动包（带朝向）发出去，即 攻击 → 挥手 → 移动包。
+    //
+    // 我们这份挂在 TickEvent.Pre（Minecraft.tick 的开头），优先级比模块自己的 onTick 高，
+    // 所以是「上一 tick 排进来的攻击」在这里发：上一 tick 的朝向已经随那一 tick 的移动包
+    // 到服务器了，服务器视角到位、攻击包又排在本 tick 移动包之前，顺序就和原版一样。
+
+    @EventHandler(priority = EventPriority.HIGHEST)
+    private void onTickSpoofAttacks(TickEvent.Pre event) {
+        spoofTickCounter++;
+
+        if (mc.player == null) {
+            spoofPendingAttacks.clear();
+            spoofPendingTick = -1;
+            return;
+        }
+        // 关掉这个选项时把扣下的攻击丢掉，免得下次打开时补出一发过期的
+        if (!vanillaAttackSpoof.get()) {
+            spoofPendingAttacks.clear();
+            return;
+        }
+        if (spoofPendingAttacks.isEmpty()) return;
+
+        // 保险：同一 tick 里刚排进来的先不发（发送要晚于「那一 tick 的朝向随移动包发出」）
+        if (spoofPendingTick == spoofTickCounter) return;
+
+        List<Entity> attacks = new ArrayList<>(spoofPendingAttacks);
+        spoofPendingAttacks.clear();
+
+        for (Entity target : attacks) {
+            if (!canSpoofAttack(target)) continue;
+
+            mc.gameMode.attack(mc.player, target);
+            mc.player.swing(InteractionHand.MAIN_HAND);
+        }
+    }
+
+    /** 原版攻击伪造：隔了一 tick 才补这一击，目标没了 / 走出范围就丢掉这一击 */
+    @Unique
+    private boolean canSpoofAttack(Entity target) {
+        if (mc.player == null || target == null || target.isRemoved() || !target.isAlive()) return false;
+
+        double r = range.get();
+        AABB box = target.getBoundingBox();
+
+        // 和 entityCheck 一样：开了瞄准点与范围优化按眼睛到碰撞箱的距离，否则按脚底坐标距离
+        if (aimAndRangeOptimization.get()) {
+            double distSq = eyeToBoxDistSq(target);
+            if (distSq > r * r) return false;
+            // 看不见目标时还要过墙壁范围这一关（和 entityCheck 用同一把尺子）
+            return PlayerUtils.canSeeEntity(target) || distSq <= wallsRange.get() * wallsRange.get();
+        }
+
+        return PlayerUtils.isWithin(
+            Mth.clamp(mc.player.getX(), box.minX, box.maxX),
+            Mth.clamp(mc.player.getY(), box.minY, box.maxY),
+            Mth.clamp(mc.player.getZ(), box.minZ, box.maxZ),
+            r
+        );
     }
 
     // ====== swing 延迟：不立即发，等攻击包发出后统一挥动 ======
@@ -371,10 +470,34 @@ public abstract class MixinKillAura {
         Entity target = entityCheckTarget;
         if (target != null && mc.player != null) {
             // 眼睛到目标碰撞箱最近点的距离，与服务器 isWithinAttackRange 一致
-            double distSq = target.getBoundingBox().distanceToSqr(mc.player.getEyePosition());
-            return distSq <= r * r;
+            return eyeToBoxDistSq(target) <= r * r;
         }
         return PlayerUtils.isWithin(x, y, z, r);
+    }
+
+    /** 穿墙（看不见目标）时的墙壁范围判定：同样按眼睛到碰撞箱的距离 */
+    @Redirect(
+        method = "entityCheck",
+        at = @At(
+            value = "INVOKE",
+            target = "Lmeteordevelopment/meteorclient/utils/player/PlayerUtils;isWithin(Lnet/minecraft/world/entity/Entity;D)Z"
+        )
+    )
+    private boolean redirectWallsRangeCheck(Entity entity, double r) {
+        // 范围优化未开启：回退原版（玩家到实体坐标点的距离）
+        if (!aimAndRangeOptimization.get() || mc.player == null) {
+            return PlayerUtils.isWithin(entity, r);
+        }
+        // 原版这里量的是玩家到实体坐标点的距离，不走优化：
+        // 恶魂这类大碰撞箱实体「箱边进了范围、坐标点还在外面」就被误判超范围不打，
+        // 玩家卡在方块里时视线全被挡、所有目标都走这一关，看起来就像范围优化失效
+        return eyeToBoxDistSq(entity) <= r * r;
+    }
+
+    /** 眼睛到目标碰撞箱最近点的距离平方（与服务器 isWithinAttackRange 一致） */
+    @Unique
+    private static double eyeToBoxDistSq(Entity target) {
+        return target.getBoundingBox().distanceToSqr(mc.player.getEyePosition());
     }
 
     // ====== 范围渲染：以玩家为中心渲染攻击范围球体（实心半透明，带深度遮挡） ======

@@ -7,7 +7,6 @@ import meteordevelopment.meteorclient.gui.widgets.WWidget;
 import meteordevelopment.meteorclient.gui.widgets.containers.WContainer;
 import meteordevelopment.meteorclient.settings.Settings;
 import meteordevelopment.meteorclient.systems.config.Config;
-import meteordevelopment.meteorclient.systems.modules.movement.elytrafly.ElytraFlightModes;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
 import net.minecraft.nbt.Tag;
@@ -66,11 +65,11 @@ public abstract class MixinSettings {
             if (groups.isEmpty()) return;
 
             ListTag freshGroups = new ListTag();
-            boolean legacyArmorMode = false;
+            int legacyFlags = 0;
             for (Tag groupTagRaw : groups) {
                 if (!(groupTagRaw instanceof CompoundTag groupTag)) continue;
 
-                legacyArmorMode |= migrateSettingTags(groupTag);
+                legacyFlags |= migrateSettingTags(groupTag);
 
                 switch (groupTag.getStringOr("name", "")) {
                     case "General", "Inventory", "Autopilot", "悬停" -> {
@@ -90,7 +89,9 @@ public abstract class MixinSettings {
             }
 
             // 老配置用的是已删掉的官方「甲飞」模式：模式本身回到原版，并给「甲飞」板块补上甲飞模式=普通
-            if (legacyArmorMode) addLegacyArmorMode(freshGroups);
+            if ((legacyFlags & LEGACY_ARMOR_MODE) != 0) addLegacyArmorMode(freshGroups);
+            // 老配置用的是官方的「发包」平飞：现在归「无限鞘翅·发包」，给无限鞘翅板块补上模式=发包
+            if ((legacyFlags & LEGACY_PACKET_MODE) != 0) addLegacyPacketMode(freshGroups);
 
             tag.put("groups", freshGroups);
         } catch (Exception ignored) {
@@ -98,14 +99,22 @@ public abstract class MixinSettings {
         }
     }
 
+    /** migrateSettingTags 的返回值：老配置选的是已删掉的官方「甲飞」模式 */
+    @Unique
+    private static final int LEGACY_ARMOR_MODE = 1;
+
+    /** migrateSettingTags 的返回值：老配置选的是官方的「发包」平飞（现在归无限鞘翅） */
+    @Unique
+    private static final int LEGACY_PACKET_MODE = 2;
+
     /**
      * 老 tag 里的设置名/枚举值改名。
      *
-     * @return 老配置选的是已删掉的官方「甲飞」模式则为 true
+     * @return {@link #LEGACY_ARMOR_MODE} / {@link #LEGACY_PACKET_MODE} 的位或
      */
     @Unique
-    private static boolean migrateSettingTags(CompoundTag groupTag) {
-        boolean legacyArmorMode = false;
+    private static int migrateSettingTags(CompoundTag groupTag) {
+        int flags = 0;
 
         for (Tag settingTagRaw : groupTag.getListOrEmpty("settings")) {
             if (!(settingTagRaw instanceof CompoundTag settingTag)) continue;
@@ -117,19 +126,54 @@ public abstract class MixinSettings {
                 settingTag.putString("name", "simple-mode");
                 if (value.equals("甲飞")) {
                     // 老「甲飞」模式 = 新「原版模式 + 甲飞模式=普通」
-                    settingTag.putString("value", ElytraFlightModes.Vanilla.name());
-                    legacyArmorMode = true;
+                    settingTag.putString("value", "原版");
+                    flags |= LEGACY_ARMOR_MODE;
                 } else if (value.equals("合法平飞")) {
                     // 老枚举显示名「合法平飞」→ 新显示名「合法」（配置按 toString 存）
                     settingTag.putString("value", "合法");
+                } else if (value.equals("Vanilla")) {
+                    // 官方原版模式的老显示名 → 我们的「原版」
+                    settingTag.putString("value", "原版");
+                } else if (value.equals("Packet")) {
+                    // 官方「发包」平飞已经搬到「无限鞘翅·发包」，简单控制回到关闭
+                    settingTag.putString("value", "关闭");
+                    flags |= LEGACY_PACKET_MODE;
                 }
             } else if (name.equals("甲飞方式")) {
                 // 老甲飞板块的「甲飞方式」并进新的「甲飞模式」
                 settingTag.putString("name", "甲飞模式");
+            } else if (name.equals("无限鞘翅")) {
+                // 老的「无限鞘翅」开关 → 新的「无限鞘翅模式」（开 = 换甲，关 = 关闭）
+                settingTag.putString("name", "无限鞘翅模式");
+                settingTag.putString("value", value.equals("true") ? "换甲" : "关闭");
             }
         }
 
-        return legacyArmorMode;
+        return flags;
+    }
+
+    /** 给「无限鞘翅」分组补一条 无限鞘翅模式=发包（老配置用官方发包平飞时调用） */
+    @Unique
+    private static void addLegacyPacketMode(ListTag groups) {
+        for (Tag groupTagRaw : groups) {
+            if (!(groupTagRaw instanceof CompoundTag groupTag)) continue;
+            if (!groupTag.getStringOr("name", "").equals("无限鞘翅")) continue;
+
+            ListTag settings = groupTag.getListOrEmpty("settings");
+            for (Tag settingTagRaw : settings) {
+                if (settingTagRaw instanceof CompoundTag settingTag
+                    && settingTag.getStringOr("name", "").equals("无限鞘翅模式")) {
+                    return; // 老配置里本来就有这一项（上面改过名），不覆盖
+                }
+            }
+
+            CompoundTag modeTag = new CompoundTag();
+            modeTag.putString("name", "无限鞘翅模式");
+            modeTag.putString("value", "发包");
+            settings.add(modeTag);
+            groupTag.put("settings", settings);
+            return;
+        }
     }
 
     /** 给「甲飞」分组补一条 甲飞模式=普通（老配置用官方甲飞模式时调用） */

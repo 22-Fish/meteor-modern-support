@@ -29,6 +29,7 @@ import meteordevelopment.meteorclient.gui.widgets.containers.WHorizontalList;
 import meteordevelopment.meteorclient.gui.widgets.containers.WWindow;
 import meteordevelopment.meteorclient.systems.modules.Module;
 import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.Redirect;
@@ -40,16 +41,25 @@ import java.util.List;
 /**
  * ModulesScreen 注入：
  * <ol>
- *   <li>打开时若不是通过顶部页面按钮进入，重置当前页为主界面（"开启菜单展示的就是主界面"）</li>
+ *   <li>打开时若不是通过顶部页面按钮进入，重置当前页为主界面（"开启菜单展示的就是主界面"）；
+ *       这里只看本界面实例的第一次 init（见 {@link #onInitHead}）</li>
  *   <li>搜索结果显示模块所属页面标签（跨页面搜索，[页面xxx] 前缀）</li>
  *   <li>分类窗口 id 按页面区分，各页面板块窗口的位置/折叠状态独立保存</li>
  * </ol>
  */
 @Mixin(value = ModulesScreen.class, remap = false)
 public abstract class MixinModulesScreen {
+    /** 本界面实例是否已经打开过一次（init 会被重复调用） */
+    @Unique private boolean modernsupport$opened;
 
     @Inject(method = "init", at = @At("HEAD"))
     private void onInitHead(CallbackInfo ci) {
+        // init 不止跑一次：从子界面（模块设置、板块显隐）返回本界面、窗口缩放都会重跑，
+        // 只有第一次才算"打开菜单"，否则当前页会被重置成主界面——画面还停在第 1 页，
+        // 顶部栏的"主界面"按钮却以为已经在主界面（按钮的 isCurrent 判断），点了没反应
+        if (modernsupport$opened) return;
+        modernsupport$opened = true;
+
         ModulePages pages = ModulePages.get();
         if (pages == null) return;
 
@@ -81,6 +91,6 @@ public abstract class MixinModulesScreen {
     @Redirect(method = "createCategory", at = @At(value = "FIELD", target = "Lmeteordevelopment/meteorclient/gui/widgets/containers/WWindow;id:Ljava/lang/String;", opcode = Opcodes.PUTFIELD))
     private void redirectCategoryWindowId(WWindow window, String value) {
         // 窗口 id 按页面区分：各页面板块窗口的位置/折叠状态独立保存
-        window.id = "modulepage_" + ModulePages.get().getCurrent() + "_" + value;
+        window.id = ModulePages.CATEGORY_WINDOW_ID_PREFIX + ModulePages.get().getCurrent() + "_" + value;
     }
 }
