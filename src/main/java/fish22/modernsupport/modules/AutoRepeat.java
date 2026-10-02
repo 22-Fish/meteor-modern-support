@@ -101,7 +101,7 @@ public class AutoRepeat extends Module {
 
     public final WhiteListSetting whiteList = sgWhite.add(new WhiteListSetting(
         "复读白名单",
-        "只有名单里的玩家会被复读，选择和openAI的白名单一样。用量限制这一列这里用不到，随便填。",
+        "只有名单里的玩家会被复读",
         null
     ));
 

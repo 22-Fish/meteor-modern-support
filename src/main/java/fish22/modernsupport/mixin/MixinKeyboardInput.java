@@ -23,7 +23,7 @@ import fish22.modernsupport.utils.LegalRotation;
 import net.minecraft.client.player.ClientInput;
 import net.minecraft.client.player.KeyboardInput;
 import net.minecraft.world.entity.player.Input;
-import net.minecraft.world.phys.Vec2;
+import org.objectweb.asm.Opcodes;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
@@ -43,19 +43,38 @@ import static meteordevelopment.meteorclient.MeteorClient.mc;
  * W 键映射为 A 键的效果，人物仍朝视觉正前方移动；
  * 斜向时按角度映射出 W+D 这类组合键效果。
  *
- * <p><b>本地正在滑翔时不映射</b>（见 {@code onTickTail} 里的判断）：
+ * <p><b>本地正在滑翔时不映射</b>（见 {@code onKeyPressesSet} 里的判断）：
  * 原版滑翔运算（{@code travelFallFlying} → {@code updateFallFlyingMovement}）
  * 完全不读 WASD，方向只由朝向（合法转头的真实角度）决定，
  * 映射改不了这种 tick 的移动方向，只会把输入包里的按键改成和玩家实际按的不一样的键
  * （按 A 报成按 W）。无限鞘翅会把服务器的停滑广播改回滑翔，本地几乎全程都在滑翔，
  * 于是这份「对不上的输入」被服务器/反作弊拿去预测时方向就和实际移动分叉（回弹）。
  * 甲飞本地大多不是滑翔状态（滑翔窗口外走原版空中运算，那条路才吃 WASD），映射照旧生效。
+ *
+ * <p><b>只改按键，移动向量交给原版算</b>：注入点在 {@code keyPresses} 刚被赋值之后，
+ * 不改 {@code moveVector}。原版后面会用这份按键自己算出移动向量，ViaFabricPlus 对
+ * 1.21.4 及更早版本的输入管线改写（不提前归一化、改由 {@code aiStep} 乘 0.98、
+ * 最后靠 {@code moveRelative} 的长度大于 1 才归一化）也就照常生效。
+ * 自己提前归一化会让斜向移动比服务器预测慢 2%（回弹），版本越界还会和 Via 打架。
  */
 @Mixin(KeyboardInput.class)
 public abstract class MixinKeyboardInput extends ClientInput {
 
-    @Inject(method = "tick", at = @At("TAIL"))
-    private void onTickTail(CallbackInfo ci) {
+    /**
+     * {@code keyPresses} 赋值之后、原版据此算 {@code moveVector} 之前插入。
+     * 这里读到的是原版刚写进去的真实按键，映射完只写回 {@code keyPresses}，
+     * 后面的移动向量由原版（以及 Via 的版本改写）自己算。
+     */
+    @Inject(
+        method = "tick",
+        at = @At(
+            value = "FIELD",
+            target = "Lnet/minecraft/client/player/KeyboardInput;keyPresses:Lnet/minecraft/world/entity/player/Input;",
+            opcode = Opcodes.PUTFIELD,
+            shift = At.Shift.AFTER
+        )
+    )
+    private void onKeyPressesSet(CallbackInfo ci) {
         // 仅静默模式生效
         if (!LegalRotation.isRotating() || LegalRotation.getMode() != LegalRotation.Mode.QUIET) {
             return;
@@ -96,11 +115,5 @@ public abstract class MixinKeyboardInput extends ClientInput {
             keyPresses.shift(),
             keyPresses.sprint()
         );
-
-        // 移动向量按映射后的按键重新计算，与输入包完全一致（LiquidBounce 同款）：
-        // 避免浮点方向与输入包不一致，被服务器移动模拟判定异常回弹
-        float f = keyPresses.forward() == keyPresses.backward() ? 0.0F : (keyPresses.forward() ? 1.0F : -1.0F);
-        float g = keyPresses.left() == keyPresses.right() ? 0.0F : (keyPresses.left() ? 1.0F : -1.0F);
-        moveVector = new Vec2(g, f).normalized();
     }
 }

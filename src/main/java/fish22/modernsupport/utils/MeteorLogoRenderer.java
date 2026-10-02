@@ -20,6 +20,8 @@
 package fish22.modernsupport.utils;
 
 import com.mojang.blaze3d.platform.NativeImage;
+import com.mojang.blaze3d.systems.RenderSystem;
+import com.mojang.blaze3d.textures.FilterMode;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.client.renderer.RenderPipelines;
@@ -39,8 +41,11 @@ public final class MeteorLogoRenderer {
     private static final Identifier TEXTURE_ID =
         Identifier.fromNamespaceAndPath("meteor-modern-support", "meteor_loading_logo");
 
-    /** 贴图最大宽度（够清楚又不至于每帧上传太多数据） */
-    private static final int MAX_TEXTURE_WIDTH = 1024;
+    /**
+     * 贴图最大宽度。logo 在屏幕上的像素宽约等于窗口高度，原来卡 1024 时 1080p 往上都会被放大，
+     * 放大后抗锯齿边缘被重新切成锯齿，这里放到 4K 也够贴 1:1
+     */
+    private static final int MAX_TEXTURE_WIDTH = 4096;
 
     private static MeteorLogoPainter painter;
     private static DynamicTexture texture;
@@ -104,7 +109,7 @@ public final class MeteorLogoRenderer {
             rgbaScratch = new int[width * height];
             paintedDrawMs = Double.NaN;
             paintedLightMs = Double.NaN;
-            texture = new DynamicTexture("meteor-loading-logo", width, height, true);
+            texture = new SmoothTexture("meteor-loading-logo", width, height);
         }
 
         // 资源包重载后动态贴图还在，这里顺手补注册，代价只有一次 map put
@@ -126,5 +131,16 @@ public final class MeteorLogoRenderer {
         IntBuffer buffer = MemoryUtil.memIntBuffer(pixels.getPointer(), texWidth * texHeight);
         buffer.put(rgbaScratch);
         texture.upload();
+    }
+
+    /**
+     * 动态贴图默认是最近邻采样，贴图尺寸和屏幕像素差一点就会把 AA 边缘切成硬边
+     * 换成 clamp + 线性采样，1:1 时画面不变，尺寸对不齐时是平滑过渡
+     */
+    private static final class SmoothTexture extends DynamicTexture {
+        private SmoothTexture(String name, int width, int height) {
+            super(name, width, height, true);
+            this.sampler = RenderSystem.getSamplerCache().getClampToEdge(FilterMode.LINEAR);
+        }
     }
 }

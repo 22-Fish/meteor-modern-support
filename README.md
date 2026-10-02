@@ -137,6 +137,5 @@ Setting.Meteor.<设置内部名>.Description   → 设置描述
 * [Meteor Client](https://github.com/MeteorDevelopment/meteor-client)（GPL-3.0）— 依赖与扩展目标
 * [LiquidBounce](https://github.com/CCBlueX/LiquidBounce)（GPL-3.0）— MovementCorrection.SILENT 按键映射算法、Derp 模块、AngleSmooth 平滑机制
 * [Baritone](https://github.com/cabaletta/baritone)（LGPL-3.0）— LookBehavior 真实旋转机制（PRE/POST 时序）
-* [Grim](https://github.com/GrimAnticheat/Grim)（GPL-3.0）— 放置相关检查（RotationPlace / PositionPlace / FarPlace）与鼠标灵敏度反推公式：最佳合法角度 API 的「合法」就是按这些规则定的
 
 移植的代码文件均带有 GPL-3.0 头注释与来源说明。

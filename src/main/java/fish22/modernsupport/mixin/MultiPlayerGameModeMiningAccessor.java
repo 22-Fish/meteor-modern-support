@@ -23,6 +23,7 @@ import net.minecraft.client.multiplayer.MultiPlayerGameMode;
 import net.minecraft.core.BlockPos;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.gen.Accessor;
+import org.spongepowered.asm.mixin.gen.Invoker;
 
 /**
  * 访问原版客户端「现在在挖哪个方块」的状态（{@code MultiPlayerGameMode.isDestroying} / {@code destroyBlockPos}）——
@@ -40,4 +41,11 @@ public interface MultiPlayerGameModeMiningAccessor {
     /** 原版客户端现在挖的是哪个方块（没在挖的时候是上一次的位置） */
     @Accessor("destroyBlockPos")
     BlockPos meteorsupport$getDestroyBlockPos();
+
+    /**
+     * 原版「把本地选中槽位同步给服务端」那一下（{@link MultiPlayerGameMode#tick()} 每 tick 都会调）——
+     * 静默切换按住工具时要把它拦掉，见 MixinMultiPlayerGameModeSilentSwitch
+     */
+    @Invoker("ensureHasSentCarriedItem")
+    void meteorsupport$ensureHasSentCarriedItem();
 }

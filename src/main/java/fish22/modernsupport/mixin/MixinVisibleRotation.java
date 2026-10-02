@@ -51,6 +51,9 @@ import static meteordevelopment.meteorclient.MeteorClient.mc;
  *       把显示方向带偏，所以一并归零。</li>
  * </ul>
  *
+ * <p>「旋转朝向渲染模式」两种：<b>Set</b> 直接用真实角度（上面的写法）；
+ * <b>Vanilla</b> 用 {@link LegalRotation} 按原版转头动画平滑出来的角度，两者的字段含义一致。
+ *
  * <p>相机、鼠标、发包、移动运算一概不碰；第一人称不渲染玩家模型，自然看不到。
  * 没有合法转头（或设置关闭）时这里什么都不做，完全等价原版。
  */
@@ -61,11 +64,20 @@ public abstract class MixinVisibleRotation {
     private void meteor$visibleRealRotation(LivingEntity entity, LivingEntityRenderState state, float tickDelta, CallbackInfo ci) {
         // 只改本地玩家：别人的朝向由服务器同步，改了就错了
         if (entity != mc.player) return;
-        if (!LegalRotation.isDisplayingRealRotation()) return;
 
-        state.bodyRot = LegalRotation.getDisplayYaw();
-        state.yRot = 0.0f;   // 头相对身体的角度：头和身体同向
-        state.xRot = LegalRotation.getDisplayPitch();
+        if (LegalRotation.useVanillaDisplay()) {
+            // 原版转头动画：角度已经按原版规则平滑好了，直接填进渲染状态
+            if (!LegalRotation.isSmoothDisplayActive()) return;
+            state.bodyRot = LegalRotation.getSmoothBodyYaw(tickDelta);
+            state.yRot = LegalRotation.getSmoothHeadYaw(tickDelta);
+            state.xRot = LegalRotation.getSmoothPitch(tickDelta);
+        } else {
+            // 旧模式：强行把模型设成真实角度
+            if (!LegalRotation.isDisplayingRealRotation()) return;
+            state.bodyRot = LegalRotation.getDisplayYaw();
+            state.yRot = 0.0f;   // 头相对身体的角度：头和身体同向
+            state.xRot = LegalRotation.getDisplayPitch();
+        }
 
         // 滑翔姿势的额外偏航偏移（视角 → 移动方向）按真实角度算就不对了，归零
         if (state instanceof AvatarRenderState avatarState) {

@@ -28,7 +28,9 @@ import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.orbit.EventHandler;
 import meteordevelopment.orbit.EventPriority;
 import net.minecraft.network.protocol.game.ServerboundMovePlayerPacket;
+import net.minecraft.util.Mth;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.phys.Vec3;
 
 import java.util.ArrayList;
@@ -185,6 +187,16 @@ public class LegalRotation {
     /** 玩家角度替换窗口（嵌套计数，>0 表示玩家角度已被换成真实角度） */
     private static int windowDepth;
 
+    /**
+     * 窗口临时挂起计数（>0 表示这一段代码不该看到真实角度）。
+     *
+     * <p>目前只有 {@code LocalPlayer#applyInput}：里面手部晃动用的 {@code xBob}/{@code yBob}
+     * 是每 tick 朝玩家角度插值的（{@code yBob += (getYRot() - yBob) * 0.5}），那是视角自己的
+     * 东西，跟着真实角度走会让第一人称的手一直转。挂起期间窗口不算开、玩家角度先还原成视角角度，
+     * 退出挂起再换回真实角度。
+     */
+    private static int suspendDepth;
+
     /** 本 tick 移动运算用到的角度（移动包必须和它一致，否则服务器预测方向对不上） */
     private static boolean movementCaptured;
     private static float moveYaw;
@@ -336,6 +348,48 @@ public class LegalRotation {
     }
 
     /**
+     * 本 tick 的移动窗口是否开着（窗口内读朝向必须全部等于真实角度）。
+     *
+     * <p>窗口 {@link #pushMoveWindow()} 里已经把玩家角度换成真实角度，但「本 tick 的移动运算」
+     * 里还有别的会读 {@code getYRot()} / {@code getXRot()} 的原版代码，例如：
+     *
+     * <ul>
+     *   <li>{@code LivingEntity#jumpFromGround} 里疾跑起跳那个 0.2 冲量；</li>
+     *   <li>{@code Entity#move} 里算 {@code minorHorizontalCollision} 用的
+     *       {@code LocalPlayer#isHorizontalCollisionMinor}。</li>
+     * </ul>
+     *
+     * <p>只要有一处读到的还是视角角度，客户端这一 tick 算出来的速度方向就和服务端预测的
+     * 差一个「目标偏航 − 视角偏航」；走路时角度差被地面摩擦吃掉不明显，疾跑起跳那一 tick
+     * 会直接分叉被拉回（误差 ∝ sin(差角)，所以目标偏航和视角偏航一致时看不到）。窗口开着时
+     * 由 {@link fish22.modernsupport.mixin.MixinEntityRotationWindow} 统一把读取结果换成真实角度。
+     */
+    public static boolean isInMoveWindow() {
+        return windowDepth > 0 && suspendDepth == 0;
+    }
+
+    /**
+     * 临时挂起窗口：这一段代码按视角角度算（手部晃动等视角自己的东西）。
+     *
+     * <p>挂起时把玩家角度先还原成视角角度，退出挂起时再换回真实角度；窗口计数本身不动，
+     * 所以移动包那份角度（{@link #moveYaw}）不受影响。
+     */
+    public static void suspendWindow() {
+        suspendDepth++;
+        if (suspendDepth == 1 && windowDepth > 0 && mc.player != null) {
+            mc.player.setYRot(viewYaw);
+            mc.player.setXRot(viewPitch);
+        }
+    }
+
+    /** 结束挂起，重新用真实角度（和 {@link #suspendWindow()} 成对调用） */
+    public static void resumeWindow() {
+        if (suspendDepth == 0) return;
+        suspendDepth--;
+        if (suspendDepth == 0 && windowDepth > 0 && mc.player != null) applyReal();
+    }
+
+    /**
      * 服务器此刻记录的角度（偏航）。
      *
      * <p>本 tick 或上一 tick 发过真实角度，就是那一份真实角度（服务器只知道我们发出去的包）；
@@ -396,6 +450,92 @@ public class LegalRotation {
     /** 渲染显示用的俯仰（真实角度） */
     public static float getDisplayPitch() {
         return realPitch;
+    }
+
+    // ====== 可见旋转方向（Vanilla 模式：原版转头动画） ======
+
+    /** 身体每 tick 追头的比例，就是原版 {@code LivingEntity#tickHeadTurn} 里的 0.3 */
+    private static final float DISPLAY_TURN_SPEED = 0.3f;
+    /** 显示角度和视角差多少度以内就算对齐，不再接管模型 */
+    private static final float DISPLAY_ALIGN_EPSILON = 0.5f;
+
+    /** 显示角度（当前 tick 与上一 tick），和原版的 yBodyRot/yHeadRot 一样交给渲染插值 */
+    private static float displayBodyYaw;
+    private static float displayBodyYawO;
+    private static float displayHeadYaw;
+    private static float displayHeadYawO;
+    private static float displayPitch;
+    private static float displayPitchO;
+    /** Vanilla 模式下还没和视角对齐，这一帧继续接管模型 */
+    private static boolean smoothDisplayActive;
+
+    /** 渲染模式是不是「原版转头动画」 */
+    public static boolean useVanillaDisplay() {
+        return LegalRotationConfig.getRotationRenderMode() == RotationRenderMode.Vanilla;
+    }
+
+    /** 渲染用：Vanilla 模式下平滑出来的身体朝向（绝对偏航） */
+    public static float getSmoothBodyYaw(float tickDelta) {
+        return Mth.rotLerp(tickDelta, displayBodyYawO, displayBodyYaw);
+    }
+
+    /** 渲染用：Vanilla 模式下头的角度，和原版一样是相对身体的角度 */
+    public static float getSmoothHeadYaw(float tickDelta) {
+        return Mth.wrapDegrees(Mth.rotLerp(tickDelta, displayHeadYawO, displayHeadYaw) - getSmoothBodyYaw(tickDelta));
+    }
+
+    /** 渲染用：Vanilla 模式下平滑出来的俯仰 */
+    public static float getSmoothPitch(float tickDelta) {
+        return Mth.lerp(tickDelta, displayPitchO, displayPitch);
+    }
+
+    /** 渲染用：Vanilla 模式现在要不要接管模型显示 */
+    public static boolean isSmoothDisplayActive() {
+        return smoothDisplayActive && LegalRotationConfig.isVisibleRotation();
+    }
+
+    /**
+     * 每 tick 推进一次 Vanilla 模式的显示角度，规则照原版 {@code LivingEntity#tickHeadTurn}：
+     * 头直接跟着目标（原版头就是 {@code getYRot}，不额外平滑），身体按 0.3/tick 追头，
+     * 头相对身体不超过原版限制（玩家平时 50°、格挡时 15°）。转得再快也只有身体落后，
+     * 显示方向本身不积累误差。旋转结束后目标换回视角角度，身体慢慢转回去，
+     * 完全对齐才放手（那之后就完全等价原版渲染）。
+     */
+    private static void updateSmoothDisplay() {
+        if (mc.player == null) return;
+
+        float targetYaw = displayActive ? realYaw : mc.player.getYRot();
+        float targetPitch = displayActive ? realPitch : mc.player.getXRot();
+
+        if (!displayActive && !smoothDisplayActive) {
+            // 没在显示：角度一直贴着视角，下一次旋转不会从很久以前的角度开始转
+            displayHeadYaw = displayBodyYaw = displayHeadYawO = displayBodyYawO = targetYaw;
+            displayPitch = displayPitchO = targetPitch;
+            return;
+        }
+
+        displayBodyYawO = displayBodyYaw;
+        displayHeadYawO = displayHeadYaw;
+        displayPitchO = displayPitch;
+
+        // 原版 tickHeadTurn：头就是 yRot 本身（原版不额外平滑头），身体 0.3/tick 追头
+        displayHeadYaw = targetYaw;
+        displayPitch = targetPitch;
+        displayBodyYaw += Mth.wrapDegrees(displayHeadYaw - displayBodyYaw) * DISPLAY_TURN_SPEED;
+        float gap = Mth.wrapDegrees(displayHeadYaw - displayBodyYaw);
+        float max = maxHeadRotation();
+        if (Math.abs(gap) > max) displayBodyYaw += gap - (float) Math.signum(gap) * max;
+
+        // 头和俯仰都直接跟目标，只有身体会落后，所以身体归位之前继续接管模型
+        smoothDisplayActive = displayActive
+            || Math.abs(Mth.wrapDegrees(displayHeadYaw - mc.player.getYRot())) > DISPLAY_ALIGN_EPSILON
+            || Math.abs(Mth.wrapDegrees(displayBodyYaw - mc.player.getYRot())) > DISPLAY_ALIGN_EPSILON
+            || Math.abs(displayPitch - mc.player.getXRot()) > DISPLAY_ALIGN_EPSILON;
+    }
+
+    /** 原版规则：玩家头相对身体的最大角度 */
+    private static float maxHeadRotation() {
+        return mc.player == null ? 50.0f : ((LivingEntity) mc.player).getMaxHeadRotationRelativeToBody();
     }
 
     // ====== 移动运算窗口（供 mixin 调用） ======
@@ -472,7 +612,9 @@ public class LegalRotation {
         activePriority = 0;
         rotatedThisTick = false;
         displayActive = false;
+        smoothDisplayActive = false;
         movementCaptured = false;
+        suspendDepth = 0;
         packetApplied = false;
         serverRotationValid = false;
         currentMode = Mode.OFF;
@@ -539,10 +681,8 @@ public class LegalRotation {
         serverRotationTick = tickCounter;
         serverRotationValid = true;
 
-        // 让这一份真实角度真的随本 tick 的移动包发出去（hasRot = true），
-        // 理由见 ROTATION_CONFIRM_EPSILON：服务端那边记的朝向可能已经被相机视角覆盖，
-        // 只靠「角度变了才发」的话就永远补不回来。
-        // 「每次调用都设置朝向」关掉时不动记账字段：退回原版逻辑，朝向不一样才带朝向发包。
+        // 「每次调用都设置朝向」已硬编码关闭，这里不动记账字段：
+        // 退回原版逻辑，朝向不一样才在移动包里带朝向（重复朝向包会被 Grim 的 AimDuplicateLook 告警）。
         LocalPlayerRotationAccessor sent = (LocalPlayerRotationAccessor) mc.player;
         if (LegalRotationConfig.isAlwaysSetRotation()) {
             sent.setLastSentYaw(packetYaw + ROTATION_CONFIRM_EPSILON);
@@ -579,6 +719,9 @@ public class LegalRotation {
     /** tick 结束：清掉「本 tick 旋转过」标记（早于它的实体 tick 已经用完了） */
     @EventHandler(priority = EventPriority.LOWEST)
     private static void onTickPost(TickEvent.Post event) {
+        // Vanilla 模式的显示角度在这里推进一次（要看到本 tick 的目标，所以排在清 displayActive 之前）
+        updateSmoothDisplay();
+
         // 这一 tick 没有再 rotate()：显示角度随之失效
         // （服务器也是这一 tick 之后回到视角角度，两边时机一致）
         if (!rotatedThisTick) displayActive = false;

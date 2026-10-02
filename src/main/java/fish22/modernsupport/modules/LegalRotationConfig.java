@@ -20,7 +20,9 @@
 package fish22.modernsupport.modules;
 
 import fish22.modernsupport.utils.LegalRotation;
+import fish22.modernsupport.utils.RotationRenderMode;
 import meteordevelopment.meteorclient.settings.BoolSetting;
+import meteordevelopment.meteorclient.settings.EnumSetting;
 import meteordevelopment.meteorclient.settings.IntSetting;
 import meteordevelopment.meteorclient.settings.Setting;
 import meteordevelopment.meteorclient.settings.SettingGroup;
@@ -38,17 +40,17 @@ import meteordevelopment.meteorclient.systems.modules.Module;
  *       （身体与头）的显示朝向也转到真实角度，方便判断服务器看到的真实朝向。
  *       只改渲染显示：相机、鼠标输入、发包全都不动（实现见
  *       {@link fish22.modernsupport.mixin.MixinVisibleRotation}）。</li>
- *   <li><b>每次调用都设置朝向</b>（默认开启）：合法转头每 tick 都把这一份真实朝向
- *       随移动包重发一次，服务端记的朝向不会被相机视角（位置纠正包、别的模块补的
- *       移动包）覆盖 —— 这是「服务端朝向永远等于我们算出来的方向」的前提。
- *       代价是同方向输入、相机不动时连续两个朝向包完全相同，Grim 的
- *       {@code AimDuplicateLook} 会每 tick 报一次（只是告警，没有 setback）。
- *       关掉就退回原版逻辑：<b>朝向不一样才在移动包里带朝向</b>，不会再出现重复朝向包，
- *       但服务端朝向被覆盖时要等下一次朝向变化才补回来（那种情况会出现朝向不一致/回弹）。</li>
+ *   <li><b>旋转朝向渲染模式</b>：<b>Vanilla</b>（默认）= 按原版转头动画来
+ *       （头直接跟着真实角度，身体 0.3/tick 追上去，头相对身体不超过原版限制）；
+ *       <b>Set</b> = 旧模式，直接把模型设成真实角度，瞬间转过去。
+ *       只影响显示动画，真实角度本身两种模式一样。</li>
  *   <li><b>默认优先级</b>（默认 0）：调用合法转头 API 时没写优先级的那些功能（鞘翅飞行等）
  *       用的优先级。同一 tick 里多个模块都要转视角时，优先级高的那一份生效，低的整个忽略
  *       （见 {@link LegalRotation}）。</li>
  * </ul>
+ *
+ * <p>原来还有「每次调用都设置朝向」设置项，现在隐藏并硬编码为关闭：重复朝向包会被
+ * Grim 的 {@code AimDuplicateLook} 每 tick 告警，退回原版逻辑（朝向不一样才带朝向发包）。
  */
 public class LegalRotationConfig extends Module {
 
@@ -64,10 +66,11 @@ public class LegalRotationConfig extends Module {
         .build()
     );
 
-    private final Setting<Boolean> alwaysSetRotation = sgGeneral.add(new BoolSetting.Builder()
-        .name("每次调用都设置朝向")
-        .description("开启后重复位置旋转会被叠可疑度。因为种种原因，推荐开启")
-        .defaultValue(true)
+    private final Setting<RotationRenderMode> rotationRenderMode = sgGeneral.add(new EnumSetting.Builder<RotationRenderMode>()
+        .name("旋转朝向渲染模式")
+        .description("Set 是旧模式：强行把模型设成真实角度。Vanilla 用原版转头动画平滑转过去。")
+        .defaultValue(RotationRenderMode.Vanilla)
+        .visible(visibleRotation::get)
         .build()
     );
 
@@ -90,9 +93,14 @@ public class LegalRotationConfig extends Module {
         return instance == null || instance.visibleRotation.get();
     }
 
-    /** 「每次调用都设置朝向」是否开启（默认开启；模块还没创建时按默认值算） */
+    /** 「旋转朝向渲染模式」（默认 Vanilla；模块还没创建时按默认值算） */
+    public static RotationRenderMode getRotationRenderMode() {
+        return instance == null ? RotationRenderMode.Vanilla : instance.rotationRenderMode.get();
+    }
+
+    /** 「每次调用都设置朝向」：设置项已隐藏，硬编码关闭（重复朝向包会被 Grim 的 AimDuplicateLook 每 tick 告警） */
     public static boolean isAlwaysSetRotation() {
-        return instance == null || instance.alwaysSetRotation.get();
+        return false;
     }
 
     /** 「默认优先级」（默认 0；模块还没创建时按默认值算） */

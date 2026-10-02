@@ -35,16 +35,20 @@ import static meteordevelopment.meteorclient.MeteorClient.mc;
  *
  * <p>与「鞘翅飞行」互斥：两边都在控制滑翔，同时开只会互相打架。
  *
- * <h3>合法模式</h3>
- * 不每 tick 用起飞包维持滑翔，只在离地那一 tick 正常发一发起飞包（回弹重启、手动起飞排队
- * 的请求也在那里发）。两个子选项：
+ * <h3>模式</h3>
  * <ul>
- *   <li><b>兼容grim输入检测</b>：Grim 收到起飞包时要求输入里的跳跃键是松开的、紧接着的第一个
- *       移动包又要看到按下（ElytraB 的 no release / no jump），一直按着跳跃键由客户端维持滑翔
- *       会被直接驳回。开启后离地瞬间模拟按键输入包（先松开一 tick、再按下 + 起飞包）</li>
- *   <li><b>落地维持滑翔</b>（默认关）：落地也不停止滑翔，落地后本地强行维持滑翔状态 4 tick
- *       （服务端广播的停滑数据直接改回滑翔），弹跳离地瞬间直接接上滑翔运算，中间不掉速；
- *       地面那段靠 Grim 对停止滑翔的豁免</li>
+ *   <li><b>meteor</b>：Meteor 官方弹跳的原始行为，每 tick 用起飞包维持滑翔</li>
+ *   <li><b>原版</b>（原来的「合法模式」）：不每 tick 用起飞包维持滑翔，只在离地那一 tick 正常
+ *       发一发起飞包（回弹重启、手动起飞排队的请求也在那里发）。两个子选项：
+ *       <ul>
+ *         <li><b>兼容grim输入检测</b>：Grim 收到起飞包时要求输入里的跳跃键是松开的、紧接着的第一个
+ *           移动包又要看到按下（ElytraB 的 no release / no jump），一直按着跳跃键由客户端维持滑翔
+ *           会被直接驳回。开启后离地瞬间模拟按键输入包（先松开一 tick、再按下 + 起飞包）</li>
+ *         <li><b>落地维持滑翔tick</b>：落地也不停止滑翔，落地后本地强行维持滑翔状态这么多 tick
+ *           （服务端广播的停滑数据直接改回滑翔），弹跳离地瞬间直接接上滑翔运算，中间不掉速；
+ *           地面那段靠 Grim 对停止滑翔的豁免。0 = 关闭，默认 0</li>
+ *       </ul>
+ *   </li>
  * </ul>
  *
  * <h3>固定相机</h3>
@@ -54,6 +58,14 @@ import static meteordevelopment.meteorclient.MeteorClient.mc;
 public class ElytraBounce extends Module {
 
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
+
+    /** 模式：meteor = 官方弹跳（每 tick 用起飞包维持滑翔）；原版 = 原来的合法模式 */
+    private final Setting<Mode> mode = sgGeneral.add(new EnumSetting.Builder<Mode>()
+        .name("模式")
+        .description("meteor：每 tick 用起飞包维持滑翔；原版：只在离地那一 tick 正常发一发起飞包（原来的合法模式）")
+        .defaultValue(Mode.Meteor)
+        .build()
+    );
 
     /** 自动按住跳跃键（弹跳） */
     private final Setting<Boolean> autoJump = sgGeneral.add(new BoolSetting.Builder()
@@ -136,29 +148,12 @@ public class ElytraBounce extends Module {
         .build()
     );
 
-    /** 合法模式：不每 tick 用起飞包维持滑翔 */
-    private final Setting<Boolean> legal = sgGeneral.add(new BoolSetting.Builder()
-        .name("合法模式")
-        .description("不每 tick 用起飞包维持滑翔，只在离地那一 tick 正常发一发起飞包")
-        .defaultValue(false)
-        .build()
-    );
-
-    /** 兼容 grim 输入检测（仅合法模式） */
+    /** 兼容 grim 输入检测（仅原版模式） */
     private final Setting<Boolean> grimInput = sgGeneral.add(new BoolSetting.Builder()
         .name("兼容grim输入检测")
         .description("离地瞬间模拟按键输入包（先松开再按下）后再起飞，躲开 Grim 起飞包的输入检测")
         .defaultValue(false)
-        .visible(legal::get)
-        .build()
-    );
-
-    /** 落地维持滑翔（仅合法模式） */
-    private final Setting<Boolean> keepGlide = sgGeneral.add(new BoolSetting.Builder()
-        .name("落地维持滑翔")
-        .description("落地也不停止滑翔：落地后本地强行维持 4 tick 滑翔状态，弹跳离地瞬间直接接上滑翔运算")
-        .defaultValue(false)
-        .visible(legal::get)
+        .visible(this::legalMode)
         .build()
     );
 
@@ -170,16 +165,23 @@ public class ElytraBounce extends Module {
         .build()
     );
 
-    /** 落地维持滑翔：维持的 tick 数 */
+    /** 落地维持滑翔：维持的 tick 数（常驻拖动条，0 = 关闭，仅原版模式生效） */
     private final Setting<Integer> keepGlideTicksSetting = sgGeneral.add(new IntSetting.Builder()
-        .name("维持tick")
-        .description("落地后强行维持滑翔状态的 tick 数")
-        .defaultValue(KEEP_GLIDE_TICKS)
-        .min(1)
-        .sliderRange(1, 20)
-        .visible(() -> legal.get() && keepGlide.get())
+        .name("落地维持滑翔tick")
+        .description("落地后强行维持滑翔状态的 tick 数，0 = 关闭（仅原版模式生效）")
+        .defaultValue(0)
+        .range(0, 10)
+        .sliderRange(0, 10)
         .build()
     );
+
+    /** 弹跳模式：meteor（官方，每 tick 用起飞包维持滑翔）/ 原版（只在离地那一 tick 发起飞包） */
+    public enum Mode {
+        /** Meteor 官方弹跳行为 */
+        Meteor,
+        /** 原版（原来的合法模式），只在离地那一 tick 发一发起飞包 */
+        Vanilla
+    }
 
     /** 是否刚被回弹（等重启延迟） */
     private boolean rubberbanded = false;
@@ -206,9 +208,6 @@ public class ElytraBounce extends Module {
 
     /** 落地维持滑翔：落地后强行维持本地滑翔状态的剩余 tick 数 */
     private int keepGlideTicks;
-
-    /** 落地维持滑翔：落地后维持多少 tick */
-    private static final int KEEP_GLIDE_TICKS = 4;
 
     /** 落地维持滑翔：水平速度低于这个值（m/s）就不维持，慢了服务端预测对得准，维持反而被拉回 */
     private static final double KEEP_GLIDE_MIN_SPEED = 15.0;
@@ -273,7 +272,7 @@ public class ElytraBounce extends Module {
         // 只在水平速度够快时启用：速度慢了服务端预测本来就能对上，维持滑翔反而会被拉回
         boolean keepGlideFastEnough = horizontalSpeed() > KEEP_GLIDE_MIN_SPEED;
 
-        if (landed && legal.get() && keepGlide.get() && keepGlideFastEnough) {
+        if (landed && legalMode() && keepGlideTicksSetting.get() > 0 && keepGlideFastEnough) {
             keepGlideTicks = keepGlideTicksSetting.get();
         }
         if (keepGlideTicks > 0) {
@@ -285,7 +284,7 @@ public class ElytraBounce extends Module {
             }
         }
 
-        if (legal.get()) tickLegal();
+        if (legalMode()) tickLegal();
 
         // 固定相机：在 tick 前半段走合法转头API-严格模式（只改服务器看到的朝向，相机不动）。
         // 放在这里而不是 tick 末尾，本 tick 的移动运算与移动包就直接用这个锁定朝向
@@ -307,13 +306,13 @@ public class ElytraBounce extends Module {
     private void onTick(TickEvent.Post event) {
         if (mc.player == null) return;
 
-        boolean legalMode = legal.get();
-        if (legalMode) tickLegalEnd();
+        boolean vanilla = legalMode();
+        if (vanilla) tickLegalEnd();
 
         // 按着跳跃但没在滑翔：手动补一发起飞包（官方行为，客户端靠起飞包维持滑翔）。
         // 合法模式不这么补：那一发在 Grim 上会被看到「按着跳跃」直接驳回，
         // 起飞交给 tickLegal 按正常顺序发
-        if (!legalMode && mc.options.keyJump.isDown() && !mc.player.isFallFlying() && !manualTakeoff.get()) {
+        if (!vanilla && mc.options.keyJump.isDown() && !mc.player.isFallFlying() && !manualTakeoff.get()) {
             sendStartFlying();
         }
 
@@ -346,7 +345,7 @@ public class ElytraBounce extends Module {
                 tickDelay--;
             } else {
                 if (restart.get()) {
-                    if (legalMode) grimTakeoffPending = true;
+                    if (vanilla) grimTakeoffPending = true;
                     else sendStartFlying();
                 }
                 rubberbanded = false;
@@ -420,7 +419,7 @@ public class ElytraBounce extends Module {
 
     /** 落地维持滑翔：本 tick 是否在强行维持本地滑翔状态 */
     private boolean keepGlideActive() {
-        return keepGlide.get() && keepGlideTicks > 0;
+        return keepGlideTicks > 0;
     }
 
     /** 落地维持滑翔：把本地滑翔状态补回来（服务端广播的停滑这几 tick 不生效） */
@@ -432,7 +431,7 @@ public class ElytraBounce extends Module {
 
     /** 落地维持滑翔是否生效（给 {@link fish22.modernsupport.mixin.MixinSynchedEntityData} 用） */
     public static boolean isKeepingGlide() {
-        return active != null && active.isActive() && active.legal.get() && active.keepGlideActive();
+        return active != null && active.isActive() && active.legalMode() && active.keepGlideActive();
     }
 
     /**
@@ -481,9 +480,14 @@ public class ElytraBounce extends Module {
         grimTakeoffPending = false;
     }
 
-    /** 兼容 grim 输入检测是否生效：合法模式 + 选项打开 */
+    /** 是不是原版模式（原来的「合法模式」） */
+    private boolean legalMode() {
+        return mode.get() == Mode.Vanilla;
+    }
+
+    /** 兼容 grim 输入检测是否生效：原版模式 + 选项打开 */
     private boolean grimOn() {
-        return legal.get() && grimInput.get();
+        return legalMode() && grimInput.get();
     }
 
     /** 兼容 grim 输入检测：本 tick 的输入包要按下跳跃（起飞 tick） */

@@ -1244,7 +1244,7 @@ public abstract class MixinCrystalAura {
             LegalCrystal.log("自动挖掘: 「发包挖掘」没开，这一格不挖 %s", pos.toShortString());
             return;
         }
-        if (!ghostMine.ignoreRangeWhileMining.get() && PlayerUtils.distanceTo(pos) > ghostMine.range.get()) return;
+        if (PlayerUtils.distanceTo(pos) > ghostMine.range.get()) return;
         if (sameAsQueued(GhostMine.firstBlockDate, pos) || sameAsQueued(GhostMine.secondBlockDate, pos)) return;
         if (ghostMine.hasRebreakFrame(pos)) return;
 

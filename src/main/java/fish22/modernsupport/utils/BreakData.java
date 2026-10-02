@@ -86,7 +86,8 @@ public final class BreakData {
     /**
      * 工具挖掘速度：物品自己的速度 + 效率附魔，再乘急迫 / 挖掘疲劳 / 水里 / 空中这些玩家状态
      * <p>
-     * 对照原版 {@code Player.getDestroySpeed}，和 Meteor 的 {@code BlockUtils} 用的是同一套
+     * 对照原版 {@code Player.getDestroySpeed}：Meteor 的 {@code BlockUtils} 漏了 BLOCK_BREAK_SPEED 属性那一乘，
+     * 这里按原版和 Grim 的算法补上
      */
     public static double speed(ItemStack tool, BlockState state, boolean onGround) {
         double speed = tool.getDestroySpeed(state);
@@ -112,6 +113,9 @@ public final class BreakData {
 
             speed *= k;
         }
+
+        // 原版 Player.getDestroySpeed 在疲劳之后乘这个属性（默认 1.0，被道具/效果改过时才算数）
+        speed *= mc.player.getAttributeValue(Attributes.BLOCK_BREAK_SPEED);
 
         if (mc.player.isEyeInFluid(FluidTags.WATER)) {
             speed *= mc.player.getAttributeValue(Attributes.SUBMERGED_MINING_SPEED);

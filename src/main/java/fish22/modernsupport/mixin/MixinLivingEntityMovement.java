@@ -38,6 +38,10 @@ import static meteordevelopment.meteorclient.MeteorClient.mc;
  *   <li>{@code updateFallFlyingMovement}：滑翔速度运算读 {@code getLookAngle()} 与
  *       {@code getXRot()}（滑翔抬升、俯冲加速、视线对齐），用真实角度算。
  *       甲飞（穿胸甲假飞）也是直接调用这个方法，所以同样被覆盖。</li>
+ *   <li>{@code aiStep}：整段移动运算（{@code applyInput} → 起跳 → {@code travel} → 碰撞分类）
+ *       都在窗口里，保证这一段里任何读朝向的地方拿到的都是真实角度。
+ *       其中 {@code applyInput} 会临时挂起窗口（手部晃动的 {@code xBob}/{@code yBob} 是视角自己的
+ *       东西，见 {@link LegalRotation#suspendWindow()}），渲染与相机完全不受影响。</li>
  * </ul>
  *
  * <p>两处都是「进入时临时换成真实角度、返回前立刻换回视角角度」，窗口只在这一次
@@ -63,6 +67,23 @@ public class MixinLivingEntityMovement {
 
     @Inject(method = "updateFallFlyingMovement", at = @At("RETURN"))
     private void onGlideReturn(CallbackInfoReturnable<Vec3> cir) {
+        if ((Object) this == mc.player) LegalRotation.popMoveWindow();
+    }
+
+    /**
+     * 整段移动运算的窗口：{@code applyInput}、起跳、{@code travel}（{@code moveRelative} 与
+     * {@code move} 的碰撞分类）都在这一段里。
+     *
+     * <p>只开窗口不做替换（真实角度由 {@link MixinEntityRotationWindow} 在读取时给）；
+     * 非本地玩家完全原版。
+     */
+    @Inject(method = "aiStep", at = @At("HEAD"))
+    private void onAiStepHead(CallbackInfo ci) {
+        if ((Object) this == mc.player) LegalRotation.pushMoveWindow();
+    }
+
+    @Inject(method = "aiStep", at = @At("RETURN"))
+    private void onAiStepReturn(CallbackInfo ci) {
         if ((Object) this == mc.player) LegalRotation.popMoveWindow();
     }
 }

@@ -11,3 +11,6 @@ accessible method net/minecraft/world/item/BlockItem getPlacementState (Lnet/min
 # （史莱姆 playerStatus.restorePos 会一起回退 touchingWater / submergedInWater）
 accessible field net/minecraft/world/entity/Entity wasTouchingWater Z
 accessible field net/minecraft/world/entity/Entity wasEyeInWater Z
+
+# 合法转头的「原版转头动画」显示模式要按原版规则限制头相对身体的角度（原版该方法是 protected）
+accessible method net/minecraft/world/entity/LivingEntity getMaxHeadRotationRelativeToBody ()F

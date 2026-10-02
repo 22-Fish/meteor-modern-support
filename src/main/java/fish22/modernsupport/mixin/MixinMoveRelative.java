@@ -40,6 +40,15 @@ import static meteordevelopment.meteorclient.MeteorClient.mc;
  *   <li>玩家自己的视角角度全程不变（不闪视角、鼠标可以自由转）。</li>
  * </ul>
  *
+ * <p>同一个窗口也包住 {@code move(MoverType, Vec3)}：它里面算
+ * {@code minorHorizontalCollision = isHorizontalCollisionMinor(...)} 同样读 {@code getYRot()}
+ * （原版「这次贴墙算不算正面撞」的判定），不包的话客户端按视角角度分类、服务端按移动包里的
+ * 朝向分类，撞墙那几 tick 的动量处理和疾跑状态就会分叉（{@code SprintE} / 位置预测拉回）。
+ *
+ * <p>窗口里所有读朝向的地方都由 {@link MixinEntityRotationWindow} 统一返回真实角度，
+ * 所以窗口只需要「开」对地方，不需要逐个方法去改。窗口只覆盖移动运算，不覆盖输入处理
+ * （{@code applyInput} 里手部晃动的 {@code xBob}/{@code yBob} 读的还是视角角度）和渲染。
+ *
  * <p>合法转头没有激活时 {@link LegalRotation#pushMoveWindow()} 什么都不做，
  * 完全等价原版。
  */
@@ -53,6 +62,16 @@ public class MixinMoveRelative {
 
     @Inject(method = "moveRelative", at = @At("RETURN"))
     private void onMoveRelativeReturn(CallbackInfo ci) {
+        if ((Object) this == mc.player) LegalRotation.popMoveWindow();
+    }
+
+    @Inject(method = "move(Lnet/minecraft/world/entity/MoverType;Lnet/minecraft/world/phys/Vec3;)V", at = @At("HEAD"))
+    private void onMoveHead(CallbackInfo ci) {
+        if ((Object) this == mc.player) LegalRotation.pushMoveWindow();
+    }
+
+    @Inject(method = "move(Lnet/minecraft/world/entity/MoverType;Lnet/minecraft/world/phys/Vec3;)V", at = @At("RETURN"))
+    private void onMoveReturn(CallbackInfo ci) {
         if ((Object) this == mc.player) LegalRotation.popMoveWindow();
     }
 }

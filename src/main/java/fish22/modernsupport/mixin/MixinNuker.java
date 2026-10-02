@@ -163,7 +163,7 @@ public abstract class MixinNuker {
         if (sameAsQueued(GhostMine.firstBlockDate, pos) || sameAsQueued(GhostMine.secondBlockDate, pos)) return;
         if (ghostMine.hasRebreakFrame(pos)) return;
         if (GhostMine.unbreakableBlocks.contains(mc.level.getBlockState(pos).getBlock())) return;
-        if (!ghostMine.ignoreRangeWhileMining.get() && PlayerUtils.distanceTo(pos) > ghostMine.range.get()) return;
+        if (PlayerUtils.distanceTo(pos) > ghostMine.range.get()) return;
 
         // 方向只是兜底：「发包挖掘」发包时还会按当时的眼睛位置重算面
         Direction face = faceMode.get().pick(pos);
