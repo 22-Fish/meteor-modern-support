@@ -24,7 +24,9 @@ import fish22.modernsupport.utils.GrimNoFallSupport;
 import meteordevelopment.meteorclient.events.packets.PacketEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.settings.IVisible;
+import meteordevelopment.meteorclient.settings.IntSetting;
 import meteordevelopment.meteorclient.settings.Setting;
+import meteordevelopment.meteorclient.settings.SettingGroup;
 import meteordevelopment.meteorclient.systems.modules.movement.NoFall;
 import net.minecraft.world.item.MaceItem;
 import org.spongepowered.asm.mixin.Final;
@@ -36,6 +38,7 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 import java.lang.reflect.Field;
+import java.util.List;
 
 import static meteordevelopment.meteorclient.MeteorClient.mc;
 
@@ -74,16 +77,44 @@ public abstract class MixinNoFall {
     @Final
     private Setting<Boolean> pauseOnMace;
 
+    /** Grim 模式下的摔伤高度阈值（高于这个高度摔下来才救），挂在默认组里 */
+    @Unique
+    private Setting<Integer> fallThreshold;
+
     @Unique
     private boolean modernsupport$isGrim() {
         NoFall.Mode current = mode != null ? mode.get() : null;
         return current != null && GRIM_MODE.equals(current.name());
     }
 
-    /** 官方「锚点」只属于 空放 / 放水 两个模式，Grim 下不该露出来 */
+    /** 官方「锚点」只属于 空放 / 放水 两个模式，Grim 下不该露出来；顺便挂上本模组的设置 */
     @Inject(method = "<init>", at = @At("TAIL"))
     private void onInit(CallbackInfo ci) {
         hideForeignSettings();
+
+        NoFall self = (NoFall) (Object) this;
+        fallThreshold = new IntSetting.Builder()
+            .name("高度阈值")
+            .description("只有从高于这个高度的地方摔下来才反摔伤，1-64")
+            .defaultValue(GrimNoFallSupport.DEFAULT_FALL_THRESHOLD)
+            .range(1, 64)
+            .sliderRange(1, 64)
+            .visible(this::modernsupport$isGrim)
+            .build();
+        insertAfter(self.settings.getDefaultGroup(), "mode", fallThreshold);
+    }
+
+    /** 把设置插到分组内指定名字的设置之后（找不到就追加到末尾） */
+    @Unique
+    private static void insertAfter(SettingGroup group, String afterName, Setting<?> setting) {
+        List<Setting<?>> settings = ((SettingGroupAccessor) (Object) group).getSettings();
+        for (int i = 0; i < settings.size(); i++) {
+            if (settings.get(i).name.equals(afterName)) {
+                settings.add(i + 1, setting);
+                return;
+            }
+        }
+        group.add(setting);
     }
 
     /**
@@ -119,9 +150,13 @@ public abstract class MixinNoFall {
         }
     }
 
-    /** 每 tick 记下移动之前的摔伤距离（落地包发出时客户端已经清零，只能提前记） */
+    /** 每 tick 先同步「是不是 Grim 模式」，再记摔伤距离 / 跑等回弹状态机（落地包发出时客户端已经清零，只能提前记） */
     @Inject(method = "onTick", at = @At("HEAD"))
     private void onTick(TickEvent.Pre event, CallbackInfo ci) {
+        GrimNoFallSupport.setGrimMode(modernsupport$isGrim());
+        GrimNoFallSupport.setFallThreshold(fallThreshold != null
+            ? fallThreshold.get()
+            : GrimNoFallSupport.DEFAULT_FALL_THRESHOLD);
         GrimNoFallSupport.onTick();
     }
 

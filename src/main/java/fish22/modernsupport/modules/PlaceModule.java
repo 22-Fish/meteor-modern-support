@@ -494,7 +494,7 @@ public abstract class PlaceModule extends Module {
      * 就放不出来，这一格留给下一轮。
      *
      * <p>转向用的是「严格」模式（和 {@code LegalRotation.rotate(yaw, pitch)} 的默认档一致，
-     * 即真实旋转 + 客户端静默），优先级取「合法转头API配置 → 默认优先级」。
+     * 即真实旋转 + 客户端静默），优先级取「合法转头配置 → 默认优先级」。
      */
     private boolean placeProjectAt(Protocol current, BlockPos pos, Limits limits) {
         if (!LitematicaCompat.isAvailable()) {

@@ -33,13 +33,20 @@ public abstract class MixinElytraKeyboardInput extends ClientInput {
 
     @Inject(method = "tick", at = @At("TAIL"))
     private void onTickTail(CallbackInfo ci) {
+        // 登记的起飞包在这里发：紧接着客户端就发本 tick 的输入包，中间不给事务回包插队的机会
+        // （Grim ElytraB 把「起飞包之后第一个 update」的跳跃键当成必须按下，插进来一个 pong
+        //   就会判 no jump + setback）
+        ElytraFlySupport.flushPendingTakeoff();
+
         // 兼容 grim 输入检测：发过起飞包的那一 tick 让输入包带 jump=true
         // （按下包排在起飞包后面，正好是原版顺序）
         // 鞘翅弹跳的「兼容 grim 输入检测」同理：起飞那一 tick 按下，其余空中 tick 松开
         boolean pressJump = ElytraFlySupport.shouldPressJumpInput()
             || ElytraBounce.shouldPressJumpInput()
             // 无摔伤 Grim 模式：落地救完补的那一跳也走输入包（服务端要看到跳跃键按下才算合法起跳）
-            || GrimNoFallSupport.shouldPressJumpInput();
+            || GrimNoFallSupport.shouldPressJumpInput()
+            // 重锤光环「自动起飞」在地上的那一跳：只报输入包，不碰玩家的按键映射
+            || ElytraFlySupport.shouldForceJumpInput();
 
         // 每 tick 都必须推进「服务端已看到松开」状态：它同时是「兼容 grim 输入检测」里
         // 下一次起飞包的放行条件（skipStartThisTick）。放行状态跟本地有没有按着空格无关，

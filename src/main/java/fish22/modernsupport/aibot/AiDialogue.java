@@ -55,9 +55,13 @@ public final class AiDialogue {
         List<AiApiClient.Message> messages = AiContext.getMainConversation();
         // 清掉系统提示词后面的孤儿消息（系统提示词那条不能动）
         AiContext.dropLeadingOrphans();
-        for (String userMessage : userMessages) {
-            messages.add(new AiApiClient.Message(AiApiClient.userMsg(userMessage)));
+        synchronized (messages) {
+            for (String userMessage : userMessages) {
+                messages.add(new AiApiClient.Message(AiApiClient.userMsg(userMessage)));
+            }
         }
+        // 让聊天界面立刻看到刚发出的这条消息
+        AiContext.save();
 
         // 跨天提醒：隔天再聊时告诉 AI 今天几号
         if (lastCallTime > 0) {
@@ -86,13 +90,17 @@ public final class AiDialogue {
             return;
         }
         if (round >= MAX_TOOL_ROUNDS) {
-            AI.ERROR("工具调用超过 " + MAX_TOOL_ROUNDS + " 轮，已中止这次对话");
+            String message = "工具调用超过 " + MAX_TOOL_ROUNDS + " 轮，已中止这次对话";
+            AiChatHandler.reportError(message);
+            AI.ERROR(message);
             return;
         }
 
         AiApiClient.ChatResponse response = AiApiClient.sendApiRequest(messages, tools);
         if (response == null) {
-            AI.ERROR("API 调用失败: " + AiApiClient.getLastError());
+            String message = "API 调用失败: " + AiApiClient.getLastError();
+            AiChatHandler.reportError(message);
+            AI.ERROR(message);
             return;
         }
 
@@ -107,6 +115,7 @@ public final class AiDialogue {
         if (delta > 0 && chatter != null) AiUsage.addUsage(chatter, delta);
 
         if (response.choices == null || response.choices.isEmpty()) {
+            AiChatHandler.reportError("API 返回内容为空");
             AI.ERROR("API 返回内容为空");
             return;
         }
@@ -116,7 +125,10 @@ public final class AiDialogue {
         List<Map<String, Object>> toolCalls = AiApiClient.getToolCalls(responseMessage);
 
         if ("tool_calls".equals(finishReason) && toolCalls != null && !toolCalls.isEmpty()) {
-            messages.add(new AiApiClient.Message(responseMessage));
+            synchronized (messages) {
+                messages.add(new AiApiClient.Message(responseMessage));
+            }
+            AiContext.save();
             AiToolExecutor.broadcastToolCalls(toolCalls);
 
             for (Map<String, Object> toolCall : toolCalls) {
@@ -135,8 +147,11 @@ public final class AiDialogue {
 
                 String result = AiToolExecutor.executeTool(name, arguments);
                 AiToolExecutor.broadcastToolResult(name, result);
-                messages.add(new AiApiClient.Message(AiApiClient.toolMsg(toolCallId, result)));
+                synchronized (messages) {
+                    messages.add(new AiApiClient.Message(AiApiClient.toolMsg(toolCallId, result)));
+                }
             }
+            AiContext.save();
 
             doCallWithTools(messages, onFinalResponse, tools, accumulated, round + 1);
             return;

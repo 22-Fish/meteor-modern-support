@@ -1,7 +1,6 @@
 package fish22.modernsupport.utils;
 
 import fish22.modernsupport.ModernSupport;
-import meteordevelopment.meteorclient.systems.modules.Modules;
 
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -36,7 +35,15 @@ public class AutoSave {
     /** 是否已有保存任务在跑（用于合并高频修改） */
     private static volatile boolean scheduled = false;
 
+    /** 保存时机（Config 页面设置，默认每次变化保存） */
+    private static volatile ConfigSaveMode mode = ConfigSaveMode.OnChange;
+
     private AutoSave() {
+    }
+
+    /** 设置保存时机（Config 页面的「配置保存」设置变化时调用，加载配置时也会走这里） */
+    public static void setMode(ConfigSaveMode value) {
+        mode = value == null ? ConfigSaveMode.OnChange : value;
     }
 
     /** 设置配置加载状态（Meteor 加载模块配置期间禁止保存） */
@@ -61,6 +68,10 @@ public class AutoSave {
     public static void onChanged() {
         // 配置加载期间不保存：此时保存会把加载中的默认值覆盖到磁盘，导致配置丢失
         if (isLoading()) return;
+        // 启动配置还没套用（config 文件夹的配置块没读完）之前禁止写盘，否则会把默认值盖到配置块上
+        if (!ModuleConfigs.ready()) return;
+        // 退出时保存：运行期间不写盘，交给 JVM 关闭钩子
+        if (mode == ConfigSaveMode.OnExit) return;
 
         dirty = true;
         if (scheduled) return;
@@ -74,7 +85,7 @@ public class AutoSave {
                 // 循环保存直到没有新修改
                 while (dirty) {
                     dirty = false;
-                    saveModules();
+                    saveAll();
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
@@ -88,11 +99,23 @@ public class AutoSave {
         });
     }
 
-    private static void saveModules() {
+    /** 退出时保存：把当前勾选的配置块写回磁盘（JVM 关闭钩子调用，两种模式都会走） */
+    public static void saveOnExit() {
+        if (!ModuleConfigs.ready()) return;
         try {
-            Modules.get().save();
+            ModuleConfigs.saveCurrent();
         } catch (Exception e) {
-            ModernSupport.LOG.error("自动保存模块配置失败", e);
+            ModernSupport.LOG.error("退出时保存配置失败", e);
+        }
+    }
+
+    private static void saveAll() {
+        try {
+            // 只写当前勾选的配置块（meteor-client/config/<配置名>.nbt）
+            // modules.nbt 已经由 MixinSystem 拦掉，不再写
+            ModuleConfigs.saveCurrent();
+        } catch (Exception e) {
+            ModernSupport.LOG.error("自动保存配置失败", e);
         }
     }
 }

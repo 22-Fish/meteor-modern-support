@@ -20,6 +20,7 @@
 package fish22.modernsupport.mixin;
 
 import com.mojang.blaze3d.vertex.PoseStack;
+import meteordevelopment.meteorclient.events.render.ArmRenderEvent;
 import meteordevelopment.meteorclient.events.render.HeldItemRendererEvent;
 import meteordevelopment.meteorclient.settings.BoolSetting;
 import meteordevelopment.meteorclient.settings.Setting;
@@ -27,6 +28,8 @@ import meteordevelopment.meteorclient.settings.SettingGroup;
 import meteordevelopment.meteorclient.settings.Vector3dSetting;
 import meteordevelopment.meteorclient.systems.modules.render.HandView;
 import meteordevelopment.meteorclient.utils.player.Rotations;
+import fish22.modernsupport.utils.HandViewSupport;
+import fish22.modernsupport.utils.SettingGroupRename;
 import net.minecraft.client.Camera;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.item.ItemUseAnimation;
@@ -83,6 +86,10 @@ public abstract class MixinHandView {
     private Setting<Vector3d> scaleOff;
 
     @Shadow
+    @Final
+    private SettingGroup sgArm;
+
+    @Shadow
     private void rotate(PoseStack matrix, Vector3d rotation) { throw new AssertionError(); }
 
     @Shadow
@@ -91,15 +98,72 @@ public abstract class MixinHandView {
     @Shadow
     private void applyServerRotations(PoseStack matrix) { throw new AssertionError(); }
 
+    @Shadow
+    private void translate(PoseStack matrix, Vector3d translation) { throw new AssertionError(); }
+
     @Unique
     private Setting<Boolean> eatOptimize;
 
     @Unique
     private Setting<Vector3d> eatCenterCompensation;
 
+    @Unique
+    private Setting<Boolean> renderOffhand;
+
+    @Unique
+    private Setting<Vector3d> offArmScale;
+
+    @Unique
+    private Setting<Vector3d> offArmPos;
+
+    @Unique
+    private Setting<Vector3d> offArmRot;
+
     @Inject(method = "<init>", at = @At("TAIL"))
     private void meteorsupport$onInit(CallbackInfo ci) {
         HandView self = (HandView) (Object) this;
+
+        renderOffhand = new BoolSetting.Builder()
+            .name("渲染副手")
+            .description("副手空着时也把副手那条手臂画出来(皮肤是副手那只的, 主手换到左手时自动对调); 拿弓蓄力/举上膛的弩这些原版只画一只手的情况照旧不画")
+            .defaultValue(false)
+            .build();
+
+        // 官方「Arm」组只管主手那条手臂了, 名字跟着改成「Main Arm」(名字是 final, 走 MixinSettingGroup)
+        ((SettingGroupRename) (Object) sgArm).setGroupName("Main Arm");
+        HandViewSupport.setRenderOffhandSetting(renderOffhand);
+
+        SettingGroup sgOffArm = self.settings.createGroup("Off Arm");
+
+        // 开关放最上面, 下面三个才是它的参数
+        sgOffArm.add(renderOffhand);
+
+        offArmScale = sgOffArm.add(new Vector3dSetting.Builder()
+            .name("缩放")
+            .description("只调副手那条手臂的缩放, 叠在「Main Arm」那组后面")
+            .defaultValue(1, 1, 1)
+            .sliderMax(5)
+            .decimalPlaces(1)
+            .build()
+        );
+
+        offArmPos = sgOffArm.add(new Vector3dSetting.Builder()
+            .name("位置")
+            .description("只调副手那条手臂的位置, 叠在「Main Arm」那组后面")
+            .defaultValue(0, 0, 0)
+            .sliderRange(-3, 3)
+            .decimalPlaces(1)
+            .build()
+        );
+
+        offArmRot = sgOffArm.add(new Vector3dSetting.Builder()
+            .name("旋转")
+            .description("只调副手那条手臂的旋转, 叠在「Main Arm」那组后面")
+            .defaultValue(0, 0, 0)
+            .sliderRange(-180, 180)
+            .decimalPlaces(0)
+            .build()
+        );
 
         eatOptimize = new BoolSetting.Builder()
             .name("进食动画优化")
@@ -119,6 +183,17 @@ public abstract class MixinHandView {
             .build();
 
         insertAfter(self.settings.getDefaultGroup(), "进食动画优化", eatCenterCompensation);
+    }
+
+    /** 手臂渲染: 副手那条手臂在「Arm」那组之后再多叠一份自己的缩放/位置/旋转, 主手不受影响 */
+    @Inject(method = "onRenderArm", at = @At("TAIL"))
+    private void meteorsupport$onRenderArm(ArmRenderEvent event, CallbackInfo ci) {
+        if (offArmScale == null) return;
+        if (event.hand != InteractionHand.OFF_HAND) return;
+
+        rotate(event.matrix, offArmRot.get());
+        scale(event.matrix, offArmScale.get());
+        translate(event.matrix, offArmPos.get());
     }
 
     /** 进食动画优化: 「位置」偏移那一步跳过, 缩放围绕屏幕中心做, 旋转照常（原版姿势保持不变） */
@@ -207,4 +282,5 @@ public abstract class MixinHandView {
         }
         group.add(setting);
     }
+
 }

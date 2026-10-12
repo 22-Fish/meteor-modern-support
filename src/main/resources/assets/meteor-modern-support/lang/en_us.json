@@ -40,6 +40,7 @@
   "Setting.Meteor.standard-font-sharpness": "Antialiasing",
   "Setting.Meteor.standard-font-sharpness.Description": "Compress the antialiasing grey edges so small text reads as solid rather than washed out. Off keeps the raw rendering; the further right, the more solid the strokes.",
   "Text.StandardFontFailed": "Standard font failed to load, keeping the last working font (see log)",
+  "Text.config-save-mode": "Save Timing",
 
   "Setting.Meteor.accent": "Accent",
   "Setting.Meteor.accent.Description": "Main color of the GUI.",

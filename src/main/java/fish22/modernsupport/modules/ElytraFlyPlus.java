@@ -59,7 +59,7 @@ import static meteordevelopment.meteorclient.MeteorClient.mc;
  * 〔简单控制〕简单控制模式（关闭 / 原版 / 合法，默认关闭）
  *            原版 = 照搬 Meteor 官方的原版控制（本类里自带实现）
  *            合法 = 我们的合法平飞（服务器视角 + 原版滑翔物理）
- * 〔甲飞〕    甲飞模式（关闭 / 普通 / Grim模式 / Grim Lag）+ 换装、音效、落地防摔等设置
+ * 〔甲飞〕    甲飞模式（关闭 / 普通 / Grim模式）+ 换装、音效、落地防摔等设置
  * 〔无限鞘翅〕无限鞘翅模式（关闭 / 换甲 / 发包）+ 周期 / 静音
  * </pre>
  *
@@ -68,11 +68,12 @@ import static meteordevelopment.meteorclient.MeteorClient.mc;
  *   <li>「关闭」「原版」「合法」互相切换，不关别的；</li>
  *   <li>「甲飞」不与简单控制互斥（原版 + 甲飞 = 官方控制 + 换装维持滑翔，合法 + 甲飞同理）；</li>
  *   <li>无限鞘翅「换甲」与甲飞互斥（两边都在换装）；</li>
- *   <li>无限鞘翅「发包」与甲飞、简单控制（非关闭）互斥：发包自己就是一套平飞控制。</li>
+ *   <li>无限鞘翅「发包」与甲飞、简单控制「原版」互斥；与「合法」不互斥，可以叠着用。</li>
+ *   <li>与「鞘翅Pitch40」互斥（两边都在控制滑翔）；与「鞘翅弹跳」不互斥。</li>
  * </ul>
  *
  * <p>业务逻辑在 {@link ElytraFlySupport}（甲飞 / 合法 / 烟花等）、
- * {@link InfiniteElytraSupport}（无限鞘翅）、{@link ElytraLagSyncSupport}（Grim Lag），
+ * {@link InfiniteElytraSupport}（无限鞘翅）、{@link ElytraLagSyncSupport}（起飞限频绕过），
  * 本类负责创建设置、注入引用、收发事件，以及自带那套「原版 / 发包」飞行控制。
  */
 public class ElytraFlyPlus extends Module {
@@ -86,8 +87,7 @@ public class ElytraFlyPlus extends Module {
     /** 简单控制模式（关闭 / 原版 / 合法） */
     public final Setting<ElytraFlySupport.FlyMode> simpleMode = sgSimple.add(new EnumSetting.Builder<ElytraFlySupport.FlyMode>()
         .name("simple-mode")
-        .description("关闭（默认）：模块不做任何飞行控制，甲飞 / 无限鞘翅照常可用。"
-            + "原版 = Meteor 官方那套原版控制（与甲飞不互斥），合法 = 我们的合法平飞（可叠加甲飞换装）")
+        .description("如何控制鞘翅")
         .defaultValue(ElytraFlySupport.FlyMode.Off)
         .onChanged(this::onSimpleModeChanged)
         .build()
@@ -303,11 +303,27 @@ public class ElytraFlyPlus extends Module {
         .build()
     );
 
-    public final Setting<Boolean> autoSwapElytra = sgSimple.add(new BoolSetting.Builder()
-        .name("自动替换鞘翅")
-        .description("空中按跳跃键自动换上鞘翅起飞（用背包里剩余耐久最高的那件），滑翔结束后自动换回胸甲。")
+    public final Setting<Boolean> legalExactLevel = sgSimple.add(new BoolSetting.Builder()
+        .name("精确水平")
+        .description("烟花加速中平飞时用能维持完全水平的俯仰角，避免固定微俯角被烟花顶着慢慢爬升卡头")
         .defaultValue(false)
         .visible(this::isLegalMode)
+        .build()
+    );
+
+    public final Setting<Boolean> autoSwapElytra = sgSimple.add(new BoolSetting.Builder()
+        .name("自动替换鞘翅")
+        .description("空中按跳跃键自动换上鞘翅起飞（用背包里剩余耐久最高的那件），滑翔结束后自动换回胸甲")
+        .defaultValue(false)
+        .visible(this::isLegalMode)
+        .build()
+    );
+
+    public final Setting<Boolean> autoSwapRestoreChest = sgSimple.add(new BoolSetting.Builder()
+        .name("模块关闭时换回胸甲")
+        .description("开着「自动替换鞘翅」时，关掉整个模块会把本模块换上去的那件鞘翅换回胸甲")
+        .defaultValue(true)
+        .visible(() -> isLegalMode() && autoSwapElytra.get())
         .build()
     );
 
@@ -321,7 +337,7 @@ public class ElytraFlyPlus extends Module {
 
     public final Setting<BackpackUse.Mode> backpackMode = sgSimple.add(new EnumSetting.Builder<BackpackUse.Mode>()
         .name("背包使用发包")
-        .description("背包烟花的交换发包方式。SWAP：2 次 SWAP 点击（背包槽与目标格互换）；PICKUP：4 次 PICKUP 点击（走光标，背包满也能换）")
+        .description("背包烟花的交换发包方式")
         .defaultValue(BackpackUse.Mode.SWAP)
         .visible(() -> isLegalMode() && autoFirework.get() && backpackFirework.get())
         .build()
@@ -329,7 +345,7 @@ public class ElytraFlyPlus extends Module {
 
     public final Setting<BackpackUse.TargetSlot> backpackTarget = sgSimple.add(new EnumSetting.Builder<BackpackUse.TargetSlot>()
         .name("目标槽位")
-        .description("背包烟花换到哪一格使用。副手：换到副手使用（不碰手上那一格）；主手：换到手持那一格；快捷栏：换到除手持那一格以外的一个快捷栏格（空手 > 工具 > 方块 > 物品）")
+        .description("背包烟花换到哪一格使用")
         .defaultValue(BackpackUse.TargetSlot.OFFHAND)
         .visible(() -> isLegalMode() && autoFirework.get() && backpackFirework.get())
         .build()
@@ -508,7 +524,7 @@ public class ElytraFlyPlus extends Module {
 
     public final Setting<Boolean> lavaFlight = sgArmor.add(new BoolSetting.Builder()
         .name("允许在岩浆中飞行")
-        .description("开启后岩浆里也照常换装维持滑翔、按滑翔运算继续飞；关闭则和以前一样进岩浆就收工（换回胸甲 + 清滑翔 + 按岩浆移动）。水里一律不工作，等离开水面再继续")
+        .description("开启后岩浆里也照常换装维持滑翔、按滑翔运算继续飞；关闭则进岩浆就收工。")
         .defaultValue(true)
         .visible(this::isArmorMode)
         .build()
@@ -576,52 +592,22 @@ public class ElytraFlyPlus extends Module {
         .build()
     );
 
-    public final Setting<Boolean> grimLagDelay = sgArmor.add(new BoolSetting.Builder()
-        .name("Grim Lag: 启用延后同步")
-        .description("史莱姆的「飞行状态同步延后刻数」（max-delay-ticks），默认不启用。"
-            + "启用后：发出起飞包之后这么多tick内，扣住服务端说停滑的同步包和它的transaction ping，"
-            + "本地滑翔位不变假、反作弊那边也一直认我们在滑翔，换甲频率因此降到每这么多tick一次。"
-            + "关掉 = 就是Grim模式本身")
-        .defaultValue(true)
-        .visible(this::isGrimLagMode)
+    public final Setting<Boolean> takeoffBypass = sgArmor.add(new BoolSetting.Builder()
+        .name("起飞限频绕过")
+        .description("通过延迟s-c同步打到低频率下甲飞正常运行。会让世界看起来一卡一卡的")
+        .defaultValue(false)
+        .visible(this::isGrimMode)
         .build()
     );
 
-    public final Setting<Integer> grimLagSyncDelay = sgArmor.add(new IntSetting.Builder()
-        .name("Grim Lag: 延后同步刻数")
-        .description("扣包窗口长度（史莱姆默认值 5），也就是换甲的最小间隔tick。"
-            + "越大换甲越少、越不容易被频率判定抓到；太大时窗口内本地滑翔位靠旧状态撑着，容易被服务端位置纠正拉回")
+    public final Setting<Integer> takeoffBypassTicks = sgArmor.add(new IntSetting.Builder()
+        .name("绕过窗口刻数")
+        .description("扣包窗口长度，也就是同步被延后的tick数")
         .defaultValue(5)
-        .min(0)
+        .min(1)
         .max(20)
         .sliderMax(10)
-        .visible(() -> isGrimLagMode() && grimLagDelay.get())
-        .build()
-    );
-
-    public final Setting<Boolean> grimLagAntiKick = sgArmor.add(new BoolSetting.Builder()
-        .name("Grim Lag: 反踢出")
-        .description("发出起飞包的那一tick，客户端自己的移动包换成带完整坐标的那一发"
-            + "（史莱姆的 anti-kick / resyncPos），服务端不会攒出「悬浮过久」")
-        .defaultValue(true)
-        .visible(this::isGrimLagMode)
-        .build()
-    );
-
-    public final Setting<Boolean> grimLagPong = sgArmor.add(new BoolSetting.Builder()
-        .name("Grim Lag: 补pong")
-        .description("扣住transaction ping之后，起飞包后补一发id为MIN_VALUE的pong、"
-            + "放包时再补一发同id的pong（史莱姆的重复ping + GrimBadPacket修复），Grim预设里默认开")
-        .defaultValue(true)
-        .visible(this::isGrimLagMode)
-        .build()
-    );
-
-    public final Setting<Boolean> grimLagHandControl = sgArmor.add(new BoolSetting.Builder()
-        .name("Grim Lag: 允许手动切换暂停")
-        .description("胸甲槽连续5tick是真鞘翅就认为你自己在穿鞘翅飞，暂停换甲（史莱姆的 enable-manually-swap）")
-        .defaultValue(true)
-        .visible(this::isGrimLagMode)
+        .visible(() -> isGrimMode() && takeoffBypass.get())
         .build()
     );
 
@@ -687,14 +673,13 @@ public class ElytraFlyPlus extends Module {
         ElytraFlySupport.grimInputSequence = grimInputSequence;
         ElytraFlySupport.armorSwapInterval = armorSwapInterval;
         ElytraFlySupport.startFlyingWindow = startFlyingWindow;
-        ElytraFlySupport.allowManualSwap = grimLagHandControl;
-        ElytraLagSyncSupport.enabled = grimLagDelay;
-        ElytraLagSyncSupport.syncDelayTicks = grimLagSyncDelay;
-        ElytraLagSyncSupport.antiKick = grimLagAntiKick;
-        ElytraLagSyncSupport.pongFix = grimLagPong;
+        ElytraLagSyncSupport.enabled = takeoffBypass;
+        ElytraLagSyncSupport.syncDelayTicks = takeoffBypassTicks;
         ElytraFlySupport.autoFirework = autoFirework;
+        ElytraFlySupport.legalExactLevel = legalExactLevel;
         ElytraFlySupport.legalRotationPriority = legalRotationPriority;
         ElytraFlySupport.autoSwapElytra = autoSwapElytra;
+        ElytraFlySupport.autoSwapRestoreChest = autoSwapRestoreChest;
         ElytraFlySupport.backpackFirework = backpackFirework;
         ElytraFlySupport.backpackMode = backpackMode;
         ElytraFlySupport.backpackTarget = backpackTarget;
@@ -734,8 +719,9 @@ public class ElytraFlyPlus extends Module {
         return armorMode.get() != ElytraFlySupport.ArmorMode.Off;
     }
 
-    private boolean isGrimLagMode() {
-        return armorMode.get() == ElytraFlySupport.ArmorMode.GrimLag;
+    /** 甲飞模式选的是「Grim模式」：「延后同步」就配它用 */
+    private boolean isGrimMode() {
+        return armorMode.get() == ElytraFlySupport.ArmorMode.Lazy;
     }
 
     /** 无限鞘翅 = 发包 */
@@ -765,21 +751,25 @@ public class ElytraFlyPlus extends Module {
 
     // ====== 互斥 ======
 
-    /** 选「原版 / 合法」：和无限鞘翅·发包互斥 */
+    /** 选「原版」：和无限鞘翅·发包互斥（两边都是官方那套控制）；「合法」不互斥，可以和发包叠着用 */
     private void onSimpleModeChanged(ElytraFlySupport.FlyMode mode) {
-        if (mode == null || mode == ElytraFlySupport.FlyMode.Off) return;
+        if (mode != ElytraFlySupport.FlyMode.Vanilla) return;
         if (isPacketFly()) infiniteMode.set(InfiniteElytraSupport.InfiniteMode.Off);
     }
 
     /** 开甲飞：关掉无限鞘翅（两种模式都和甲飞抢滑翔状态） */
     private void onArmorModeChanged(ElytraFlySupport.ArmorMode mode) {
-        if (mode == null || mode == ElytraFlySupport.ArmorMode.Off) return;
+        if (mode == null || mode == ElytraFlySupport.ArmorMode.Off) {
+            // 甲飞收工：本地那个被撑起来的滑翔位要跟着收掉，不然服务端已经停滑、本地还在滑翔运算，就是回弹
+            ElytraFlySupport.clearLocalGlideOnArmorStop();
+            return;
+        }
         if (infiniteMode.get() != InfiniteElytraSupport.InfiniteMode.Off) {
             infiniteMode.set(InfiniteElytraSupport.InfiniteMode.Off);
         }
     }
 
-    /** 选无限鞘翅模式：换甲 / 发包 都和甲飞互斥；发包还要把简单控制让出来 */
+    /** 选无限鞘翅模式：换甲 / 发包 都和甲飞互斥；发包只把简单控制「原版」让出来，「合法」留着 */
     private void onInfiniteModeChanged(InfiniteElytraSupport.InfiniteMode mode) {
         if (mode != InfiniteElytraSupport.InfiniteMode.Packet && packetFlightSet) {
             clearPacketFlightState();
@@ -789,7 +779,7 @@ public class ElytraFlyPlus extends Module {
         if (mode == null || mode == InfiniteElytraSupport.InfiniteMode.Off) return;
 
         if (isArmorMode()) armorMode.set(ElytraFlySupport.ArmorMode.Off);
-        if (mode == InfiniteElytraSupport.InfiniteMode.Packet && simpleMode.get() != ElytraFlySupport.FlyMode.Off) {
+        if (mode == InfiniteElytraSupport.InfiniteMode.Packet && isVanillaMode()) {
             simpleMode.set(ElytraFlySupport.FlyMode.Off);
         }
     }
@@ -815,9 +805,8 @@ public class ElytraFlyPlus extends Module {
         ElytraFlySupport.onActivate();
         InfiniteElytraSupport.reset();
 
-        // 和拆出去的「鞘翅Pitch40 / 鞘翅弹跳」互斥：两边都在控制滑翔
+        // 和拆出去的「鞘翅Pitch40」互斥：两边都在控制滑翔（「鞘翅弹跳」不互斥）
         disableModule(ElytraPitch40.class);
-        disableModule(ElytraBounce.class);
 
         if (mc.player != null
             && (chestSwap.get() == ChestSwapMode.Always || chestSwap.get() == ChestSwapMode.WaitForGround)
@@ -875,7 +864,7 @@ public class ElytraFlyPlus extends Module {
 
     @EventHandler
     private void onPreTick(TickEvent.Pre event) {
-        // 空中屏蔽空格的收尾（不分模式）+ Grim Lag 的扣包窗口
+        // 空中屏蔽空格的收尾（不分模式）+ 延后同步的扣包窗口
         ElytraFlySupport.onPreTickAlways();
         if (ElytraFlySupport.isCustomMode()) ElytraFlySupport.onTick();
     }
@@ -905,6 +894,9 @@ public class ElytraFlyPlus extends Module {
             mc.player.getAbilities().setFlyingSpeed(horizontalSpeed.get().floatValue() / 20);
             packetFlightSet = true;
         }
+
+        // 重锤光环接管方向控制时：原版那套方向控制让位（发包平飞不归这里管，照常走完上面）
+        if (ElytraFlySupport.isExternalTakeover() || ElytraFlySupport.isExternalControlSuspend()) return;
 
         if (!isVanillaMode()) return;
 

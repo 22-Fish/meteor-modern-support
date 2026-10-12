@@ -1,0 +1,2197 @@
+/*
+ * This file is part of meteor-modern-support (meteor现代化支持).
+ *
+ * Copyright (c) 2026 22_Fish
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+package fish22.modernsupport.modules;
+
+import fish22.modernsupport.mixin.MultiPlayerGameModeMiningAccessor;
+import fish22.modernsupport.utils.BreakData;
+import fish22.modernsupport.utils.SilentSwitch;
+import meteordevelopment.meteorclient.MeteorClient;
+import meteordevelopment.meteorclient.events.entity.player.DoAttackEvent;
+import meteordevelopment.meteorclient.events.entity.player.StartBreakingBlockEvent;
+import meteordevelopment.meteorclient.events.packets.PacketEvent;
+import meteordevelopment.meteorclient.events.render.Render3DEvent;
+import meteordevelopment.meteorclient.events.world.TickEvent;
+import meteordevelopment.meteorclient.renderer.ShapeMode;
+import meteordevelopment.meteorclient.settings.BlockListSetting;
+import meteordevelopment.meteorclient.settings.BoolSetting;
+import meteordevelopment.meteorclient.settings.ColorSetting;
+import meteordevelopment.meteorclient.settings.DoubleSetting;
+import meteordevelopment.meteorclient.settings.EnumSetting;
+import meteordevelopment.meteorclient.settings.IntSetting;
+import meteordevelopment.meteorclient.settings.Setting;
+import meteordevelopment.meteorclient.settings.SettingGroup;
+import meteordevelopment.meteorclient.systems.modules.Categories;
+import meteordevelopment.meteorclient.systems.modules.Module;
+import meteordevelopment.meteorclient.utils.Utils;
+import meteordevelopment.meteorclient.utils.player.InvUtils;
+import meteordevelopment.meteorclient.utils.player.PlayerUtils;
+import meteordevelopment.meteorclient.utils.render.color.SettingColor;
+import meteordevelopment.orbit.EventHandler;
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
+import net.minecraft.util.Mth;
+import net.minecraft.network.protocol.game.ServerboundMovePlayerPacket;
+import net.minecraft.network.protocol.game.ServerboundPlayerActionPacket;
+import net.minecraft.network.protocol.game.ServerboundSwingPacket;
+import net.minecraft.tags.ItemTags;
+import net.minecraft.world.InteractionHand;
+import net.minecraft.world.item.ItemUseAnimation;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.enchantment.Enchantments;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.state.BlockState;
+
+import net.minecraft.world.phys.HitResult;
+
+import java.util.Arrays;
+import java.util.List;
+
+import static meteordevelopment.meteorclient.MeteorClient.mc;
+
+
+public class GhostMine extends Module {
+    private final SettingGroup sgGeneral = settings.getDefaultGroup();   // 挖掘（Meteor 默认组）
+    private final SettingGroup sgDelay = settings.createGroup("延迟");
+    private final SettingGroup sgBypass = settings.createGroup("绕过");
+    private final SettingGroup sgSwitch = settings.createGroup("切换");
+    private final SettingGroup sgRebreak = settings.createGroup("重挖");
+    private final SettingGroup sgRender = settings.createGroup("渲染设置");
+    public static GhostMine INSTANCE;
+
+    // ==================== 挖掘 ====================
+
+    public Setting<Double> range = sgGeneral
+        .add(
+            new DoubleSetting.Builder()
+                .name("挖掘范围")
+                .description("挖掘方块的最大距离")
+                .sliderRange(1, 7)
+                .defaultValue(6.0)
+                .decimalPlaces(3)
+                .build()
+        );
+    public Setting<Boolean> doubleBreak = sgGeneral
+        .add(
+            new BoolSetting.Builder()
+                .name("双挖")
+                .description("同时挖掘两个方块以提高效率")
+                .defaultValue(true)
+                .build()
+        );
+    public Setting<Boolean> loopStop = sgGeneral
+        .add(
+            new BoolSetting.Builder()
+                .name("循环stop")
+                .description("开始挖掘后每 tick 给服务端当前记着的那个方块补一个结束包（史莱姆那种大量 stop）")
+                .defaultValue(false)
+                .build()
+        );
+    public Setting<Boolean> pauseWhileEating = sgGeneral
+        .add(
+            new BoolSetting.Builder()
+                .name("进食时暂停")
+                .description("进食时暂停挖掘")
+                .defaultValue(false)
+                .build()
+        );
+    public Setting<Boolean> swingPacket = sgGeneral
+        .add(
+            new BoolSetting.Builder()
+                .name("挥手")
+                .description("挖掘开始/收尾时把挥手包发给服务端")
+                .defaultValue(false)
+                .build()
+        );
+
+    // ==================== 延迟 ====================
+
+    /** 挖完一块之后隔多久才能开始下一块：自定义 / 原版 / grim动态延迟 */
+    public Setting<CooldownMode> cooldownMode = sgDelay
+        .add(
+            new EnumSetting.Builder<CooldownMode>()
+                .name("挖掘冷却")
+                .description("计算挖掘冷却的方法")
+                .defaultValue(CooldownMode.CUSTOM)
+                .build()
+        );
+    public Setting<Integer> mineCooldown = sgDelay
+        .add(
+            new IntSetting.Builder()
+                .name("自定义冷却")
+                .description("「挖掘冷却」的 tick 数")
+                .defaultValue(6)
+                .min(0)
+                .sliderRange(0, 20)
+                .visible(() -> cooldownMode.get() == CooldownMode.CUSTOM)
+                .build()
+        );
+    public Setting<Integer> feedbackThreshold = sgDelay
+        .add(
+            new IntSetting.Builder()
+                .name("反馈阈值")
+                .description("「挖掘冷却」选 grim动态延迟 时的分数阈值，超过这个阈值回退原版冷却")
+                .defaultValue(810)
+                .min(50)
+                .sliderRange(50, 1000)
+                .visible(() -> cooldownMode.get() == CooldownMode.FEEDBACK)
+                .build()
+        );
+
+    // ==================== 绕过 ====================
+
+    public Setting<Boolean> fastBypass = sgBypass
+        .add(
+            new BoolSetting.Builder()
+                .name("高空包绕过")
+                .description("发挖掘包时额外向世界外发一个同样的包，让反作弊把账记到那个假包上")
+                .defaultValue(true)
+                .build()
+        );
+    public Setting<Boolean> bypassGround = sgBypass
+        .add(
+            new BoolSetting.Builder()
+                .name("滞空挖掘加速")
+                .description("在空中挖掘时按「踩在地面上」发包，让服务端按地面速度算进度")
+                .defaultValue(false)
+                .build()
+        );
+    // ==================== 切换 ====================
+
+    public Setting<Integer> switchDamage = sgSwitch
+        .add(
+            new IntSetting.Builder()
+                .name("挖掘方块阈值")
+                .description("进度到这个百分比就切工具发结束包收尾")
+                .defaultValue(70)
+                .min(1)
+                .sliderMax(100)
+                .build()
+        );
+    public Setting<SwitchBackMode> switchBackMode = sgSwitch
+        .add(new EnumSetting.Builder<SwitchBackMode>()
+            .name("切工具模式")
+            .description("切到最佳工具后如何切回原来的槽位")
+            .defaultValue(SwitchBackMode.DELAYED)
+            .build()
+        );
+    public Setting<Boolean> silentSwitch = sgSwitch
+        .add(
+            new BoolSetting.Builder()
+                .name("静默切换")
+                .description("切工具只给服务端发换手包，客户端画面不跟着切")
+                .defaultValue(false)
+                .build()
+        );
+    public Setting<Integer> switchBackDelay = sgSwitch
+        .add(
+            new IntSetting.Builder()
+                .name("延迟")
+                .description("切工具后多少 tick 切回原来的槽位")
+                .defaultValue(1)
+                .sliderRange(1, 10)
+                .visible(() -> switchBackMode.get() == SwitchBackMode.DELAYED)
+                .build()
+        );
+    public Setting<Boolean> switchBackOnBreak = sgSwitch
+        .add(
+            new BoolSetting.Builder()
+                .name("方块破坏切回")
+                .description("方块被破坏后不等延迟，立即切回原来的槽位")
+                .defaultValue(false)
+                .visible(() -> switchBackMode.get() == SwitchBackMode.DELAYED)
+                .build()
+        );
+    public Setting<Boolean> autoRetry = sgSwitch
+        .add(
+            new BoolSetting.Builder()
+                .name("自动重试")
+                .description("结束包没把方块挖掉时，下一 tick 自动重试。建议开启")
+                .defaultValue(true)
+                .visible(() -> switchBackMode.get() == SwitchBackMode.IMMEDIATE)
+                .build()
+        );
+
+    // ==================== 精准采集 ====================
+
+    public Setting<Boolean> silkTouch = sgSwitch
+        .add(
+            new BoolSetting.Builder()
+                .name("精准采集")
+                .description("列表里的方块优先用带精准采集的工具挖")
+                .defaultValue(true)
+                .build()
+        );
+    public Setting<List<Block>> silkBlocks = sgSwitch
+        .add(
+            new BlockListSetting.Builder()
+                .name("精准采集列表")
+                .description("这些方块优先用带精准采集的工具挖")
+                .defaultValue(
+                    Blocks.WHITE_STAINED_GLASS, Blocks.ORANGE_STAINED_GLASS, Blocks.MAGENTA_STAINED_GLASS,
+                    Blocks.LIGHT_BLUE_STAINED_GLASS, Blocks.YELLOW_STAINED_GLASS, Blocks.LIME_STAINED_GLASS,
+                    Blocks.PINK_STAINED_GLASS, Blocks.GRAY_STAINED_GLASS, Blocks.LIGHT_GRAY_STAINED_GLASS,
+                    Blocks.CYAN_STAINED_GLASS, Blocks.PURPLE_STAINED_GLASS, Blocks.BLUE_STAINED_GLASS,
+                    Blocks.BROWN_STAINED_GLASS, Blocks.GREEN_STAINED_GLASS, Blocks.RED_STAINED_GLASS,
+                    Blocks.BLACK_STAINED_GLASS, Blocks.GLOWSTONE, Blocks.SEA_LANTERN
+                )
+                .visible(silkTouch::get)
+                .build()
+        );
+
+    // ==================== 背包切换 ====================
+
+    public Setting<Boolean> inventorySwitch = sgSwitch
+        .add(
+            new BoolSetting.Builder()
+                .name("背包切换")
+                .description("允许使用背包中的工具")
+                .defaultValue(true)
+                .build()
+        );
+    public Setting<InvSwitchMode> invSwitchMode = sgSwitch
+        .add(
+            new EnumSetting.Builder<InvSwitchMode>()
+                .name("背包切换发包模式")
+                .description("如何使用背包中的工具")
+                .defaultValue(InvSwitchMode.SWAP)
+                .visible(inventorySwitch::get)
+                .build()
+        );
+
+    // ==================== 重挖 ====================
+
+    public Setting<Boolean> rebreak = sgRebreak
+        .add(new BoolSetting.Builder().name("自动重挖").description("方块被破坏后，该位置再次出现方块时自动重新挖掘").defaultValue(true).build());
+    public Setting<Integer> rebreakDelay = sgRebreak
+        .add(
+            new IntSetting.Builder()
+                .name("重挖延迟")
+                .description("重新挖掘方块的延迟时间")
+                .sliderRange(0, 10)
+                .defaultValue(0)
+                .visible(rebreak::get)
+                .build()
+        );
+    public Setting<Boolean> rebreakFastStop = sgRebreak
+        .add(
+            new BoolSetting.Builder()
+                .name("快速stop")
+                .description("每 tick 都无条件向重挖框补一个结束包（不等重挖延迟），包多但最快，适合 PvP")
+                .defaultValue(false)
+                .visible(rebreak::get)
+                .build()
+        );
+    public Setting<Boolean> rebreakSkipAir = sgRebreak
+        .add(
+            new BoolSetting.Builder()
+                .name("空中跳过")
+                .description("人在空中时不动重挖框（落地了再继续补）")
+                .defaultValue(false)
+                .visible(rebreak::get)
+                .build()
+        );
+    public Setting<Integer> maxBreaks = sgRebreak
+        .add(
+            new IntSetting.Builder()
+                .name("放弃等待")
+                .description("重挖框上的方块出现之后，超过这么多 tick 还没挖掉就放弃这个位置")
+                .defaultValue(60)
+                .min(10)
+                .sliderRange(10, 300)
+                .build()
+        );
+
+    // ==================== 渲染设置 ====================
+
+    private final Setting<Boolean> render = sgRender
+        .add(
+            new BoolSetting.Builder()
+                .name("显示渲染")
+                .description("是否显示正在挖掘方块的可视化效果")
+                .defaultValue(true)
+                .build()
+        );
+
+    private final Setting<ShapeMode> shapeMode = sgRender
+        .add(new EnumSetting.Builder<ShapeMode>()
+            .name("形状")
+            .description("选择渲染形状的显示方式")
+            .defaultValue(ShapeMode.Both)
+            .build()
+        );
+    private final Setting<SettingColor> readySideColor = sgRender
+        .add(
+            new ColorSetting.Builder()
+                .name("完成侧面颜色")
+                .description("方块挖掘完成时侧面的颜色")
+                .defaultValue(new SettingColor(255, 192, 203, 80))
+                .build()
+        );
+    private final Setting<SettingColor> readyLineColor = sgRender
+        .add(
+            new ColorSetting.Builder()
+                .name("完成边框颜色")
+                .description("方块挖掘完成时边框的颜色")
+                .defaultValue(new SettingColor(255, 192, 203, 160))
+                .build()
+        );
+    private final Setting<SettingColor> sideColor = sgRender
+        .add(
+            new ColorSetting.Builder()
+                .name("侧面颜色")
+                .description("正在挖掘方块侧面的颜色")
+                .defaultValue(new SettingColor(255, 192, 203, 80))
+                .build()
+        );
+    private final Setting<SettingColor> lineColor = sgRender
+        .add(
+            new ColorSetting.Builder()
+                .name("边框颜色")
+                .description("正在挖掘方块边框的颜色")
+                .defaultValue(new SettingColor(255, 192, 203, 160))
+                .build()
+        );
+    private final Setting<SettingColor> rebreakSideColor = sgRender
+        .add(
+            new ColorSetting.Builder()
+                .name("重挖侧面颜色")
+                .description("重挖位置半透明框的侧面颜色")
+                .defaultValue(new SettingColor(255, 192, 203, 40))
+                .build()
+        );
+    private final Setting<SettingColor> rebreakLineColor = sgRender
+        .add(
+            new ColorSetting.Builder()
+                .name("重挖边框颜色")
+                .description("重挖位置半透明框的边框颜色")
+                .defaultValue(new SettingColor(255, 192, 203, 100))
+                .build()
+        );
+
+    // ==================== 内部状态 ====================
+
+    public static BlockDate firstBlockDate = null;
+    public static BlockDate secondBlockDate = null;
+    private BlockDate rebreakBlockDate = null;
+    /** 重挖位置上的方块已经连续出现了多少 tick（方块消失/换新位置时清零） */
+    private int rebreakTicks = 0;
+    /** 重挖位置下一次补结束包还要等多少 tick（0 = 现在就能补；补一次没生效不至于卡死） */
+    private int rebreakRetryTicks = 0;
+    /** 重挖位置的方块消失过没有：没消失过说明这一格还在正常挖掘流程里，别抢它的包（见 handleRebreak） */
+    private boolean rebreakSeenGone = false;
+    /**
+     * 服务端「延迟破坏」槽当前归谁（同一时刻只有一个）：那个方块被挖掉或区块卸载才会空出来，没占着是 null
+     * <p>
+     * 槽被占着时新的结束包（进度不到 0.7 的那种）服务端会直接忽略，方块会一直留在挖掘槽位上
+     */
+    private BlockPos failMinePos = null;
+    /**
+     * 挖掘延迟剩余 tick（>0 时不开始新的挖掘）
+     * <p>
+     * 延迟期间点到的方块照旧收成目标（不会丢），只是要等冷却走完才发开始包 —— 冷却本身就是「延迟」，
+     * 不用再额外把点击丢掉（丢了只会让第二块收不到）
+     */
+    private int mineCooldownTicks = 0;
+    /** 工具切换状态：是否已切到最佳工具等切回、已等待 tick 数 */
+    private boolean hasSwitch = false;
+    /** 上面那次切换是不是本地也切了（普通切换要切回本地槽位，静默切换只放开服务端那边） */
+    private boolean switchedLocally = false;
+    private int switchTicks = 0;
+    /** 从背包换到手上的工具：它在背包里的槽位 / 换到哪个热栏槽位（-1 = 没换） */
+    private int invToolSlot = -1;
+    private int invToolHotbar = -1;
+    /** 正在为「等服务端把延迟破坏槽位的方块挖掉」而拿住最佳工具的方块（没在等的时候是 null） */
+    private BlockDate holdBlock = null;
+    /** 安排好的「占槽结束包」（要抢挖掘槽位、目标还没安顿好时才安排）：下一 tick 单独发出去 */
+    private BlockPos pendingStopPos = null;
+    private Direction pendingStopFace = null;
+    /** 那个占槽结束包是给哪个目标发的（目标可能已经被顶掉了，所以单独存一份，发包和记账都要用） */
+    private BlockDate pendingStopBlock = null;
+    /** 点下来、还没接成目标的那个方块（被顶掉的那个还没安顿好时先留在这里，由 tick 逻辑接着试） */
+    private BlockPos queuedClickPos = null;
+    private Direction queuedClickFace = null;
+    /** 本 tick 已经为哪个位置发过结束包（同一个 tick 里不重复发，免得被当成「一瞬间挖了两下」） */
+    private BlockPos stopSentThisTick = null;
+    /** 本 tick 是不是已经挥过手了（同一个 tick 里只挥一次，免得连发两个挥手包） */
+    private boolean swingSentThisTick = false;
+    // 挖掘挥手包控制：拦截下一个 swing 包 —— 挖掘开始/结束的挥手只有本地动画，不发包
+    // （不依赖瞄准状态，避免挖掘开始/结束瞬间没瞄准方块时包漏拦）
+    private boolean blockSwingPacket = false;
+    /** 已经过了多少 tick（自己数：收尾时机和抢跑计分都按它算） */
+    private int mineTicks = 0;
+    /** 上一次收尾（发结束包）是在第几 tick */
+    private int lastFinishTick = 0;
+    /** 抢跑计分：越大说明我们越「抢」，grim动态延迟拿它决定要不要退回原版节奏 */
+    private double gainedAdvantage = 0.0;
+
+    /** 原版破坏延迟（tick）：反作弊眼里「上一块挖完到下一块开始」的合法间隔 */
+    private static final int VANILLA_BREAK_DELAY = 5;
+    /** 原版节奏的挖掘间隔（tick）：分数超标后退回这个节奏 */
+    private static final int VANILLA_MINE_GAP = 6;
+    /** 秒切模式（立即切回）的自动重试次数上限 */
+    private static final int MAX_AUTO_RETRY = 5;
+    /** 开始一次挖掘后至少隔这么多 tick 才允许下一块发开始包：同一个 tick 里对两个不同位置发挖掘包会被反作弊盯上 */
+    private static final int MIN_MINE_GAP = 1;
+    /** 重挖位置补过一次结束包之后，隔这么多 tick 方块还没掉就再补一个 */
+    private static final int REBREAK_RETRY_GAP = 5;
+    /**
+     * 高空包绕过的假包高度：世界外，服务端的开始包分支会按 too high 直接 return，destroyPos 什么都不动
+     * <p>
+     * 用 666 而不是贴着顶端的数：贴着顶端时（世界最高 319）那几个 y 差得不够，靠近世界顶端挖掘会失效
+     */
+    private static final int BYPASS_Y = 666;
+    /** 冷却重置一轮最多补几个世界外假开始包（照史莱姆的 cooldownFix） */
+    private static final int COOLDOWN_RESET_PACKETS = 6;
+
+    public static final List<Block> unbreakableBlocks = Arrays.asList(
+        Blocks.COMMAND_BLOCK,
+        Blocks.LAVA_CAULDRON,
+        Blocks.LAVA,
+        Blocks.WATER_CAULDRON,
+        Blocks.WATER,
+        Blocks.BEDROCK,
+        Blocks.BARRIER,
+        Blocks.END_PORTAL,
+        Blocks.NETHER_PORTAL,
+        Blocks.END_PORTAL_FRAME
+    );
+
+    // ==================== 构造与生命周期 ====================
+
+    public GhostMine() {
+        super(Categories.World, "发包挖掘", "使用发包快速挖掘方块");
+        INSTANCE = this;
+    }
+
+    public static GhostMine getInstance() {
+        return INSTANCE;
+    }
+
+    @Override
+    public void onActivate() {
+        super.onActivate();
+        firstBlockDate = null;
+        secondBlockDate = null;
+        rebreakBlockDate = null;
+        rebreakTicks = 0;
+        rebreakRetryTicks = 0;
+        rebreakSeenGone = false;
+        failMinePos = null;
+        mineCooldownTicks = 0;
+        hasSwitch = false;
+        switchedLocally = false;
+        switchTicks = 0;
+        invToolSlot = -1;
+        invToolHotbar = -1;
+        SilentSwitch.start();
+        holdBlock = null;
+        pendingStopPos = null;
+        pendingStopFace = null;
+        pendingStopBlock = null;
+        queuedClickPos = null;
+        queuedClickFace = null;
+        stopSentThisTick = null;
+        swingSentThisTick = false;
+        blockSwingPacket = false;
+        mineTicks = 0;
+        lastFinishTick = 0;
+        gainedAdvantage = 0.0;
+    }
+
+    @Override
+    public void onDeactivate() {
+        firstBlockDate = null;
+        secondBlockDate = null;
+        rebreakBlockDate = null;
+        rebreakTicks = 0;
+        rebreakRetryTicks = 0;
+        rebreakSeenGone = false;
+        failMinePos = null;
+        mineCooldownTicks = 0;
+        holdBlock = null;
+        pendingStopPos = null;
+        pendingStopFace = null;
+        pendingStopBlock = null;
+        queuedClickPos = null;
+        queuedClickFace = null;
+        stopSentThisTick = null;
+        swingSentThisTick = false;
+        blockSwingPacket = false;
+        lastFinishTick = 0;
+        gainedAdvantage = 0.0;
+
+        // 恢复工具栏：从背包换到手上的工具换回背包，切过的热栏槽位切回去
+        swapInvToolBack();
+        SilentSwitch.stop();        // 接管着的话把服务端切回本地槽位
+        if (hasSwitch && switchedLocally) InvUtils.swapBack();
+        hasSwitch = false;
+        switchedLocally = false;
+    }
+
+    // ==================== 核心 Tick 处理 ====================
+
+    @EventHandler
+    public void onTick(TickEvent.Pre event) {
+        // 静默切换：上一 tick 没人续租就这一 tick 切回本地槽位，结算完各模块再按需续租
+        SilentSwitch.tick();
+
+        if (mineCooldownTicks > 0) mineCooldownTicks--;
+
+        // 服务端的延迟破坏槽只在这个方块变成空气（被挖掉）或区块卸载时才会空出来（26.1 ServerPlayerGameMode.tick）
+        if (failMinePos != null && mc.level.getBlockState(failMinePos).isAir()) failMinePos = null;
+
+        stopSentThisTick = null;
+        swingSentThisTick = false;
+        mineTicks++;
+
+        // 26.1 服务端收到 START/STOP 不会中断物品使用，所以进食时照常开始和累计进度，
+        // 只延迟切槽位与收尾（切工具会打断进食）；吃完后普通目标补 STOP，延迟破坏槽切工具补完
+        boolean pauseFinishing = shouldPauseForEating();
+
+        // 安排好的占槽结束包：这一 tick 单独发（和开始包、高空包分开，避免一个 tick 里两个位置）
+        // 这一发不吃「进食时暂停」：往后拖会让服务端记的「延迟破坏」名额和客户端这边对不上，
+        // 那块方块之后就一直等不到切工具（只能手动切一下才掉）
+        flushPendingStop();
+
+        rangeCheck();
+
+        // 切工具后的切回。放在挖掘逻辑之前：切回计时不包含切换发生的那个 tick
+        if (!pauseFinishing) handleSwitchBack();
+
+        // 收尾 STOP 没把方块挖掉：冷却过后补一个（放在新目标之前，补的结束包不会被新方块的开始包顶掉位置）
+        if (!pauseFinishing) retryStop();
+
+        // 点下来但还没接上的方块（被顶掉的那个还没安顿好）：安顿好就接成目标
+        tryTakeQueuedClick();
+
+        if (!doubleBreak.get()) {
+            tickSingle(pauseFinishing);
+        } else {
+            tickDouble(pauseFinishing);
+        }
+
+        // 循环stop：开始挖掘后每 tick 给服务端当前记着的那个方块补一个结束包（史莱姆那种）
+        if (loopStop.get() && !pauseFinishing) loopStopMining();
+
+        // 冷却重置（高空包绕过）：分数超标、间隔也够了就往世界外补几个假开始包，把惩罚压回去
+        if (fastBypass.get() && !pauseFinishing) resetCooldownPenalty();
+
+        // 重挖逻辑
+        if (!pauseFinishing) handleRebreak();
+    }
+
+    // ==================== 单挖模式 ====================
+
+    private void tickSingle(boolean pauseFinishing) {
+        // 1. 已被服务端破坏 → 清理并记录重挖位置
+        if (firstBlockDate != null && isBroken(firstBlockDate.pos)) {
+            // 不是我们自己发 STOP 收尾的（服务端自己挖掉的）：延迟从这一刻重新算
+            // 秒破方块不吃这一套：原版挖这种方块（开始包过去就没了）本来就不进破坏延迟
+            if (!firstBlockDate.switched && !firstBlockDate.instaBreak) blockFinished();
+            recordRebreak(firstBlockDate);
+            firstBlockDate = null;
+        }
+
+        // 2. 开始挖掘（发 START）；「挖掘延迟」没走完的目标在这里排队等延迟结束
+        if (firstBlockDate != null && !firstBlockDate.isMining && miningGateOpen()) {
+            startTarget(firstBlockDate);
+        }
+
+        // 3. 进度累加 + 达到阈值切工具/发 STOP
+        tickTarget(firstBlockDate);
+
+        // 4. 超时未确认破坏 → 放弃
+        if (firstBlockDate != null && giveUp(firstBlockDate, pauseFinishing)) firstBlockDate = null;
+    }
+
+    // ==================== 双挖模式 ====================
+
+    private void tickDouble(boolean pauseFinishing) {
+        // 1. 已被服务端破坏 → 清理并记录重挖位置
+        if (firstBlockDate != null && isBroken(firstBlockDate.pos)) {
+            // 不是我们自己发 STOP 收尾的（服务端自己挖掉的）：延迟从这一刻重新算
+            // 秒破方块不吃这一套：原版挖这种方块（开始包过去就没了）本来就不进破坏延迟
+            if (!firstBlockDate.switched && !firstBlockDate.instaBreak) blockFinished();
+            recordRebreak(firstBlockDate);
+            firstBlockDate = null;
+        }
+        if (secondBlockDate != null && isBroken(secondBlockDate.pos)) {
+            if (!secondBlockDate.switched && !secondBlockDate.instaBreak) blockFinished();
+            recordRebreak(secondBlockDate);
+            secondBlockDate = null;
+        }
+
+        // 2. 开始挖掘：主挖先发 START，副挖后发
+        //    「挖掘延迟」没走完的目标在这里排队等延迟结束（副挖一定要在延迟之后才开始）
+        //    服务端的挖掘槽位最后停在副挖上：副挖靠阈值 STOP 破坏，主挖靠 START 时占住的延迟破坏槽位破坏
+        if (firstBlockDate != null && !firstBlockDate.isMining && miningGateOpen()) {
+            startTarget(firstBlockDate);
+        }
+        if (secondBlockDate != null && !secondBlockDate.isMining && secondGateOpen()) {
+            startTarget(secondBlockDate);
+        }
+
+        // 3. 进度累加 + 达到阈值切工具/发 STOP
+        tickTarget(firstBlockDate);
+        tickTarget(secondBlockDate);
+
+        // 4. 超时未确认破坏 → 放弃
+        if (firstBlockDate != null && giveUp(firstBlockDate, pauseFinishing)) firstBlockDate = null;
+        if (secondBlockDate != null && giveUp(secondBlockDate, pauseFinishing)) secondBlockDate = null;
+    }
+
+    // ==================== 挖掘目标处理 ====================
+
+    /**
+     * 单个目标的每 tick 处理
+     * <p>
+     * 先按服务端那套公式重算进度（见 {@link BlockDate#freshProgress}），进度到阈值就切工具 + 发 STOP 收尾
+     * （{@link #finishTarget}）—— 判定用的进度和服务端收到结束包时算出来的就是同一个数，不另算一套
+     */
+    private void tickTarget(BlockDate block) {
+        if (block == null || !block.isMining) return;
+
+        // 进度里的 tick 数由 freshProgress 现算（发开始包那一格到现在过了几格，见 predictedStopProgress）
+        block.freshProgress();
+
+        // 秒挖方块：开始包发出去服务端就把它破坏了，不切工具、不补结束包
+        if (block.instaBreak || block.switched) return;
+
+        // 进度到「挖掘方块阈值」就收尾：服务端 70% 才会当场破坏，阈值调 70 最快
+        if (block.fraction() * 100.0 >= stopPercent()) {
+            if (shouldPauseForEating()) return;
+            finishTarget(block);
+        }
+    }
+
+    /** 「进食时暂停」当前是否生效 */
+    public boolean shouldPauseForEating() {
+        if (!pauseWhileEating.get() || mc.player == null || !mc.player.isUsingItem()) return false;
+        if (mc.player.getUseItemRemainingTicks() <= 0) return false;
+        return mc.player.getUseItem().getUseAnimation() == ItemUseAnimation.EAT;
+    }
+
+    /** 实际开始收尾的进度百分比：就是「切换工具阈值」设置的数 */
+    private int stopPercent() {
+        return switchDamage.get();
+    }
+
+    /**
+     * 收尾一个方块：切到最佳工具 → 发 STOP →（按切工具模式）切回
+     * <p>
+     * 服务端收到 STOP 会用「当前手持工具」重算进度 = 单 tick 进度 × (START 之后经过的 tick + 1)，
+     * 进度 ≥ 0.7 才立即破坏 —— 所以切工具和 STOP 必须在同一刻发出，且此时服务端记的方块必须是它
+     * <p>
+     * 收尾只发一次：目标留着（掉没掉由 {@link #isBroken} 清理），没生效由 {@link #retryStop()} 过冷却再补
+     */
+    private void finishTarget(BlockDate block) {
+        // 这一 tick 已经为这个位置发过结束包了（占槽那个）→ 这一 tick 不再发第二个
+        // （同一个 tick 里两个结束包会被反作弊连着记账），也**不能**标成已收尾：下一 tick 再按真正的收尾发一个
+        if (block.pos.equals(stopSentThisTick)) return;
+
+        block.switched = true;
+
+        if (isBroken(block.pos)) return;
+
+        // 服务端现在记的不是这个方块（它只占着服务端的「延迟破坏」名额）→ 发 STOP 也会被忽略，
+        // 它走「拿着工具等服务端自己补完」那条流程（见 handleSwitchBack）
+        if (!block.serverTracked) return;
+
+        block.stopSent = true;
+        switchToBestTool(block);
+        sendStop(block.pos, block.direction);
+        noteStopResult(block, block.pos);
+
+        // 自动重挖：先记下位置，但要等这个方块真的掉了
+        if (rebreak.get() && block.rebreak && !block.instaBreak && block.serverTracked) {
+            recordRebreak(block);
+            rebreakRetryTicks = REBREAK_RETRY_GAP;
+        }
+
+        // 原版挖掘这条流程：切工具 → STOP → 切回，一次做完。立即切回就是同一 tick 切回去，没有兜底
+        if (switchBackMode.get() == SwitchBackMode.IMMEDIATE) switchBackNow();
+    }
+
+    /**
+     * 收尾 STOP 没生效（方块还在服务端）→ 过了「挖掘冷却」再补一个
+     * <p>
+     * 为什么必须补：服务端是拿「收到 STOP 那一刻经过了多少 tick」重算进度的，进度不够 0.7 的结束包
+     * 会被丢进「延迟破坏」名额 —— 名额被别的方块占着的时候那个包就等于没发。容易挖的方块（石头这类）
+     * 客户端的模拟进度一两 tick 就到阈值，结束包正好卡在服务端刚记下挖掘位置的时刻，算出来的进度最小
+     * （1 tick = 单 tick 进度），最容易掉进这个坑；挖得慢的方块等了几十 tick，算出来早就过了 0.7，所以没事
+     * <p>
+     * 补发时机：位置必须还是服务端记着的那个（新的开始包会把它顶掉，所以补发排在开始新方块之前），
+     * 而且每个结束包都得重启挖掘延迟（见 {@link #sendStopPacket}），所以间隔就是「挖掘冷却」这 6 tick
+     */
+    private void retryStop() {
+        BlockDate block = retryTarget();
+        if (block == null) return;
+
+        switchToBestTool(block);
+        sendStop(block.pos, block.direction);
+        noteStopResult(block, block.pos);
+        block.retryCount++;
+
+        if (switchBackMode.get() == SwitchBackMode.IMMEDIATE) switchBackNow();
+    }
+
+    /**
+     * 循环stop：每 tick 给服务端当前记着的那个方块补一个结束包
+     * <p>
+     * 服务端收到结束包会用「当时手上的工具」重算进度，够 0.7 当场破坏、不够就占延迟破坏槽（史莱姆那种）
+     * <p>
+     * 要重启「挖掘冷却」：反作弊（Grim 的 FastBreak）算的是「上一个结束包到下一个开始包隔了多久」，
+     * 循环stop 每 tick 都发结束包的话，下一块的开始包永远落在「结束包后 0 tick」上，惩罚会一直叠、
+     * 迟早回弹 —— 所以每发一个循环结束包就重新计时，下一块最早也要等「挖掘冷却」走完（方块挖掉后循环自己就停了）
+     */
+    private void loopStopMining() {
+        BlockDate block = trackedTarget();
+        if (block == null || !block.isMining || block.instaBreak || isBroken(block.pos)) return;
+        if (block.pos.equals(stopSentThisTick)) return;   // 这一 tick 已经发过结束包了
+
+        switchToBestTool(block);
+        sendStop(block.pos, block.direction);
+        noteStopResult(block, block.pos);
+
+        if (switchBackMode.get() == SwitchBackMode.IMMEDIATE) switchBackNow();
+    }
+
+    /**
+     * 冷却重置（照史莱姆的 onGrimCooldownResetPackets）
+     * <p>
+     * 反作弊（Grim 的 FastBreak）算的是「上一个结束包 → 下一个开始包」的间隔：够 6 tick 才 ×0.9 衰减，
+     * 不够就 +300-间隔×50。所以分数超标时，等间隔够了再往世界外连发几个假开始包 ——
+     * Grim 对每个开始包都按这个公式算一次，几发就能把惩罚压下去。这就是史莱姆敢用循环stop 追秒挖的原因
+     * <p>
+     * 只在「挖掘冷却」是 grim动态延迟 时有效：分数就那一个模式在维护。假包发去世界外
+     * （{@link #BYPASS_Y}），服务端按 too high 直接丢，通道干净，只污染反作弊那边的账
+     */
+    private void resetCooldownPenalty() {
+        if (cooldownMode.get() != CooldownMode.FEEDBACK) return;
+        if (gainedAdvantage <= feedbackThreshold.get()) return;
+        if (mineTicks - lastFinishTick < VANILLA_MINE_GAP) return;   // 间隔不够，刷了反而加惩罚
+        if (trackedTarget() == null) return;                          // 没在挖就不刷
+
+        int count = COOLDOWN_RESET_PACKETS;
+        while (gainedAdvantage > feedbackThreshold.get() && count-- > 0) {
+            sendBypassStart();
+            gainedAdvantage *= 0.9;
+        }
+    }
+
+    /** 往世界外（{@link #BYPASS_Y}）发一个假开始包：服务端按 too high 忽略，只用来污染反作弊记账 */
+    private void sendBypassStart() {
+        BlockPos bypassPos = new BlockPos(Mth.floor(mc.player.getX()), BYPASS_Y, Mth.floor(mc.player.getZ()));
+        mc.gameMode.startPrediction(mc.level, id ->
+            new ServerboundPlayerActionPacket(ServerboundPlayerActionPacket.Action.START_DESTROY_BLOCK, bypassPos, Direction.DOWN, id));
+    }
+
+    /** 需要补结束包的方块（先挖的优先），没有则返回 null */
+    private BlockDate retryTarget() {
+        if (needsRetry(firstBlockDate)) return firstBlockDate;
+        if (needsRetry(secondBlockDate)) return secondBlockDate;
+        return null;
+    }
+
+    /**
+     * 发过收尾 STOP、方块还在 → 该补一个
+     * <p>
+     * 秒切模式（立即切回）+ 自动重试：不看挖掘冷却，下一 tick 就补，最多 5 次
+     * （这一条只在服务端还认这个位置时才补）；
+     * 其余情况照旧按挖掘冷却补发，同样只补服务端还认这个位置的方块（位置被顶掉时结束包会被直接忽略，白发包）
+     * <p>
+     * 这里**不看** {@link #holdBlock}：拿着延迟破坏槽那个方块的工具有时候要拿好几个 tick，卡住的话
+     * 当前这块挖不掉的结束包就永远不会补发（表现就是拿在手上一直不掉的方块），补发是独立的一件事
+     */
+    private boolean needsRetry(BlockDate block) {
+        if (block == null
+            || !block.isMining
+            || !block.stopSent
+            || isBroken(block.pos)) return false;
+
+        if (switchBackMode.get() == SwitchBackMode.IMMEDIATE && autoRetry.get()) {
+            return block.serverTracked && block.retryCount < MAX_AUTO_RETRY;
+        }
+
+        return block.serverTracked && mineCooldownTicks <= 0;
+    }
+
+    /**
+     * 一个方块挖完了（服务端把它破坏掉）
+     * <p>
+     * 「挖掘延迟」是「开始一次挖掘之后隔这么多 tick 才能开始下一次」。
+     * 反作弊（Grim 的 FastBreak）看的是包：收到开始包时算「距上一个结束包过了多久」，
+     * 间隔不到 275ms 就往缓冲里加料 —— 所以本模块**每发一个结束包就重新计时**，
+     * 不管是收尾、双挖开局那个，还是补发的那个（见 {@link #sendStopPacket}）；
+     * 只有重挖框的补包例外，它只更新抢跑计分，见 {@link #blockFinished(boolean)}
+     */
+    private void blockFinished() {
+        blockFinished(true);
+    }
+
+    /**
+     * 发过结束包之后的统一计时
+     *
+     * @param restartCooldown 是否把「挖掘冷却」重新计时。正常收尾、占槽结束包、补发的结束包都要；
+     *                        重挖框那个补包不要 —— 它「快速stop」开着时每 tick 都补一下，一起重新计时会把
+     *                        正在挖和排队的目标一直往后推（抢跑计分照旧按最后那个结束包算，和反作弊看到的包一致）
+     */
+    private void blockFinished(boolean restartCooldown) {
+        if (restartCooldown) {
+            mineCooldownTicks = cooldownTicks();
+        }
+        lastFinishTick = mineTicks;
+    }
+
+    /**
+     * 这一轮结束之后要等多少 tick 才能开始下一块（就是「挖掘冷却」那三个模式）
+     * <ul>
+     *   <li>自定义：固定用「自定义冷却」的 tick 数</li>
+     *   <li>原版：原版客户端挖完一块之后那 5 tick 破坏延迟（原版本来就这个节奏）</li>
+     *   <li>grim动态延迟：分数没超标就一分钟都不多等，超标了退回原版节奏 6 tick（照 grim 的记分方式自检）</li>
+     * </ul>
+     */
+    private int cooldownTicks() {
+        return switch (cooldownMode.get()) {
+            case CUSTOM -> mineCooldown.get();
+            case VANILLA -> VANILLA_BREAK_DELAY;
+            case FEEDBACK -> advantageOverThreshold() ? VANILLA_MINE_GAP : 0;
+        };
+    }
+
+    /**
+     * 现在能不能开始一次新的挖掘
+     * <p>
+     * 只看自己的挖掘冷却（「挖掘冷却」那三个模式算出来的）
+     */
+    private boolean miningGateOpen() {
+        if (mineCooldownTicks > 0) return false;
+        return true;
+    }
+
+    /** 副挖现在能不能发开始包：和主挖一样等「挖掘冷却」走完（主挖先、副挖后） */
+    private boolean secondGateOpen() {
+        return miningGateOpen();
+    }
+
+    /** 这个目标现在从服务端的挖掘槽位上让开会不会挖不掉：方块已经没了，或者它的收尾已经走完（当场破坏 / 占住延迟破坏槽） */
+    private boolean canLoseTrack(BlockDate block) {
+        if (block == null || !block.isMining) return true;
+        if (block.instaBreak || block.parkSettled || block.stopSent) return true;
+
+        return isBroken(block.pos);
+    }
+
+    /** 服务端现在记着的那个挖掘目标（最后发过开始包、还没被顶掉的）；没有则返回 null */
+    private BlockDate trackedTarget() {
+        if (firstBlockDate != null && firstBlockDate.serverTracked) return firstBlockDate;
+        if (secondBlockDate != null && secondBlockDate.serverTracked) return secondBlockDate;
+        return null;
+    }
+
+    /**
+     * 安排一个「占槽结束包」（下一 tick 由 {@link #flushPendingStop()} 发出去）
+     * <p>
+     * 目的：让服务端把这个目标从挖掘槽位挪进延迟破坏槽，之后别的开始包把挖掘槽抢走，服务端也会继续挖它
+     * <p>
+     * 安排不了（已经安排过一次 / 这个 tick 已经有一个 / 延迟破坏槽被别的方块占着）就返回 false ——
+     * 槽被占着时这一下会被服务端直接忽略，白发还不如不发
+     */
+    private boolean schedulePark(BlockDate block) {
+        if (block == null || !block.isMining || block.parkTried || pendingStopPos != null) return false;
+        if (failMinePos != null) return false;
+
+        pendingStopPos = block.pos;
+        pendingStopFace = block.direction;
+        pendingStopBlock = block;
+        block.parkTried = true;
+        return true;
+    }
+
+    /**
+     * 一个目标要被新方块顶掉之前，先安排它的占槽结束包
+     *
+     * @return 可以顶掉返回 true；它还是服务端记着的那个、又安排不了（已经安排过 / 延迟破坏槽被别的方块占着）
+     *         返回 false（这一下点击先留在队列里，等它安顿好自动接手，不然那块谁也挖不掉了）
+     */
+    private boolean parkBeforeReplace(BlockDate old) {
+        if (old == null || !old.serverTracked || canLoseTrack(old)) return true;
+
+        return schedulePark(old);
+    }
+
+    /**
+     * 发新的开始包之前，先把服务端现在记着的那个目标安顿到延迟破坏槽
+     * <p>
+     * 新开始包会把挖掘槽位抢过来，被抢的那个方块如果还没安顿好（没进延迟破坏槽、也没有能收尾的结束包），
+     * 之后就再也没人挖它了 —— 所以这一 tick 不发新开始包，先安排它的占槽结束包，下一 tick 再发
+     * <p>
+     * 这个包以前是每个方块开始包之后固定下一 tick 就发；现在改成点新方块时就安排（见 {@link #tryTakeQueuedClick}），
+     * 单挖不再白发，双挖也不用多等一轮冷却。这一层是兜底：点击那一下没安排上（占槽包排不上）时，
+     * 等真要抢槽位了再补一次 —— 那会儿方块一般已经挖了几格，进度够 0.7 的结束包会直接把它挖掉
+     *
+     * @return 可以继续发新的开始包返回 true；这一 tick 只安排了（或只能等）那个目标安顿好返回 false
+     */
+    private boolean parkTrackedBeforeStart() {
+        BlockDate tracked = trackedTarget();
+        if (tracked == null || canLoseTrack(tracked)) return true;
+
+        // 安排得成就下一 tick 发；安排不成（它已经试过一次 / 延迟破坏槽被占）就让新目标继续等着，它自己按阈值收尾挖掉
+        schedulePark(tracked);
+        return false;
+    }
+
+    /** 原版那条挖掘路正在挖别的方块（手动点、别的模块）：这一 tick 不抢着发我们的开始包 */
+    private boolean vanillaBusyOnOther(BlockPos pos) {
+        if (mc.gameMode == null) return false;
+
+        MultiPlayerGameModeMiningAccessor vanilla = (MultiPlayerGameModeMiningAccessor) mc.gameMode;
+        return vanilla.meteorsupport$isDestroying() && !pos.equals(vanilla.meteorsupport$getDestroyBlockPos());
+    }
+
+    /**
+     * 抢跑计分（照反作弊的思路给自己记分）
+     * <p>
+     * 距离上一次收尾越近加得越多（间隔 0 加 300，每多等 1 tick 少加 50），按原版节奏挖（≥6 tick）就乘 0.9 衰减
+     */
+    private void scoreAdvantage() {
+        if (cooldownMode.get() != CooldownMode.FEEDBACK || lastFinishTick <= 0) return;
+
+        int since = mineTicks - lastFinishTick;
+        if (since >= VANILLA_MINE_GAP) gainedAdvantage *= 0.9;
+        else gainedAdvantage += 300 - since * 50;
+
+        gainedAdvantage = Mth.clamp(gainedAdvantage, -1000.0, 1000.0);
+    }
+
+    /** 分数超过阈值：该退回原版节奏了 */
+    private boolean advantageOverThreshold() {
+        return cooldownMode.get() == CooldownMode.FEEDBACK && gainedAdvantage > feedbackThreshold.get();
+    }
+
+    /**
+     * 要不要发高空绕过包
+     * <p>
+     * 只要开着「高空包绕过」就每次都发 —— 以前 grim动态延迟 会把高空包按分数掐掉，
+     * 掐掉之后包的样子和原版对不上反而出问题，现在两个设置各管各的
+     */
+    private boolean bypassWanted() {
+        return fastBypass.get();
+    }
+
+    /** 服务端那边算的「人在不在面上」：在地面上，或者「滞空挖掘绕过」把空中骗成了地面 */
+    private boolean serverOnGround() {
+        return mc.player == null || mc.player.onGround() || bypassGround.get();
+    }
+
+    /** 收尾时会切到手上的那把工具（热栏没有就看背包，和 switchToBestTool 用同一套） */
+    private ItemStack bestToolStack(BlockState state) {
+        int slot = getBestToolToUse(state);
+        return slot < 0 ? mc.player.getInventory().getItem(SilentSwitch.slot()) : mc.player.getInventory().getItem(slot);
+    }
+
+    /**
+     * 服务端这一刻收到结束包会算出来的进度（工具按「收尾时会切到手上的那把」算）
+     * <p>
+     * 全模块就这一套进度：显示、收尾判定、要等多久都用它，和服务端算的是同一个数
+     */
+    private double predictedStopProgress(BlockDate block) {
+        BlockState state = mc.level.getBlockState(block.pos);
+        if (state.isAir()) return 1.0;
+
+        // 服务端数的是「收到开始包那一格到收到结束包那一格」之间过了几格：
+        // 开始包和结束包在同一个 tick 里发就是 0，隔一个 tick 就是 1 —— 和这边「发开始包的 tick 到现在」一样
+        // （开始包还没发出去的目标按 0 算，免得还没开始就报一个大进度）
+        int elapsed = block.startTick < 0 ? 0 : mineTicks - block.startTick;
+        return BreakData.stopProgress(state, block.pos, bestToolStack(state), elapsed, serverOnGround());
+    }
+
+    /**
+     * 挖掘开始 / 收尾的挥手
+     * <p>
+     * 本地动画照旧（和手动挖一样）；「挥手」开着的时候顺手把这个挥手包真发出去 ——
+     * 反作弊是按「每次挖掘都该有一次挥手」看的，从头到尾不发就少了这一下
+     * <p>
+     * 一个 tick 只挥一次：结束包和开始包落在同一个 tick 时不会连发两个挥手包
+     */
+    private void swingForBreak() {
+        if (swingSentThisTick) return;
+
+        swingSentThisTick = true;
+        blockSwingPacket = !swingPacket.get();
+        mc.player.swing(InteractionHand.MAIN_HAND);
+    }
+
+    /**
+     * 进度走完后等待服务端确认破坏，等待超过「放弃等待」则放弃该方块
+     * <p>
+     * 进食暂停期间不算：那段时间工具没切过去（切了会打断进食），方块掉不掉不由我们说了算，
+     * 算进去的话吃久一点就会把一个本来还能挖掉的方块丢掉
+     */
+    private boolean giveUp(BlockDate block, boolean pauseFinishing) {
+        if (!block.done) return false;
+        if (pauseFinishing) return false;
+
+        block.timeoutTicks++;
+        if (block.timeoutTicks < maxBreaks.get()) return false;
+
+        recordRebreak(block);
+        return true;
+    }
+
+    /**
+     * 记录重挖位置（自动重挖开启时）
+     * <p>
+     * 只记「服务端还记着正在挖」的那个位置，也就是最后一次收到开始包、由我们发结束包收尾的方块。
+     * 重挖的原理是：服务端破坏方块后 {@code destroyPos} 不会清掉，位置再次出现方块时补一个结束包，
+     * 进度按「最后一次开始包到现在」算、早就 ≥70% → 瞬间破坏。位置对不上 destroyPos 的话，
+     * 结束包会被服务端直接忽略（要 {@code pos.equals(this.destroyPos)} 才认），根本挖不掉。
+     * <p>
+     * 双挖时先点的方块是服务端自己走「延迟破坏」补完的，它早就不是 destroyPos 了 —— 记它没用，
+     * 还会把真正能重挖的位置顶掉（先点的方块一般先掉），所以不记。
+     */
+    private void recordRebreak(BlockDate block) {
+        if (!rebreak.get() || !block.rebreak) return;
+        // 秒挖的方块服务端不记 destroyPos（收到开始包就当场破坏了），补结束包会被直接忽略，记了没用
+        if (block.instaBreak) return;
+        if (!block.serverTracked) return;
+        rebreakBlockDate = new BlockDate(block.pos, block.direction);
+        rebreakTicks = 0;
+        rebreakRetryTicks = 0;
+        rebreakSeenGone = false;
+    }
+
+    /** 清掉重挖框和它的等待计时（开启新挖掘后旧位置已经无法瞬间破坏） */
+    private void clearRebreak() {
+        rebreakBlockDate = null;
+        rebreakTicks = 0;
+        rebreakRetryTicks = 0;
+        rebreakSeenGone = false;
+    }
+
+    /**
+     * 方块是否已经不在了（变成空气，或者被水/岩浆顶掉：破坏完的格子经常立刻进流体，
+     * 例如挖冰、挖水下的方块，位置上一格空气都没有）
+     */
+    private boolean isBroken(BlockPos pos) {
+        Block block = mc.level.getBlockState(pos).getBlock();
+        return block == Blocks.AIR || block == Blocks.WATER || block == Blocks.LAVA;
+    }
+
+    // ==================== 工具切换 ====================
+
+    /**
+     * 现在要不要做静默切换
+     * <p>
+     * 「不切回」模式不做：静默切换只有服务端那边换了槽位，本地一直不切，收尾又不会切回，两边就长期错开
+     */
+    private boolean silentMode() {
+        return silentSwitch.get() && switchBackMode.get() != SwitchBackMode.NONE;
+    }
+
+    /** 切到该方块的最佳工具：普通收尾用，重新开始「切回」计时 */
+    private void switchToBestTool(BlockDate block) {
+        switchToBestTool(block, true);
+    }
+
+    /**
+     * 切到该方块的最佳工具（热栏里没有合适的工具时，看「背包切换」要不要从背包拿）
+     *
+     * @param restartTimer 是否重新开始「切回」计时。普通收尾（发 STOP）要重新开始；
+     *                     等延迟破坏槽位的方块掉下来时不要 —— 那时候工具停多久由方块什么时候掉决定，
+     *                     不能和切回延迟叠加成「普通收尾 1 tick + 等待 1 tick」
+     */
+    private void switchToBestTool(BlockDate block, boolean restartTimer) {
+        BlockState state = mc.level.getBlockState(block.pos);
+        int slot = getBestToolToUse(state);
+
+        // 最适合的那把在背包里 → 背包切换：换到主手（用完由 switchBackNow 换回背包）
+        // 热栏那把只是「也能挖」（拿剑、拿锹挖石头之类）的时候一样会走到这里
+        if (slot >= 9) {
+            // 手上已经是这把了，不用动
+            if (slot == invToolSlot) {
+                if (silentMode()) SilentSwitch.keep(invToolHotbar);
+                return;
+            }
+
+            // 手上还拿着背包里另一把（换方块了）：先把那把换回背包，再拿新的这把
+            if (invToolSlot != -1) swapInvToolBack();
+
+            swapInvToolToHand(slot);
+            if (silentMode()) SilentSwitch.keep(invToolHotbar);
+            if (restartTimer) switchTicks = 0;
+            return;
+        }
+
+        // 没挑到更好的工具（或者手上那把就是最佳）：本 tick 继续让服务端拿着现在这把
+        if (slot < 0 || slot > 8) {
+            if (silentMode()) SilentSwitch.keep(SilentSwitch.slot());
+            return;
+        }
+
+        // 静默切换：本地槽位不动，只把换手包发给服务端（API 每 tick 续租，不续下一 tick 自己切回）
+        if (silentMode()) {
+            boolean already = slot == SilentSwitch.slot();
+            SilentSwitch.keep(slot);
+
+            // 真的换了槽位才算一次切换；服务端本来就拿着这把只是续租
+            if (!already) {
+                hasSwitch = true;
+                switchedLocally = false;
+                if (restartTimer) switchTicks = 0;
+            }
+            return;
+        }
+
+        // 普通切换：静默接管着的话先放掉（不然这次本地切换的同步包会被静默逻辑拦掉）
+        SilentSwitch.release();
+
+        if (slot == mc.player.getInventory().getSelectedSlot()) return;
+
+        // 不切回：本地跟着切，不用记录原槽位
+        if (switchBackMode.get() == SwitchBackMode.NONE) {
+            InvUtils.swap(slot, false);
+            return;
+        }
+
+        InvUtils.swap(slot, true);
+        hasSwitch = true;
+        switchedLocally = true;
+        if (restartTimer) switchTicks = 0;
+    }
+
+    /** 切回原来的槽位（从背包换到手上的工具也要换回背包） */
+    private void switchBackNow() {
+        swapInvToolBack();
+
+        if (hasSwitch) {
+            // 静默接管着的话先放开（本地槽位本来就没动）
+            SilentSwitch.release();
+
+            if (switchedLocally) {
+                InvUtils.swapBack();
+            }
+            hasSwitch = false;
+            switchedLocally = false;
+            switchTicks = 0;
+        }
+    }
+
+    /**
+     * 把背包里的工具换到主手
+     * <p>
+     * 和按数字键换位一模一样：工具进当前选中的热栏槽位（手立刻拿着），原来那个槽位的物品进背包，
+     * 用完 {@link #swapInvToolBack()} 再换一次就换回去了。一次只拿一件，拿的时候记下两个槽位
+     * <p>
+     * 发包模式：交换 = 一个换位包（ContainerInput.SWAP）；光标 = 拾取 + 放下两个包（PICKUP）
+     */
+    private void swapInvToolToHand(int invSlot) {
+        // 静默切换期间服务端拿着的是别的槽位，背包里的工具换到那一格才顶用
+        int hotbar = SilentSwitch.slot();
+        invToolSlot = invSlot;
+        invToolHotbar = hotbar;
+        sendInvSwap(invSlot, hotbar);
+    }
+
+    /** 把从背包换到手上的工具换回背包（没换过就什么都不做） */
+    private void swapInvToolBack() {
+        if (invToolSlot == -1) return;
+
+        int invSlot = invToolSlot;
+        int hotbar = invToolHotbar;
+        invToolSlot = -1;
+        invToolHotbar = -1;
+        sendInvSwap(invSlot, hotbar);
+    }
+
+    /** 背包槽位 ↔ 热栏槽位对换（换过去和换回来用的是同一个操作） */
+    private void sendInvSwap(int invSlot, int hotbar) {
+        if (invSwitchMode.get() == InvSwitchMode.SWAP) {
+            // 换位包：button 是热栏槽位号（0-8），slot 是背包槽位在那个界面里的编号
+            InvUtils.quickSwap().fromId(hotbar).to(invSlot);
+        } else {
+            // 光标：先拾起背包那一格，再点一下热栏那一格放下去
+            InvUtils.move().from(invSlot).toHotbar(hotbar);
+        }
+    }
+
+    /**
+     * 切工具后的处理 —— 两条流程各走各的，不互相兜底
+     * <p>
+     * 1. 延迟破坏槽位的方块（服务端拿「手上的工具」自己补完的那个）：客户端进度走完 → 切到最佳工具
+     * 一直拿着（服务端每个 tick 都用它重算进度），方块被破坏后再按「切工具模式」切回
+     * 2. 原版挖掘（我们自己发 STOP 收尾的方块）：切工具 → STOP → 切回都在 {@link #finishTarget} 里做完，
+     * 这里只管「延迟切回」的计时；结束包没生效由 {@link #retryStop()} 过冷却补发
+     */
+    private void handleSwitchBack() {
+        // ===== 1. 延迟破坏槽位：一直拿着最佳工具 =====
+        BlockDate need = holdNeeded();
+        if (need != null) {
+            // 服务端这一 tick 用「手上的工具」重算它的进度，顺带把「踩在地面上」发过去（滞空挖掘绕过）
+            switchToBestTool(need, false);
+            holdBlock = need;   // 拿着不放，直到服务端把它破坏掉
+            sendFakeGround();
+            return;
+        }
+        if (holdBlock != null) {
+            // 那个方块已经不在了（被破坏 / 被放弃）→ 切回
+            holdBlock = null;
+            switchBackNow();
+            return;
+        }
+
+        // ===== 2. 原版挖掘：按「切工具模式」切回 =====
+        if (!hasSwitch && invToolSlot == -1) return;
+
+        boolean back = switch (switchBackMode.get()) {
+            // 立即切回：正常在发 STOP 的那一 tick 已经切回了，这里收尾被别的事拖住的
+            case IMMEDIATE -> true;
+            case DELAYED -> {
+                if (switchBackOnBreak.get() && !hasLiveStopTarget()) yield true;
+                if (switchTicks < switchBackDelay.get()) switchTicks++;
+                yield switchTicks >= switchBackDelay.get();
+            }
+            // 不切回：保持最佳工具
+            case NONE -> false;
+        };
+
+        // 还要继续等（延迟没到）：静默切换就续租，不续下一 tick 就自己切回了
+        if (!back && SilentSwitch.active()) SilentSwitch.keep(SilentSwitch.slot());
+
+        // 背包换到手上的工具一定要换回去（「不切回」也一样，不然热栏少一格、背包里还少了一件）
+        if (back || invToolSlot != -1) switchBackNow();
+    }
+
+    /**
+     * 这一块已经收过尾、服务端也不认这个位置了，但还没被破坏 → 需要拿着最佳工具让服务端把它补完
+     * <p>
+     * 它每个 tick 都用「当前手上的工具」重算进度，手上不拿挖得动的工具它就掉不下来 —— 所以得一直拿着，
+     * 直到方块被破坏（或者被 giveUp 放弃）
+     * <p>
+     * 服务端还记着这个位置的时候不用拿工具等：直接补一个结束包，服务端按「手上的工具」重算进度、
+     * ≥ 70% 当场就破坏了（{@link #finishTarget}）
+     * <p>
+     * 判据用「已进入收尾/占槽」而不是「客户端以为它占了延迟破坏槽」：客户端是拿「结束包发出去那一刻的
+     * 进度」去猜服务端是当场破坏还是丢进延迟破坏槽的，两边的 tick 计数差一格就会猜反（快方块尤其容易）。
+     * 猜反的时候客户端不认为它占了槽、服务端那边却在补它 —— 那一块就既没人补发结束包、也没人拿着工具，
+     * 表现就是双挖时那一块一直挖不掉（过「放弃等待」才被丢掉）
+     */
+    private boolean needsHelp(BlockDate block) {
+        if (block == null || !block.isMining || block.instaBreak || isBroken(block.pos)) return false;
+        if (block.serverTracked) return false;
+
+        return block.parked || block.parkSettled || block.switched;
+    }
+
+    /** 正在等服务端把方块挖掉（需要拿住最佳工具的那个方块，先点的优先），没有则返回 null */
+    private BlockDate holdNeeded() {
+        if (needsHelp(firstBlockDate)) return firstBlockDate;
+        if (needsHelp(secondBlockDate)) return secondBlockDate;
+        return null;
+    }
+
+    /** 发过 STOP 但还没被破坏的方块（服务端当前记着的那个才有意义） */
+    private boolean isLiveStopTarget(BlockDate block) {
+        return block != null && block.switched && block.serverTracked && !isBroken(block.pos);
+    }
+
+    private boolean hasLiveStopTarget() {
+        return isLiveStopTarget(firstBlockDate) || isLiveStopTarget(secondBlockDate);
+    }
+
+    // ==================== 辅助方法 ====================
+
+    /**
+     * 挖不动的方块被点了之后，把服务端那边的挖掘状态顶掉
+     * <p>
+     * 位置固定用世界外（{@link #BYPASS_Y}）：服务端的开始包分支会按 too high 直接 return，destroyPos 什么的都不动。
+     * 不能改用方块上面那一格 —— 世界内的空气开始包会把服务端的 destroyPos 改成那个空气位置（26.1
+     * ServerPlayerGameMode 的 START 分支对空气也会记 destroyPos），我们正在挖的方块之后发的结束包
+     * 会被服务端忽略、方块掉不下来
+     */
+    public static void stopMine(BlockPos pos) {
+        BlockPos bypassPos = new BlockPos(pos.getX(), BYPASS_Y, pos.getZ());
+        // 也要走客户端的预测序列：自己构造包时 sequence 是 0，反作弊会当成「乱序的挖掘包」直接取消
+        MeteorClient.mc.gameMode.startPrediction(MeteorClient.mc.level, id ->
+            new ServerboundPlayerActionPacket(ServerboundPlayerActionPacket.Action.START_DESTROY_BLOCK, bypassPos, Direction.UP, id));
+        MeteorClient.mc.gameMode.startPrediction(MeteorClient.mc.level, id ->
+            new ServerboundPlayerActionPacket(ServerboundPlayerActionPacket.Action.STOP_DESTROY_BLOCK, bypassPos, Direction.UP, id));
+    }
+
+    /**
+     * 范围检查：超出距离时清除目标
+     * <p>
+     * 占着服务端「延迟破坏」槽位的方块不清：它由服务端拿手上的工具自己补完，清掉就再也没人挖它了
+     * 重挖框也不清：超出范围只是先不补包，等走回范围再补（见 {@link #handleRebreak}）
+     */
+    public void rangeCheck() {
+        if (firstBlockDate != null && !firstBlockDate.parked
+            && PlayerUtils.distanceTo(firstBlockDate.pos) > range.get()) {
+            firstBlockDate = null;
+        }
+        if (secondBlockDate != null && !secondBlockDate.parked
+            && PlayerUtils.distanceTo(secondBlockDate.pos) > range.get()) {
+            secondBlockDate = null;
+        }
+    }
+
+    /**
+     * 重挖处理
+     * <p>
+     * 原理：服务端破坏方块后 {@code destroyPos} 仍然指着那个位置，而进度是按「当前手持工具速度 ×
+     * (gameTicks - destroyProgressStart + 1)」重算的，时间过去越久越大 —— 所以位置再次出现方块时
+     * 不需要 START，切最佳工具补一个 STOP 就能瞬间挖掉（进度 ≥ 0.7 服务端立即破坏）。
+     * <p>
+     * 时机：方块一出现就立刻收尾（受「重挖延迟」限制，0 = 本 tick）。无条件执行，正在挖别的方块也照样收尾，
+     * 不会去动那些方块的目标/进度，只是额外补一个 STOP。
+     * <p>
+     * 前提是这一格的方块先消失过（{@code rebreakSeenGone}）：框架是在收尾那一刻就记下来的，方块还在的时候补包
+     * 是跟 retryStop 重复，还会把「放弃等待」提前耗光、把重挖框删掉。方块一直没消失就直接丢掉这个框架
+     * <p>
+     * 补的这一下不是「一次没生效就卡死」：包可能被反作弊取消（人跳起来、位置变了、报的面不成立），
+     * 也可能服务端这一下没认，所以方块还在就不停补，一直补到方块被破坏或超过「放弃等待」。
+     * 重挖不看「挖掘冷却」（它有自己的节奏）：「快速stop」就是每 tick 无条件补一个，「重挖延迟」管头一下。
+     * <p>
+     * 方块出现后超过「放弃等待」这么久仍未挖掉，说明服务端已经不认这个位置了，直接放弃并删除该重挖位置。
+     */
+    private void handleRebreak() {
+        if (!rebreak.get() || rebreakBlockDate == null) return;
+
+        BlockState state = mc.level.getBlockState(rebreakBlockDate.pos);
+        if (state.getBlock() == Blocks.AIR || state.getBlock() == Blocks.WATER || state.getBlock() == Blocks.LAVA) {
+            // 方块还没（重新）出现：等待期间不计时，也不重复收尾（消失了就说明这一格的旧进度已经能拿来瞬间破坏了）
+            rebreakSeenGone = true;
+            rebreakTicks = 0;
+            rebreakRetryTicks = 0;
+            return;
+        }
+
+        // 超出挖掘范围：框不消失、也不计时，等走进范围再破
+        if (PlayerUtils.distanceTo(rebreakBlockDate.pos) > range.get()) return;
+
+        rebreakTicks++;
+
+        // 方块出现太久都没能挖掉 → 放弃这个重挖位置，避免永远卡着
+        if (rebreakTicks > maxBreaks.get()) {
+            rebreakBlockDate = null;
+            rebreakSeenGone = false;
+            return;
+        }
+
+        // 方块从没消失过：这一格还在正常挖掘流程里（框架是收尾那一刻就记下来的），补包交给 retryStop，别抢
+        if (!rebreakSeenGone) return;
+
+        // 空中跳过：人在空中就什么都不做，等落地
+        if (rebreakSkipAir.get() && !mc.player.onGround()) {
+            rebreakTicks--;
+            return;
+        }
+
+        // 快速stop：每 tick 无条件补一个，不等重挖延迟
+        if (rebreakFastStop.get()) {
+            rebreakNow();
+            return;
+        }
+
+        if (rebreakTicks <= rebreakDelay.get()) return;   // 重挖延迟
+        if (rebreakRetryTicks > 0) {
+            rebreakRetryTicks--;
+            return;   // 补过一个了，歇几 tick 再补
+        }
+
+        rebreakRetryTicks = REBREAK_RETRY_GAP;
+        rebreakNow();
+    }
+
+    /**
+     * 重挖收尾：切到最佳工具 → 发 STOP →（立即切回模式）切回
+     * <p>
+     * 必须和正常收尾一个顺序：STOP 是在服务端处理包的那一刻用「当前手持工具」重算进度的，
+     * 所以切回不能赶在 STOP 前面。延迟切回 / 不切回沿用「切工具模式」，由 {@link #handleSwitchBack()} 处理。
+     * <p>
+     * 这里不碰 {@code firstBlockDate} / {@code secondBlockDate} 的进度和状态，也不把它们的「挖掘冷却」
+     * 重新计时（重挖框「快速stop」开着时每 tick 都补一下，一起重新计时会把正在挖和排队的目标一直往后推，见 {@link #blockFinished(boolean)}）；
+     * {@link InvUtils#swap(int, boolean)} 也不会覆盖已经记下的「切回槽位」，正常挖掘待处理的切回仍然有效。
+     */
+    private void rebreakNow() {
+        switchToBestTool(rebreakBlockDate);
+        // 走带高空包的那条：高空包绕过开着时重挖这一发也补世界外假包，包序列和正常收尾一致
+        sendStop(rebreakBlockDate.pos, rebreakBlockDate.direction, false);
+        if (switchBackMode.get() == SwitchBackMode.IMMEDIATE) switchBackNow();
+    }
+
+    // ==================== 发包方法 ====================
+
+    /**
+     * 开始一个目标：发 START，并把它标成服务端当前记着的挖掘方块
+     * <p>
+     * 服务端只会认「最后发过 START 的那个方块」为目标，另一个方块只能靠延迟破坏名额被服务端补完。
+     * <p>
+     * 发开始包之前要先把服务端现在记着的那个目标安顿好（{@link #parkTrackedBeforeStart()}）：它还占着挖掘槽位的话，
+     * 这个开始包会把它挤掉，挤掉之后它既不在挖掘槽位、也没进延迟破坏槽，就再也没人挖它了
+     */
+    private void startTarget(BlockDate block) {
+        BlockState state = mc.level.getBlockState(block.pos);
+
+        // 原版那条挖掘路正在挖别的方块（手动点、别的模块）：这一 tick 不抢，等它那一套走完再由 tick 逻辑重试
+        if (vanillaBusyOnOther(block.pos)) return;
+
+        // 要抢服务端的挖掘槽位了：先确认它现在记着的那个目标已经安顿好，没好就先安排它的占槽结束包（下个 tick 再发开始包）
+        if (!parkTrackedBeforeStart()) return;
+
+        // 这一 tick 已经安排了一个占槽结束包（下一 tick 才发出去）：一个 tick 只发一件事，目标留着下个 tick 再开始
+        if (pendingStopPos != null) return;
+
+        // 抢跑计分（「挖掘冷却」选 grim动态延迟 时拿它决定要不要退回原版节奏）
+        scoreAdvantage();
+
+        // 开新挖掘会把服务端的进度计时清零，旧的重挖框再也无法瞬间破坏，立即清掉（秒破的开始包也一样清零）
+        clearRebreak();
+
+        // 记下发开始包这一刻（mineTicks）：收尾时算「单tick进度 × (发开始包到现在过了几格 + 1)」，
+        // 和服务端从收到开始包那一格起算的口径一样（开始包和结束包同一个 tick 发就是 1 格，隔一个 tick 就是 2 格）
+        block.startTick = mineTicks;
+
+        // 原版能秒破的方块：切工具 → 一个开始包服务端当场就破坏了 → 切回，不记冷却
+        // 进食时不为秒破切工具，硬度 0 仍可直接发 START；其它方块走普通开始，吃完再收尾
+        if (BreakData.hardness(state, block.pos) == 0.0) {
+            mineInstaBlock(block, false);
+            return;
+        }
+        if (!shouldPauseForEating() && isInstaBreak(block.pos, state)) {
+            mineInstaBlock(block, true);
+            return;
+        }
+
+        mineBlock(block.pos, block.direction);
+        block.isMining = true;
+        block.serverTracked = true;
+
+        if (firstBlockDate != null && firstBlockDate != block) firstBlockDate.serverTracked = false;
+        if (secondBlockDate != null && secondBlockDate != block) secondBlockDate.serverTracked = false;
+
+        // 双挖开局：主挖发完开始包立刻补一个结束包，把它直接塞进延迟破坏槽（服务端不清 destroyPos），
+        // 副挖要抢挖掘槽位时它已经安顿好了，不用再多等一轮
+        if (doubleBreak.get() && block == firstBlockDate) parkAtStart(block);
+
+        // 开始挖掘时也占一次冷却，不然挖掘当中点到的方块会立刻插进来
+        // （冷却模式算出 0 的也至少隔一个 tick，免得和这一块的包落在同一个 tick 里）
+        mineCooldownTicks = Math.max(cooldownTicks(), MIN_MINE_GAP);
+    }
+
+    /**
+     * 双挖开局占槽：主挖发完开始包，同一个 tick 就补一个结束包
+     * <p>
+     * 服务端收到这一发结束包时进度不到 0.7，会把它从挖掘槽位挪进延迟破坏槽 —— 注意 {@code destroyPos} 不动，
+     * 还是它，所以这一格同时占着挖掘槽位和延迟破坏槽。副挖再发开始包把挖掘槽位抢过去，主挖就只剩延迟破坏这一条路
+     * <p>
+     * 这不是「以后就不管它了」：主挖照旧按阈值收尾（进度到 70% 那发结束包服务端会当场把它挖掉，
+     * 比等服务端自己补到 100% 快得多）；只有主挖被副挖顶掉、又没赶上阈值收尾时，才由服务端自己补完
+     */
+    private void parkAtStart(BlockDate block) {
+        switchToBestTool(block);
+        sendStop(block.pos, block.direction);
+        noteStopResult(block, block.pos);
+    }
+
+    /**
+     * 原版能秒破的方块：切工具 → 挥手 + 一个开始包 →（按切工具模式）切回，不记冷却
+     * <p>
+     * 26.1 服务端的开始包分支：方块不空、用当前手持工具算出的单 tick 进度 ≥ 1.0 → 直接
+     * {@code destroyAndAck(pos, seq, "insta mine")} 并 return（不记 destroyPos，也不进挖掘/延迟破坏流程）。
+     * 原版客户端秒挖时同样只发一个开始包（进度够了就本地破坏，不补结束包）。
+     * <p>
+     * 原版挖完这种方块**不进破坏延迟**（那 5 tick 只给「挖了一会才挖穿」的方块），所以这里也不记冷却，
+     * 连着挖一排火把/草不会被上一块拖住。也不安排占槽结束包、不等切换工具阈值：多发一个结束包
+     * 反而会被反作弊（Grim 的 FastBreak）按「挖穿这一格该用多久」算出提前收尾，往缓冲里加料。
+     */
+    private void mineInstaBlock(BlockDate block, boolean switchTool) {
+        // 服务端是按「收到开始包那一刻手上的工具」算单 tick 进度的，所以先把最合适的工具换到手上
+        if (switchTool) switchToBestTool(block);
+
+        swingForBreak();
+
+        // 开始包走客户端的预测序列（sequence 每次 +1，和原版一模一样）
+        Direction instaFace = breakFace(block.pos, block.direction);
+        mc.gameMode.startPrediction(mc.level, id ->
+            new ServerboundPlayerActionPacket(ServerboundPlayerActionPacket.Action.START_DESTROY_BLOCK,
+                block.pos, instaFace, id));
+
+        block.isMining = true;
+        block.serverTracked = true;
+        block.instaBreak = true;
+        block.done = true;
+        block.progress = 1.0;   // 服务端收到开始包就当场破坏了，进度直接算满
+
+        // 不碰别的目标的 serverTracked：26.1 服务端开始包分支里秒破是 destroyAndAck 直接 return 的，
+        // destroyPos / isDestroyingBlock 都没动，别的目标还是服务端记着的那个挖掘方块
+
+        // 不记冷却；「立即切回」模式下现在就把工具换回去
+        if (switchTool && switchBackMode.get() == SwitchBackMode.IMMEDIATE) switchBackNow();
+    }
+
+    /** 原版能秒破的方块：拿着最合适的工具时单 tick 进度就 ≥ 1（硬度 0 的方块单 tick 进度本来就是满的） */
+    private boolean isInstaBreak(BlockPos pos, BlockState state) {
+        if (BreakData.hardness(state, pos) == 0.0) return true;
+        return BreakData.perTick(state, pos, bestToolStack(state), serverOnGround()) >= 1.0;
+    }
+
+    /**
+     * 开始挖掘：只发 START
+     * <p>
+     * 「占槽结束包」不在这里安排，要抢挖掘槽位时由 {@link #parkTrackedBeforeStart()} 安排、{@link #flushPendingStop()}
+     * 下一 tick 发出去（单挖就一直不发，方块由达到阈值的收尾结束包挖掉）
+     * <p>
+     * 服务端规则（对应 26.1 原版服务端 ServerPlayerGameMode.handleBlockBreakAction）：
+     * - 服务端只有「一个」挖掘槽位：收到 START 就记录 destroyPos，并中止上一个方块
+     * - 收到 STOP 时用当前手持工具重算进度 = 单tick进度 * (gameTicks - destroyProgressStart + 1)：
+     * - 进度 ≥ 0.7 → 立即破坏；进度 < 0.7 → 交给服务端 hasDelayedDestroy 自己走完
+     * - 延迟破坏槽位同样只有一个，先占者得：槽被占着时新的 STOP 会被服务端直接忽略
+     * <p>
+     * 占槽结束包放在**下一个 tick** 发：同一个 tick 里对两个不同位置发挖掘包（方块 + 高空包、
+     * 或者占槽结束包 + 副挖开始包）是反作弊眼里的「一秒点了两下」，分开就不会被这种检查顺手连坐掉
+     * （占槽结束包被丢掉，先点的那个方块进不了延迟破坏槽就永远挖不掉）
+     */
+    public void mineBlock(BlockPos pos, Direction direction) {
+        // 报的面按当前眼睛位置重算（这次点击点的面只在准星正好还指着它的时候才算数）
+        Direction face = breakFace(pos, direction);
+
+        swingForBreak();
+
+        // 1. 发送 START 包：必须走客户端的预测序列（sequence 每次 +1）
+        //    自己构造包时 sequence 是 0，服务器那边每挖一次都要「上一个 +1」，0 号开始包会被当成乱序取消
+        mc.gameMode.startPrediction(mc.level, id ->
+            new ServerboundPlayerActionPacket(ServerboundPlayerActionPacket.Action.START_DESTROY_BLOCK, pos, face, id));
+
+        // 2. 高空包绕过：向世界外（BYPASS_Y）发一个额外的 START 包（sequenced packet 保证顺序）
+        if (bypassWanted()) {
+            BlockPos bypassPos = new BlockPos(pos.getX(), BYPASS_Y, pos.getZ());
+            mc.gameMode.startPrediction(mc.level, id ->
+                new ServerboundPlayerActionPacket(ServerboundPlayerActionPacket.Action.START_DESTROY_BLOCK, bypassPos, Direction.DOWN, id));
+        }
+
+    }
+
+    /**
+     * 安排好的「占槽结束包」（要抢挖掘槽位时由 {@link #parkTrackedBeforeStart()} 安排）：这一 tick 单独发出去，
+     * 只发这一个 STOP、不带高空假包
+     * （挥手和其它收尾一样由 {@link #sendStopPacket} 统一处理）
+     * <p>
+     * 和收尾一样要先把最佳工具换到手上再发：服务端是用「收到结束包那一刻手上的工具」重算进度的，
+     * 切了工具这一下才更容易当场破坏（进度够 0.7）；不够 0.7 就是我们要的「占槽」
+     * <p>
+     * 进食时例外：切槽位会打断进食，这一发照旧不碰快捷栏，吃完由收尾补完
+     */
+    private void flushPendingStop() {
+        if (pendingStopPos == null) return;
+
+        BlockPos pos = pendingStopPos;
+        Direction face = pendingStopFace;
+        pendingStopPos = null;
+        pendingStopFace = null;
+
+        BlockDate block = pendingStopBlock != null ? pendingStopBlock : stopOwner(pos);
+        pendingStopBlock = null;
+        boolean switchTool = block != null && !shouldPauseForEating();
+        if (switchTool) switchToBestTool(block);
+
+        noteStopResult(block, pos);
+
+        // 走带高空包的那条：高空包绕过开着时占槽这一发也补世界外假包
+        sendStop(pos, face);
+
+        // 原版挖掘那条流程：和收尾一个节奏，「立即切回」现在就换回去，其余交给 handleSwitchBack
+        if (switchTool && switchBackMode.get() == SwitchBackMode.IMMEDIATE) switchBackNow();
+    }
+
+    /** 这个位置现在归哪个挖掘目标管（占槽结束包要按它的方块挑工具）；没了就返回 null，那种情况照旧原样发包 */
+    private BlockDate stopOwner(BlockPos pos) {
+        if (firstBlockDate != null && firstBlockDate.pos.equals(pos)) return firstBlockDate;
+        if (secondBlockDate != null && secondBlockDate.pos.equals(pos)) return secondBlockDate;
+        return null;
+    }
+
+    /**
+     * 记下这一发结束包的结果（占槽包、收尾包、补发包都要记）
+     * <p>
+     * 进度够 0.7 就是当场破坏；不够 0.7：服务端「延迟破坏」名额空着就占住了（服务端自己会把方块补完），
+     * 名额被别的方块占着那这一下等于没发 —— 这两种都要跟着改客户端的账（{@code failMinePos}）
+     * <p>
+     * 账记错的后果：客户端以为名额还空着，之后排一个服务端直接丢掉的占槽包，却把那块标成已安顿好、
+     * 拿着工具干等（那一块其实还在服务端的挖掘槽位上，服务端不会自己把它挖掉）→ 卡方块，只能手动点一下
+     */
+    private void noteStopResult(BlockDate block, BlockPos pos) {
+        if (block == null || block.instaBreak) return;
+
+        if (predictedStopProgress(block) >= BreakData.STOP_INSTANT) {
+            block.parkSettled = true;
+            return;
+        }
+
+        if (failMinePos == null) {
+            failMinePos = pos.immutable();
+            block.parked = true;
+            block.parkSettled = true;
+        }
+    }
+
+    /**
+     * 只发一个 STOP 包（收尾 / 重挖用，不带挥手）
+     * <p>
+     * 服务端是拿「收到 STOP 那一刻手上的工具」按
+     * {@code 单tick进度 × (gameTicks - destroyProgressStart + 1)} 重算整个进度的，
+     * 所以滞空挖掘绕过要在 STOP 之前先把「踩在地面上」发出去（空中惩罚是最后一步 {@code speed /= 5}，
+     * 去掉它整个进度就按地面速度算），否则在空中这一下会被算成 1/5，进度不够 0.7 就被丢掉。
+     */
+    private void sendStopPacket(BlockPos pos, Direction direction) {
+        sendStopPacket(pos, direction, true);
+    }
+
+    /** @param restartCooldown 这个结束包要不要把「挖掘冷却」重新计时（重挖框的补包不要，见 blockFinished） */
+    private void sendStopPacket(BlockPos pos, Direction direction, boolean restartCooldown) {
+        // 反作弊的 swing 检查：这一 tick 还没挥过手（比如这一下是补发的结束包）就补一个
+        swingForBreak();
+        sendFakeGround();
+
+        // 报的面按当前眼睛位置重算（挖掘期间人可能已经绕到方块另一边了）
+        Direction face = breakFace(pos, direction);
+
+        mc.gameMode.startPrediction(mc.level, id ->
+            new ServerboundPlayerActionPacket(ServerboundPlayerActionPacket.Action.STOP_DESTROY_BLOCK, pos, face, id));
+
+        // 本模块每发一个结束包就重新计时：下一个开始包必须离它一个延迟
+        // （结束包刚过去就发下一个开始包，在反作弊眼里就是「间隔 0」，延迟设多大都没用）
+        blockFinished(restartCooldown);
+        stopSentThisTick = pos;
+    }
+
+    /**
+     * 滞空挖掘绕过：给服务端补一个「踩在地面上」的位置包
+     * <p>
+     * 服务端的挖掘进度最后一步是 {@code if (!player.onGround()) speed /= 5}（26.1 {@code Player.getDestroySpeed}），
+     * 而 onGround 这个标记就是客户端发过来的，所以先发一个 onGround = true 的位置包，
+     * 服务端接下来这一 tick 就会按地面速度算进度。Y 微调 1.0e-9 只是让这个包不和上一 tick 的位置完全一样。
+     * <p>
+     * 必须在 STOP 之前发（服务端按收到的顺序处理），并且延迟破坏那个方块也要按 tick 补，
+     * 否则服务端每个 tick 用它自己的 onGround 重算，会一直按空中的 1/5 走。
+     */
+    private void sendFakeGround() {
+        if (!bypassGround.get() || mc.player.onGround() || mc.player.isFallFlying()) return;
+
+        mc.getConnection().send(
+            new ServerboundMovePlayerPacket.PosRot(
+                mc.player.getX(), mc.player.getY() + 1.0e-9, mc.player.getZ(),
+                mc.player.getYRot(), mc.player.getXRot(), true, mc.player.horizontalCollision));
+    }
+
+    /**
+     * 发挖掘包时用的面：按「玩家眼睛现在在方块的哪一侧」重算，保证这个面从当前位置看得见
+     * <p>
+     * Grim 的 PositionBreakA 在「报的面位于玩家眼睛的反面」时会标记 + 取消这个包（表现就是方块挖不掉），
+     * 而挖掘期间人一动（绕到方块另一边、跳起来、被活塞顶开）原来点的那个面就可能不成立了。
+     * 挑不出面（人就在方块里）时用原来点的那个面 —— 那种情况反作弊本来就直接放行。
+     * <p>
+     * 挖掘包是先于这个 tick 的位置包发出去的，反作弊那边可能拿「上一 tick 的位置」判这个面
+     * （跳跃时一上一下差半格），所以两只眼睛都得在外面才算数 —— 只对一边成立的面会被取消
+     */
+    private Direction breakFace(BlockPos pos, Direction fallback) {
+        if (mc.player == null) return fallback;
+
+        // 上一 tick 的眼睛位置：xo/yo/zo 就是上一 tick 结束时的位置，也就是最后发给服务端的那一个
+        double eyeOffset = mc.player.getEyeY() - mc.player.getY();
+        double minX = Math.min(mc.player.getX(), mc.player.xo);
+        double maxX = Math.max(mc.player.getX(), mc.player.xo);
+        double minY = Math.min(mc.player.getY(), mc.player.yo) + eyeOffset;
+        double maxY = Math.max(mc.player.getY(), mc.player.yo) + eyeOffset;
+        double minZ = Math.min(mc.player.getZ(), mc.player.zo);
+        double maxZ = Math.max(mc.player.getZ(), mc.player.zo);
+
+        double x1 = pos.getX(), y1 = pos.getY(), z1 = pos.getZ();
+
+        // 每个方向算「眼睛最靠里的那一次也在这个面外面多远」，取最外面的那个
+        // 必须两只眼睛都在外面（留一点余量，免得贴面时抖）
+        double best = 1.0e-3;
+        Direction face = fallback;
+
+        if (x1 - maxX > best) { best = x1 - maxX; face = Direction.WEST; }
+        if (minX - (x1 + 1.0) > best) { best = minX - (x1 + 1.0); face = Direction.EAST; }
+        if (y1 - maxY > best) { best = y1 - maxY; face = Direction.DOWN; }
+        if (minY - (y1 + 1.0) > best) { best = minY - (y1 + 1.0); face = Direction.UP; }
+        if (z1 - maxZ > best) { best = z1 - maxZ; face = Direction.NORTH; }
+        if (minZ - (z1 + 1.0) > best) { best = minZ - (z1 + 1.0); face = Direction.SOUTH; }
+
+        return face;
+    }
+
+    /**
+     * 发送 STOP 包：先发主 STOP（走客户端预测序列，滞空挖掘绕过的地面包在里面），
+     * 开着「高空包绕过」时再补一个世界外的假 STOP
+     */
+    private void sendStop(BlockPos pos, Direction direction) {
+        sendStop(pos, direction, true);
+    }
+
+    /** @param restartCooldown 这个结束包要不要把「挖掘冷却」重新计时（重挖框的补包不要，见 blockFinished） */
+    private void sendStop(BlockPos pos, Direction direction, boolean restartCooldown) {
+        // 主 STOP 包先发（使用 sequenced packet 保证顺序正确）：
+        // 「一个 tick 里对两个不同位置发挖掘包」会被反作弊盯上，主包放前面，被连坐的是后面那个假的
+        sendStopPacket(pos, direction, restartCooldown);
+
+        // 高空 STOP 抵消
+        if (bypassWanted()) {
+            BlockPos bypassPos = new BlockPos(pos.getX(), BYPASS_Y, pos.getZ());
+            mc.gameMode.startPrediction(mc.level, id ->
+                new ServerboundPlayerActionPacket(ServerboundPlayerActionPacket.Action.STOP_DESTROY_BLOCK, bypassPos, Direction.DOWN, id));
+        }
+    }
+
+    // ==================== 事件处理 ====================
+
+    /**
+     * 拦截点击方块时的攻击：原版 startAttack 无论结果如何都会无条件挥手（swing），
+     * swing 包会重置服务端攻击冷却，干扰真实攻击。
+     * 瞄准方块时直接取消 startAttack，挖掘由按住左键的 continueDestroyBlock → startDestroyBlock 链路接管。
+     * 没瞄准方块（空气/实体）时放行，攻击不受影响。
+     */
+    @EventHandler
+    private void onDoAttack(DoAttackEvent event) {
+        if (mc.hitResult != null && mc.hitResult.getType() == HitResult.Type.BLOCK) {
+            event.cancel();
+        }
+    }
+
+    @EventHandler
+    public void onPacket(PacketEvent.Send event) {
+        if (event.packet instanceof ServerboundSwingPacket) {
+            // 挖掘开始/结束的挥手包一律拦住（本地动画还在），其他来源的 swing 包照常放行
+            if (blockSwingPacket) {
+                blockSwingPacket = false;
+                event.cancel();
+                return;
+            }
+            // 其余 swing 包（攻击挥手、其他来源）照常放行：单击方块时的攻击挥手已由 onDoAttack
+            // （拦截 startAttack）处理，这里不按瞄准状态过滤
+            return;
+        }
+
+        if (event.packet instanceof ServerboundPlayerActionPacket playerActionPacket) {
+            // 挖不动的方块：原版流程发的挖掘包（开始/中止/结束）一律拦掉，补一对世界外的包把服务端状态顶回去
+            ServerboundPlayerActionPacket.Action action = playerActionPacket.getAction();
+            if ((action == ServerboundPlayerActionPacket.Action.START_DESTROY_BLOCK
+                || action == ServerboundPlayerActionPacket.Action.ABORT_DESTROY_BLOCK
+                || action == ServerboundPlayerActionPacket.Action.STOP_DESTROY_BLOCK)
+                && unbreakableBlocks.contains(mc.level.getBlockState(playerActionPacket.getPos()).getBlock())) {
+                event.cancel();
+                stopMine(playerActionPacket.getPos());
+            }
+        }
+    }
+
+    /**
+     * 点击方块：把这一下记下来（{@link #queuedClickPos}），再试着马上接成目标
+     * <p>
+     * 记下来的点击不会丢：被顶掉的那个还没安顿好时这一下留在队列里，之后每 tick 由 {@link #tryTakeQueuedClick} 再试
+     * （以前是「冷却没走完就整下忽略」，双挖瞬间点两个时第二下就没了，只能一块挖完再点另一块）
+     */
+    @EventHandler
+    public void onClickBlock(StartBreakingBlockEvent event) {
+        BlockPos pos = event.blockPos;
+        Direction direction = event.direction;
+
+        // 拦截原版挖掘：模块激活时所有方块点击都取消原版挖掘流程（不发原版挖掘包、不产生本地挖掘动画），
+        // 统一由发包挖掘接管（按方块→加入目标→发 START/STOP 包）
+        event.cancel();
+
+        if (unbreakableBlocks.contains(mc.level.getBlockState(pos).getBlock())
+            || PlayerUtils.distanceTo(pos) > range.get()) {
+            return;
+        }
+
+        // 已经在挖这个方块
+        if (isTarget(pos)) return;
+
+        queuedClickPos = pos.immutable();
+        queuedClickFace = direction;
+
+        tryTakeQueuedClick();
+    }
+
+    /** 这个位置现在是主挖或副挖目标 */
+    private boolean isTarget(BlockPos pos) {
+        return (firstBlockDate != null && pos.equals(firstBlockDate.pos))
+            || (secondBlockDate != null && pos.equals(secondBlockDate.pos));
+    }
+
+    /**
+     * 试着把 {@link #queuedClickPos} 接成真正的挖掘目标（点击那一刻和之后每 tick 都试一次）
+     * <p>
+     * 接之前先把服务端现在记着的那个目标安顿进「延迟破坏」槽（安排占槽结束包，下一 tick 发出去）：
+     * 双挖就靠这一下成立 —— 先点的方块从挖掘槽位挪走、由服务端拿手上的工具继续挖，新方块排队等冷却走完再发开始包
+     * <p>
+     * 占槽要在这里、在点击这一刻就安排：「挖掘冷却」是每发一个结束包就重新计时的，早安排新的开始包才不用白等一轮
+     * （以前是等新方块要发开始包时才补这一下，先点的方块还占着挖掘槽位，冷却硬生生多走一轮）
+     * <p>
+     * 新方块要顶掉的那个槽位还被旧目标占着、旧目标又安顿不好（占槽包排不上）就先不顶它：
+     * 顶掉之后服务端不会自己挖它，那一块谁也挖不掉了 —— 点击留在队列里，等安顿好再接手
+     */
+    private void tryTakeQueuedClick() {
+        if (queuedClickPos == null) return;
+
+        if (isTarget(queuedClickPos)) {
+            clearQueuedClick();
+            return;
+        }
+
+        // 记下来之后方块没了 / 变水变岩浆 / 超出范围 / 挖不动：这一下作废
+        if (isBroken(queuedClickPos)
+            || PlayerUtils.distanceTo(queuedClickPos) > range.get()
+            || unbreakableBlocks.contains(mc.level.getBlockState(queuedClickPos).getBlock())) {
+            clearQueuedClick();
+            return;
+        }
+
+        // 服务端现在记着的那个目标（可能就是马上要顶掉的那个槽位）：没安顿好就这一下安排它的占槽结束包
+        BlockDate tracked = trackedTarget();
+        if (tracked != null && !canLoseTrack(tracked)) schedulePark(tracked);
+
+        BlockDate target;
+        if (firstBlockDate == null) {
+            firstBlockDate = new BlockDate(queuedClickPos, queuedClickFace);
+            target = firstBlockDate;
+        } else if (doubleBreak.get()) {
+            // 双挖：放到副挖槽位（原来有副挖则替换）
+            // 被顶掉的那个服务端还认着、又没安顿好的话先安排它的占槽结束包，排不上就这一下先不顶
+            if (!parkBeforeReplace(secondBlockDate)) return;
+            secondBlockDate = new BlockDate(queuedClickPos, queuedClickFace);
+            target = secondBlockDate;
+        } else {
+            // 单挖：换成新方块（同理，先把被顶掉的那个安顿好）
+            if (!parkBeforeReplace(firstBlockDate)) return;
+            firstBlockDate = new BlockDate(queuedClickPos, queuedClickFace);
+            target = firstBlockDate;
+        }
+
+        clearQueuedClick();
+
+        // 「挖掘冷却」没走完：目标留着排队，等冷却结束由 tick 逻辑补发 START（双挖的第二个就走这条路）
+        if (!miningGateOpen()) return;
+
+        startTarget(target);
+    }
+
+    private void clearQueuedClick() {
+        queuedClickPos = null;
+        queuedClickFace = null;
+    }
+
+    // ==================== 渲染 ====================
+
+    @EventHandler
+    private void onRender(Render3DEvent event) {
+        if (!render.get()) return;
+
+        if (firstBlockDate != null && mc.level.getBlockState(firstBlockDate.pos).getBlock() != Blocks.AIR) {
+            renderBlock(event, firstBlockDate.pos, firstBlockDate.fraction());
+        }
+
+        if (secondBlockDate != null && mc.level.getBlockState(secondBlockDate.pos).getBlock() != Blocks.AIR) {
+            renderBlock(event, secondBlockDate.pos, secondBlockDate.fraction());
+        }
+
+        // 重挖位置始终显示（方块被破坏、还没重新出现的等待期也显示）
+        if (rebreak.get() && rebreakBlockDate != null) {
+            BlockPos blockPos = rebreakBlockDate.pos;
+            event.renderer.box(
+                blockPos.getX(), blockPos.getY(), blockPos.getZ(),
+                blockPos.getX() + 1, blockPos.getY() + 1, blockPos.getZ() + 1,
+                rebreakSideColor.get(), rebreakLineColor.get(), shapeMode.get(), 0);
+        }
+    }
+
+    private void renderBlock(Render3DEvent event, BlockPos blockPos, double rawProgress) {
+        double progress = Mth.clamp(rawProgress, 0.0, 1.0);
+
+        double x1 = blockPos.getX() + (0.5 - 0.5 * progress);
+        double y1 = blockPos.getY() + (0.5 - 0.5 * progress);
+        double z1 = blockPos.getZ() + (0.5 - 0.5 * progress);
+        double x2 = blockPos.getX() + 0.5 + 0.5 * progress;
+        double y2 = blockPos.getY() + 0.5 + 0.5 * progress;
+        double z2 = blockPos.getZ() + 0.5 + 0.5 * progress;
+
+        int side_r = sideColor.get().r + (int) ((readySideColor.get().r - sideColor.get().r) * progress);
+        int side_g = sideColor.get().g + (int) ((readySideColor.get().g - sideColor.get().g) * progress);
+        int side_b = sideColor.get().b + (int) ((readySideColor.get().b - sideColor.get().b) * progress);
+        int side_a = sideColor.get().a + (int) ((readySideColor.get().a - sideColor.get().a) * progress);
+        int line_r = lineColor.get().r + (int) ((readyLineColor.get().r - lineColor.get().r) * progress);
+        int line_g = lineColor.get().g + (int) ((readyLineColor.get().g - lineColor.get().g) * progress);
+        int line_b = lineColor.get().b + (int) ((readyLineColor.get().b - lineColor.get().b) * progress);
+        int line_a = lineColor.get().a + (int) ((readyLineColor.get().a - lineColor.get().a) * progress);
+
+        SettingColor _sideColor = new SettingColor(side_r, side_g, side_b, side_a);
+        SettingColor _lineColor = new SettingColor(line_r, line_g, line_b, line_a);
+        event.renderer.box(x1, y1, z1, x2, y2, z2, _sideColor, _lineColor, shapeMode.get(), 0);
+    }
+
+    // ==================== 工具相关 ====================
+
+    public static int getMiningBlockCount() {
+        int count = 0;
+        if (firstBlockDate != null && MeteorClient.mc.level.getBlockState(firstBlockDate.pos).getBlock() != Blocks.AIR) {
+            count++;
+        }
+        if (secondBlockDate != null && MeteorClient.mc.level.getBlockState(secondBlockDate.pos).getBlock() != Blocks.AIR) {
+            count++;
+        }
+        return count;
+    }
+
+    /**
+     * 找出热栏中对方块挖掘速度最快的槽位。
+     * 只接受镐/斧/锹/剑（26.1 用 ItemTags 判断，不再依赖 PickaxeItem/SwordItem 类）。
+     * 方块在「精准采集列表」里时优先挑带精准采集的工具（没有的话退回最快的）
+     */
+    public int getBestTool(BlockState blockState) {
+        boolean silk = wantSilkTouch(blockState);
+
+        int slot = findBestTool(blockState, 0, 8, silk);
+        if (slot == -1 && silk) slot = findBestTool(blockState, 0, 8, false);
+        return slot;
+    }
+
+    /** 背包（9-35）里挖得最快的工具，规则和热栏那个一样 */
+    private int getBestInventoryTool(BlockState blockState) {
+        boolean silk = wantSilkTouch(blockState);
+
+        int slot = findBestTool(blockState, 9, 35, silk);
+        if (slot == -1 && silk) slot = findBestTool(blockState, 9, 35, false);
+        return slot;
+    }
+
+    /**
+     * 最终拿在手上的那把工具：热栏里那把不如背包里那把时（「背包切换」会把它换到手上）给背包里的槽位
+     * <p>
+     * 手上那把已经是最佳就直接用手上那个槽位：选出来的不比手上这把好（一样快或更差）就不再换，
+     * 免得手上明明是最佳工具还切到另一把一样快的工具上
+     * <p>
+     * 进度模拟和收尾前的切工具都用这个，两边必须一致：模拟用哪把算，收尾时就得把哪把换到手上
+     */
+    private int getBestToolToUse(BlockState state) {
+        int slot = getBestTool(state);
+
+        if (inventorySwitch.get()) {
+            int invSlot = getBestInventoryTool(state);
+            if (invSlot != -1) {
+                ItemStack invStack = mc.player.getInventory().getItem(invSlot);
+                ItemStack hotbarStack = slot == -1 ? ItemStack.EMPTY : mc.player.getInventory().getItem(slot);
+                if (isBetterTool(invStack, state, hotbarStack, wantSilkTouch(state))) slot = invSlot;
+            }
+        }
+
+        // 「手上」按服务端认的槽位算：静默切换时本地手上还是原来那把
+        int held = SilentSwitch.slot();
+        if (slot >= 0 && !isBetterTool(mc.player.getInventory().getItem(slot), state, mc.player.getInventory().getItem(held), wantSilkTouch(state))) {
+            return held;
+        }
+        return slot;
+    }
+
+    /** 这个方块要不要优先用带精准采集的工具 */
+    private boolean wantSilkTouch(BlockState blockState) {
+        return silkTouch.get() && silkBlocks.get().contains(blockState.getBlock());
+    }
+
+    /**
+     * a 是不是比 b 更适合挖这个方块：先看精准采集（列表里的方块，带精准采集的赢），一样再看挖掘速度
+     * <p>
+     * 用来比两把工具谁更适合这个方块（背包那把 vs 热栏那把、选出来的那把 vs 手上那把）
+     */
+    private boolean isBetterTool(ItemStack a, BlockState state, ItemStack b, boolean silk) {
+        boolean silkA = silk && Utils.getEnchantmentLevel(a, Enchantments.SILK_TOUCH) > 0;
+        boolean silkB = silk && Utils.getEnchantmentLevel(b, Enchantments.SILK_TOUCH) > 0;
+        if (silkA != silkB) return silkA;
+
+        // 用和进度模拟同一套的挖掘速度算（含效率附魔、正确工具判定），别再拿 ItemStack.getDestroySpeed 比
+        return BreakData.speed(a, state, serverOnGround()) > BreakData.speed(b, state, serverOnGround());
+    }
+
+    /** 在 [from, to] 这些槽位里找挖得最快的工具；onlySilk = 只认带精准采集的 */
+    private int findBestTool(BlockState state, int from, int to, boolean onlySilk) {
+        double bestScore = -1.0;
+        int bestSlot = -1;
+        int selected = SilentSwitch.slot();
+
+        for (int i = from; i <= to; i++) {
+            ItemStack stack = mc.player.getInventory().getItem(i);
+            if (!isTool(stack)) continue;
+            if (onlySilk && Utils.getEnchantmentLevel(stack, Enchantments.SILK_TOUCH) <= 0) continue;
+
+            double score = BreakData.speed(stack, state, serverOnGround());
+            // 手上那把已经是最佳时就不换：挖速并列时优先用手上那个槽位，免得在两把一样快的工具间来回切
+            if (score > bestScore || (score == bestScore && i == selected)) {
+                bestScore = score;
+                bestSlot = i;
+            }
+        }
+
+        return bestSlot;
+    }
+
+    /** 镐/斧/锹/剑（26.1 用 ItemTags 判断，不再依赖 PickaxeItem/SwordItem 类） */
+    private boolean isTool(ItemStack stack) {
+        return stack.is(ItemTags.PICKAXES)
+            || stack.is(ItemTags.AXES)
+            || stack.is(ItemTags.SHOVELS)
+            || stack.is(ItemTags.SWORDS);
+    }
+
+    public BlockDate getBlockDate(BlockPos pos, Direction direction) {
+        return new BlockDate(pos, direction);
+    }
+
+    public BlockDate getBlockDate(BlockPos pos, Direction direction, boolean rebreak) {
+        return new BlockDate(pos, direction, rebreak);
+    }
+
+    // ==================== 重挖框查询（给别的模块用，例如挖脚） ====================
+
+    /** 当前重挖框的位置（没有就返回 null）；重挖框同时只存在一个 */
+    public BlockPos getRebreakPos() {
+        return rebreakBlockDate == null ? null : rebreakBlockDate.pos;
+    }
+
+    /** 这个位置是不是当前的重挖框 */
+    public boolean hasRebreakFrame(BlockPos pos) {
+        return rebreakBlockDate != null && rebreakBlockDate.pos.equals(pos);
+    }
+
+    // ==================== 内部类 ====================
+
+    public class BlockDate {
+        public BlockPos pos;
+        public Direction direction;
+        public boolean done = false;
+        /**
+         * 服务端那套进度（0-1，可能超过 1）：单 tick 进度（收尾时会拿到手上的那把工具）× (开始包之后过了多少 tick + 1)
+         * <p>
+         * 显示、收尾判定、要等多久都用这一个数，不再另算一套
+         */
+        public double progress;
+        /** 发开始包时的 tick 数（mineTicks，-1 = 还没发）；进度按「现在 - 这个数 + 1」算，和服务端同一口径 */
+        public int startTick = -1;
+        public boolean isMining = false;
+        /** 服务端当前记着的挖掘方块（最后发过 START 的那一个）；另一个方块只占着服务端的「延迟破坏」名额 */
+        public boolean serverTracked = false;
+        /** 已经发过收尾的 STOP（原版挖掘那条流程走完了，不再需要拿工具等） */
+        public boolean stopSent = false;
+        /** 开局的结束包发过了，而且结果已经确定：当场破坏方块，或者已经占住延迟破坏槽 */
+        public boolean parkSettled = false;
+        /** 开局的结束包把方块送进了服务端的延迟破坏槽（要拿住最佳工具等它自己补完） */
+        public boolean parked = false;
+        /** 已经为它安排过一次「占槽结束包」（槽被别的方块占着而没生效时，不再反复安排、等它自己按阈值收尾） */
+        public boolean parkTried = false;
+        /** 是否已经达到阈值、进了收尾流程（服务端不认这个位置时会只进状态、不发 STOP） */
+        public boolean switched = false;
+        /** 秒切模式自动重试已经补发了几次结束包（到上限就不再补） */
+        public int retryCount = 0;
+        /** 进度走完后等待服务端确认破坏的 tick 数 */
+        public int timeoutTicks = 0;
+        /** 原版能秒挖的方块（硬度 0）：只发开始包，服务端收到就当场破坏，不需要结束包 */
+        public boolean instaBreak = false;
+        public boolean rebreak = true;
+
+        public BlockDate(BlockPos pos, Direction direction) {
+            this(pos, direction, true);
+        }
+
+        public BlockDate(BlockPos pos, Direction direction, boolean rebreak) {
+            this.pos = pos;
+            this.direction = direction;
+            this.done = false;
+            this.progress = 0.0;
+            this.rebreak = rebreak;
+        }
+
+        /**
+         * 重算进度（每 tick 一次）
+         * <p>
+         * 服务端就是这么算的：单 tick 进度 × (开始包之后过了多少 tick + 1)。工具、附魔、急迫、挖掘疲劳、
+         * 上没上地面变了它都跟着变，所以每一次都重新算，不缓存
+         * <p>
+         * tick 数是自己数的：服务端从「收到开始包那一格」数到「收到结束包那一格」（就是进度里那个 +1），
+         * 这边记下发开始包时的 tick，之后每一格重新算一次，两边的口径一样 —— 所以开始包和结束包落在同一个
+         * tick 里时这个数是 0（进度就是单 tick 进度 × 1），不会像以前那样多算一格、结束包早发一格
+         */
+        public void freshProgress() {
+            progress = predictedStopProgress(this);
+
+            // 进度到 100% 就是「该挖穿了」，剩下只是等服务端那边把它破坏掉
+            if (progress >= 1.0) done = true;
+        }
+
+        /** 进度百分比（0-1）：进度本身就是百分比，夹一下就行（拿着工具等延迟破坏的时候画满） */
+        public double fraction() {
+            double f = done ? Math.max(progress, 1.0) : progress;
+            return Mth.clamp(f, 0.0, 1.0);
+        }
+    }
+
+    /** 「挖掘冷却」的三种模式 */
+    public enum CooldownMode {
+        CUSTOM("自定义"),
+        VANILLA("原版"),
+        FEEDBACK("grim动态延迟");
+
+        private final String displayName;
+
+        CooldownMode(String displayName) {
+            this.displayName = displayName;
+        }
+
+        @Override
+        public String toString() {
+            return displayName;
+        }
+    }
+
+    /** 切工具后如何切回原来的槽位 */
+    public enum SwitchBackMode {
+        IMMEDIATE("立即切回"),
+        DELAYED("延迟切回"),
+        NONE("不切回");
+
+        private final String displayName;
+
+        SwitchBackMode(String displayName) {
+            this.displayName = displayName;
+        }
+
+        @Override
+        public String toString() {
+            return displayName;
+        }
+    }
+
+    /** 背包切换怎么跟服务端说 */
+    public enum InvSwitchMode {
+        SWAP,
+        PICKUP
+    }
+}

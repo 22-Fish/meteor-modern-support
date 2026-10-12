@@ -13,11 +13,15 @@ import fish22.modernsupport.aibot.AiConfig;
 import fish22.modernsupport.aibot.AiContext;
 import fish22.modernsupport.aibot.AiFiles;
 import fish22.modernsupport.aibot.AiTasks;
+import fish22.modernsupport.gui.AiChatScreen;
 import fish22.modernsupport.settings.ActionSetting;
-import fish22.modernsupport.settings.ApiKeyRenderer;
+import fish22.modernsupport.settings.ApiKeySetting;
 import fish22.modernsupport.settings.ScheduledTaskListSetting;
 import fish22.modernsupport.settings.WhiteListSetting;
 import meteordevelopment.meteorclient.MeteorClient;
+import meteordevelopment.meteorclient.settings.KeybindSetting;
+import meteordevelopment.meteorclient.events.meteor.KeyInputEvent;
+import meteordevelopment.meteorclient.events.meteor.MouseClickEvent;
 import meteordevelopment.meteorclient.events.game.ReceiveMessageEvent;
 import meteordevelopment.meteorclient.events.game.SendMessageEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
@@ -29,6 +33,8 @@ import meteordevelopment.meteorclient.settings.StringListSetting;
 import meteordevelopment.meteorclient.settings.StringSetting;
 import meteordevelopment.meteorclient.systems.modules.Categories;
 import meteordevelopment.meteorclient.systems.modules.Module;
+import meteordevelopment.meteorclient.utils.misc.Keybind;
+import meteordevelopment.meteorclient.utils.misc.input.KeyAction;
 import meteordevelopment.orbit.EventHandler;
 
 import java.nio.file.Path;
@@ -59,6 +65,7 @@ public class OpenAI extends Module {
     private final SettingGroup sgUser = settings.createGroup("白名单");
     private final SettingGroup sgTools = settings.createGroup("工具调用");
     private final SettingGroup sgToolSwitch = settings.createGroup("工具开关");
+    private final SettingGroup sgChatWindow = settings.createGroup("聊天界面");
 
     // ==================== API ====================
 
@@ -70,14 +77,12 @@ public class OpenAI extends Module {
         .build()
     );
 
-    public final Setting<String> apiKey = sgApi.add(new StringSetting.Builder()
-        .name("APIKEY")
-        .description("AI的密钥")
-        .defaultValue("")
-        .renderer(ApiKeyRenderer.class)
-        .wide()
-        .build()
-    );
+    public final ApiKeySetting apiKey = sgApi.add(new ApiKeySetting(
+        "APIKEY",
+        "AI的密钥。只保存到 openai/APIKEY.txt，不会写进配置，分享配置也不会泄露",
+        () -> MeteorClient.FOLDER.toPath().resolve(AI.FOLDER_NAME).resolve("APIKEY.txt"),
+        null
+    ));
 
     public final Setting<String> modelName = sgApi.add(new StringSetting.Builder()
         .name("模型")
@@ -174,6 +179,14 @@ public class OpenAI extends Module {
         "强制触发一次AI：把公屏最近 10 条消息作为多条 user 消息传入",
         "强制触发",
         AiChatHandler::forceTriggerFromRecentChat,
+        null
+    ));
+
+    public final Setting<Integer> clearContext = sgAgent.add(new ActionSetting(
+        "清空聊天记录",
+        "清空AI的全部对话上下文和 check_chat 的聊天栏记录（方便测试），清完会自动补回系统提示词",
+        "清空聊天记录",
+        AiContext::clearAll,
         null
     ));
 
@@ -334,6 +347,23 @@ public class OpenAI extends Module {
     public final Setting<Boolean> toolFileDelete = toolSwitch("删除文件", "delete_file：删除文件（需要二次确认）");
     public final Setting<Boolean> toolSearch = toolSwitch("搜索文件", "search_name / search_content / search_file：搜索文件名与内容");
 
+    // ==================== 聊天界面 ====================
+
+    public final Setting<Keybind> chatKeybind = sgChatWindow.add(new KeybindSetting.Builder()
+        .name("呼出快捷键")
+        .description("按下后打开AI聊天界面")
+        .defaultValue(Keybind.none())
+        .build()
+    );
+
+    public final Setting<Integer> openChatButton = sgChatWindow.add(new ActionSetting(
+        "打开聊天界面",
+        "打开和AI聊天的界面（也可以设「呼出快捷键」）",
+        "打开聊天界面",
+        AiChatScreen::open,
+        null
+    ));
+
     private Setting<Boolean> toolSwitch(String name, String description) {
         return sgToolSwitch.add(new BoolSetting.Builder()
             .name(name)
@@ -354,6 +384,8 @@ public class OpenAI extends Module {
     public void onActivate() {
         Path dir = MeteorClient.FOLDER.toPath().resolve(AI.FOLDER_NAME);
         AI.init(dir);
+        // APIKEY 从 openai/APIKEY.txt 读回来（不进配置）
+        apiKey.reload();
         AiConfig.loadPrompts();
         AiContext.load();
         // 上下文最前面固定一条系统提示词：恢复出来的上下文里没有（第一次用、老存档）才补
@@ -382,6 +414,8 @@ public class OpenAI extends Module {
         String text = event.getMessage().getString();
         // 本地提示（[openAI] 开头）是模块自己打的，别再解析一遍，否则会自己喂自己
         if (AI.isLocalMessage(text)) return;
+        // 客户端聊天栏收到的每一条都记下来（公屏/私聊/系统提示/命令返回都算），给 check_chat 工具用
+        AiChatHandler.recordClientChat(text);
         if (isExcluded(text)) return;
         AiChatHandler.onMessage(text);
     }
@@ -399,6 +433,36 @@ public class OpenAI extends Module {
     private void onTick(TickEvent.Post event) {
         if (!isActive()) return;
         AiChatHandler.tickAutoChat();
+    }
+
+    /** 聊天界面快捷键：按下的那一刻打开（和 Meteor 打开主界面用的是同一套按键事件） */
+    @EventHandler
+    private void onKeyInput(KeyInputEvent event) {
+        if (!isActive()) return;
+        if (event.action != KeyAction.Press) return;
+        if (MeteorClient.mc.screen != null) return;
+        if (!chatKeybind.get().matches(event.input)) return;
+
+        openChatScreen();
+    }
+
+    /** 快捷键绑成鼠标键时走这里 */
+    @EventHandler
+    private void onMouseClick(MouseClickEvent event) {
+        if (!isActive()) return;
+        if (event.action != KeyAction.Press) return;
+        if (MeteorClient.mc.screen != null) return;
+        if (!chatKeybind.get().matches(event.input)) return;
+
+        openChatScreen();
+    }
+
+    private void openChatScreen() {
+        try {
+            AiChatScreen.open();
+        } catch (Throwable t) {
+            AI.ERROR("打开聊天界面失败: " + t);
+        }
     }
 
     /** 消息里出现「排除词语」里的任意一个就整条不触发（不区分大小写） */

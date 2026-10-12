@@ -69,7 +69,7 @@ public final class AiToolExecutor {
 
     private static String executeCheckChat(Map<String, Object> args) {
         List<String> recent = AiChatHandler.getRecentChatMessages();
-        if (recent.isEmpty()) return "没有聊天记录";
+        if (recent.isEmpty()) return "聊天栏还没有记录";
 
         // a、b 是"距离"：0 = 当前这条，1 = 前一条。返回 (a, b] 范围，不含 a 自身
         int a = args.get("a") instanceof Number number ? number.intValue() : 0;
@@ -83,7 +83,7 @@ public final class AiToolExecutor {
         if (fromIdx >= total) return "查询范围超出聊天记录总数(" + total + "条)";
 
         StringBuilder sb = new StringBuilder();
-        sb.append("【聊天记录 前").append(b).append("条到前").append(a + 1).append("条】\n");
+        sb.append("【客户端聊天栏 前").append(b).append("条到前").append(a + 1).append("条】\n");
         for (int i = fromIdx; i < toIdx && i < total; i++) {
             sb.append(recent.get(i)).append("\n");
         }

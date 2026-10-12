@@ -75,7 +75,7 @@ import static meteordevelopment.meteorclient.MeteorClient.mc;
  * 任意时刻调用都不会影响视角（不闪、不卡、可自由转）。
  *
  * <h3>优先级（同一 tick 多个模块抢转向）</h3>
- * rotate() 可以多带一个 {@code priority} 参数：<b>数字越大越优先</b>，不写就是「合法转头API配置」
+ * rotate() 可以多带一个 {@code priority} 参数：<b>数字越大越优先</b>，不写就是「合法转头配置」
  * 里的「默认优先级」（默认 0）。同一 tick 里第二次调用优先级<b>更低</b> → 整个调用被忽略
  * （返回 false，连回调也不排）；优先级<b>更高</b> → 覆盖上一份；<b>一样</b> → 照旧最后一次生效。
  *
@@ -93,7 +93,7 @@ import static meteordevelopment.meteorclient.MeteorClient.mc;
  * </ul>
  *
  * <h3>可见旋转方向（显示，可选）</h3>
- * 模块「合法转头API配置」里的「可见旋转方向」（默认开启）打开时，渲染时把玩家模型
+ * 模块「合法转头配置」里的「可见旋转方向」（默认开启）打开时，渲染时把玩家模型
  * （身体与头）的显示朝向换成真实角度，第三视角下就能看出服务器看到的朝向。
  * 这只是渲染状态上的覆盖（{@link #isDisplayingRealRotation()} /
  * {@link #getDisplayYaw()} / {@link #getDisplayPitch()}），
@@ -302,7 +302,10 @@ public class LegalRotation {
         }
 
         // 正在移动窗口内：立刻生效，后面还没跑的移动运算用新角度
-        if (windowDepth > 0) applyReal();
+        if (windowDepth > 0) {
+            applyReal();
+            recaptureMoveRotation();
+        }
 
         // 回调排到「移动包发出之后」：那时服务器看到的已经是这一份角度
         if (callback != null) runAfterSend(callback);
@@ -315,7 +318,7 @@ public class LegalRotation {
     }
 
     /**
-     * 没有单独设优先级的调用用的优先级：「合法转头API配置」里的「默认优先级」（默认 0）。
+     * 没有单独设优先级的调用用的优先级：「合法转头配置」里的「默认优先级」（默认 0）。
      *
      * <p>鞘翅飞行这些借用本 API、但自己没有优先级设置项的功能走的就是这个值。
      */
@@ -330,7 +333,10 @@ public class LegalRotation {
     public static void nudgeRealYaw(float delta) {
         if (!rotating) return;
         realYaw += delta;
-        if (windowDepth > 0) applyReal();
+        if (windowDepth > 0) {
+            applyReal();
+            recaptureMoveRotation();
+        }
     }
 
     /** 本 tick 是否在伪造朝向 */
@@ -432,7 +438,7 @@ public class LegalRotation {
     /**
      * 渲染用：现在要不要把玩家模型的显示朝向改成真实角度。
      *
-     * <p>条件：模块「合法转头API配置」里的「可见旋转方向」开启（默认开启），
+     * <p>条件：模块「合法转头配置」里的「可见旋转方向」开启（默认开启），
      * 且这一 tick（或刚过去的那一 tick）真的旋转过。
      *
      * <p>调用方只改渲染状态（{@link fish22.modernsupport.mixin.MixinVisibleRotation}），
@@ -553,6 +559,20 @@ public class LegalRotation {
 
         windowDepth++;
         applyReal();
+    }
+
+    /**
+     * 移动窗口内真实角度被改（窗口内又有 rotate() / nudgeRealYaw()）：
+     * 本 tick 移动包那份角度跟着改成同一份。
+     *
+     * <p>不跟的话发包朝向和移动运算用的朝向会分叉：服务器按发包那份朝核算预测与
+     * 烟花盒子（Grim 的 fireworksBox 只看它收到过的两个朝向），客户端按另一份算位移
+     * ＝ 每 tick 超框被拉回（爬得越接近垂直差得越多）。
+     */
+    private static void recaptureMoveRotation() {
+        if (!movementCaptured) return;
+        moveYaw = realYaw;
+        movePitch = realPitch;
     }
 
     /** 移动运算结束：立刻换回视角角度 */

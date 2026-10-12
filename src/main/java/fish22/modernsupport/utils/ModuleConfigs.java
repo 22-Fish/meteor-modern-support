@@ -41,7 +41,10 @@ public class ModuleConfigs {
     private ModuleConfigs() {
     }
 
-    /** 初始化（ModernSupport.onInitialize 调用）：确保目录/默认配置，勾选并加载配置 */
+    /** 启动配置是否已经加载过（没加载完之前禁止自动保存，防止把默认值写盘盖掉配置） */
+    private static volatile boolean ready = false;
+
+    /** 初始化（ModernSupport.onInitialize 末尾调用）：确保目录/默认配置，确定勾选的配置 */
     public static void init() {
         FOLDER.mkdirs();
         if (list().isEmpty() && !META_FILE.exists()) {
@@ -49,6 +52,8 @@ public class ModuleConfigs {
             create(DEFAULT_NAME);
         }
         loadMeta();
+        // 保存时机存在 meta 里, 启动时读回来告诉自动保存
+        AutoSave.setMode(saveMode());
 
         // 启动时一个都没勾选 → 未初始化，自动勾选第一个
         if (selected() == null) {
@@ -58,11 +63,23 @@ public class ModuleConfigs {
                 saveMeta();
             }
         }
+        // 真正的加载放在 onModulesLoaded：必须等 Meteor 把 modules.nbt 读完再套配置块，
+        // 否则会被随后的 modules.nbt 读取覆盖（等于配置块没生效）
+    }
 
-        // 启动加载：从 config 文件夹里勾选的配置读取，而不是 modules.nbt（旧配置）
-        if (selected() != null) {
-            applyFrom(selected());
-        }
+    /** 配置是否已加载（自动保存会等这个标志，没加载完不写盘） */
+    public static boolean ready() {
+        return ready;
+    }
+
+    /**
+     * Meteor 读完 modules.nbt 之后调用（MixinModules 注入 Modules.load 的 RETURN）。
+     *
+     * <p>启动加载：从 config 文件夹里勾选的配置读取，而不是用 modules.nbt 里的旧设置。
+     */
+    public static void onModulesLoaded() {
+        if (selected() != null) applyFrom(selected());
+        ready = true;
     }
 
     // ====== 配置列表/勾选 ======
@@ -114,7 +131,13 @@ public class ModuleConfigs {
     private static void applyFrom(String name) {
         CompoundTag tag = readTag(fileOf(name));
         if (tag == null) return;
-        Modules.get().fromTag(tag);
+        // 加载期间禁止自动保存: fromTag 会触发大量设置变化回调, 此时写盘会把加载中的默认值盖上去
+        AutoSave.setLoading(true);
+        try {
+            Modules.get().fromTag(tag);
+        } finally {
+            AutoSave.setLoading(false);
+        }
     }
 
     // ====== 增删改 ======
@@ -122,7 +145,13 @@ public class ModuleConfigs {
     /** 新建配置（白板配置：所有模块关闭 + 所有设置回到 Meteor 默认值） */
     public static void create(String name) {
         if (!validName(name) || exists(name)) return;
-        writeTag(fileOf(name), blankTag());
+        // 生成白板会临时重置/还原所有设置（触发大量设置变化回调），期间禁止自动保存
+        AutoSave.setLoading(true);
+        try {
+            writeTag(fileOf(name), blankTag());
+        } finally {
+            AutoSave.setLoading(false);
+        }
         ensureMetaEntry(name);
         saveMeta();
     }
@@ -205,6 +234,25 @@ public class ModuleConfigs {
     }
 
     // ====== 元数据（自动应用 + 服务器列表） ======
+
+    /** 配置保存时机（每次变化保存 / 退出时保存，存在 meta.nbt 里） */
+    public static ConfigSaveMode saveMode() {
+        if (meta == null) loadMeta();
+        String value = meta.getStringOr("saveMode", "");
+        for (ConfigSaveMode mode : ConfigSaveMode.values()) {
+            if (mode.toString().equals(value)) return mode;
+        }
+        return ConfigSaveMode.OnChange;
+    }
+
+    /** 设置配置保存时机（配置设置分组里的下拉框） */
+    public static void setSaveMode(ConfigSaveMode mode) {
+        if (mode == null) return;
+        if (meta == null) loadMeta();
+        meta.putString("saveMode", mode.toString());
+        saveMeta();
+        AutoSave.setMode(mode);
+    }
 
     /** 配置是否开启自动应用 */
     public static boolean autoApplyEnabled(String name) {

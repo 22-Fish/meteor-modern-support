@@ -133,7 +133,9 @@ public final class GrimCriticalsSupport {
                     mc.player,
                     ServerboundPlayerCommandPacket.Action.STOP_SPRINTING
                 ));
-                mc.player.setSprinting(false);
+                // 自己发了 STOP 就要连原版记账一起同步，否则原版下一 tick 会再补一发 STOP
+                //（服务端已经是「没疾跑」，那就是重复停止疾跑 = Grim BadPacketsF, state=false）
+                ElytraFlySupport.syncSprintToServer(false);
             }
 
             // 伪造地面高度：差值小到不会被判成重复包 / 异常偏移

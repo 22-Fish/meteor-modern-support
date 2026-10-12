@@ -135,8 +135,8 @@ public class Spin extends Module {
         .name("旋转速度")
         .description("旋转模式下每 tick 转动的角度（°/tick）。")
         .defaultValue(50)
-        .range(-70, 70)
-        .sliderRange(-70, 70)
+        .range(-360, 360)
+        .sliderRange(-360, 360)
         .visible(() -> yawMode.get() == YawMode.SPIN)
         .build()
     );

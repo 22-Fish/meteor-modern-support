@@ -2,6 +2,7 @@ package fish22.modernsupport.mixin;
 
 import fish22.modernsupport.modules.ElytraBounce;
 import fish22.modernsupport.utils.ElytraLagSyncSupport;
+import fish22.modernsupport.utils.ElytraFlySupport;
 import fish22.modernsupport.utils.InfiniteElytraSupport;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.network.syncher.SyncedDataHolder;
@@ -28,9 +29,9 @@ import static meteordevelopment.meteorclient.MeteorClient.mc;
  * （FALL_FLYING 位清零 + 姿态变站立），这里把这两项改回滑翔状态，
  * 让客户端视觉上滑翔不闪断，同时服务端已完成 fallFlyTicks 归零。
  *
- * <p>「Grim Lag」甲飞（{@link ElytraLagSyncSupport}）同样：服务端把「停止滑翔」同步过来时
- * 本地不认这个位（史莱姆 {@code handleEntityDataUpdate} 那一手），客户端全程滑翔，
- * 换甲时机另由这一包触发。
+ * <p>甲飞「起飞限频绕过」（{@link ElytraLagSyncSupport}）同样：扣包窗口里本地的滑翔位要一直撑住
+ * （史莱姆 {@code handleEntityDataUpdate} 那一手，注释里写着 may cause fake gliding），
+ * 窗口一结束本地滑翔位就掉的话，客户端改用普通空中运算、服务端却已经认滑翔，两边位移就对不上
  */
 @Mixin(SynchedEntityData.class)
 public abstract class MixinSynchedEntityData {
@@ -41,14 +42,25 @@ public abstract class MixinSynchedEntityData {
 
     @ModifyVariable(method = "assignValues", at = @At("HEAD"), argsOnly = true)
     private List<SynchedEntityData.DataValue<?>> modernsupport$rewriteStopGliding(List<SynchedEntityData.DataValue<?>> items) {
+        // 先记下服务端这一包里的滑翔位（下面改写「停止滑翔」之前的那一份 = 服务端真实态度）：
+        // 回弹自愈与起飞看门狗都靠它判断「服务端到底认不认滑翔」，本地标志不能当准
+        if (this.entity instanceof LocalPlayer local && local == mc.player) {
+            for (SynchedEntityData.DataValue<?> item : items) {
+                if (item.id() == 0 && item.value() instanceof Byte data) {
+                    ElytraFlySupport.noteServerGlideFlag((data & (1 << 7)) != 0);
+                    break;
+                }
+            }
+        }
+
         boolean infiniteElytra = InfiniteElytraSupport.isActive();
         boolean keepGlide = ElytraBounce.isKeepingGlide();
-        boolean grimLag = ElytraLagSyncSupport.isKeepingGlide();
+        boolean delaySync = ElytraLagSyncSupport.isKeepingGlide();
 
         // 只处理本地玩家
         if (!(this.entity instanceof LocalPlayer player) || player != mc.player) return items;
 
-        if (!infiniteElytra && !keepGlide && !grimLag) return items;
+        if (!infiniteElytra && !keepGlide && !delaySync) return items;
         // 下面两个改写只针对「客户端本地仍在滑翔」的停滑广播
         if (!player.isFallFlying()) return items;
 
@@ -56,7 +68,7 @@ public abstract class MixinSynchedEntityData {
         for (SynchedEntityData.DataValue<?> item : items) {
             // 鞘翅弹跳的「落地维持滑翔」：落地那几 tick 把停滑广播改回滑翔，本地不闪断
             if (infiniteElytra) result.add(InfiniteElytraSupport.processDataValue(item));
-            else if (grimLag) result.add(ElytraLagSyncSupport.keepGlideDataValue(item));
+            else if (delaySync) result.add(ElytraLagSyncSupport.keepGlideDataValue(item));
             else result.add(ElytraBounce.keepGlideDataValue(item));
         }
         return result;

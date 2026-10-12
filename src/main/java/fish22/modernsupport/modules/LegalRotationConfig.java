@@ -30,7 +30,7 @@ import meteordevelopment.meteorclient.systems.modules.Categories;
 import meteordevelopment.meteorclient.systems.modules.Module;
 
 /**
- * 合法转头API配置 — 杂项模块
+ * 合法转头配置 — 杂项模块
  *
  * <p>合法转头 API（{@link LegalRotation}）的显示相关配置。本模块<b>只提供设置项</b>，
  * 开关状态不参与任何逻辑（里面没有 tick、没有事件），功能只由设置项决定：
@@ -83,7 +83,7 @@ public class LegalRotationConfig extends Module {
     );
 
     public LegalRotationConfig() {
-        super(Categories.Misc, "合法转头API配置",
+        super(Categories.Misc, "合法转头配置",
             "合法转头 API 的显示配置");
         instance = this;
     }

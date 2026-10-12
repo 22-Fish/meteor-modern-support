@@ -4,7 +4,6 @@ import fish22.modernsupport.settings.PotionPickSetting;
 import meteordevelopment.meteorclient.gui.GuiTheme;
 import meteordevelopment.meteorclient.gui.WidgetScreen;
 import meteordevelopment.meteorclient.gui.WindowScreen;
-import meteordevelopment.meteorclient.gui.widgets.WItemWithLabel;
 import meteordevelopment.meteorclient.gui.widgets.containers.WTable;
 import meteordevelopment.meteorclient.gui.widgets.input.WTextBox;
 import meteordevelopment.meteorclient.gui.widgets.pressable.WButton;
@@ -15,6 +14,7 @@ import net.minecraft.world.item.alchemy.Potion;
 import org.apache.commons.lang3.Strings;
 
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 
 /**
  * 药水选择界面：搜索框 + 药水列表，列出注册表里的每一种药水
@@ -23,11 +23,14 @@ import java.util.function.Consumer;
  * <p>列表第一行是「任意」：不挑药水种类，背包里哪种能扔的药水都能用
  *
  * <p>形态（喷溅 / 滞留）由调用方给，列表里的图标和名字按形态拼
+ *
+ * <p>每行两行显示：第一行图标 + 药水名，第二行效果和时长。
+ * 普通药水和延长药水名字是一样的（都是「迅捷药水」），靠第二行的时长区分
  */
 public class PotionPickerScreen extends WindowScreen {
 
     private final Consumer<Potion> onSelect;
-    private final Item form;
+    private final Supplier<Item> form;
 
     private WTable table;
     private WTextBox filter;
@@ -36,7 +39,7 @@ public class PotionPickerScreen extends WindowScreen {
     /**
      * @param form 形态对应的物品（喷溅药水 / 滞留药水），用来生成列表里的图标和名字
      */
-    public PotionPickerScreen(GuiTheme theme, String title, Consumer<Potion> onSelect, Item form) {
+    public PotionPickerScreen(GuiTheme theme, String title, Consumer<Potion> onSelect, Supplier<Item> form) {
         super(theme, title);
         this.onSelect = onSelect;
         this.form = form;
@@ -64,16 +67,24 @@ public class PotionPickerScreen extends WindowScreen {
         for (Potion potion : BuiltInRegistries.POTION) addRow(potion);
     }
 
-    /** 一行：[药水图标 + 名字][选择] */
+    /** 一行：[药水图标 + 名字 / 效果和时长][选择] */
     private void addRow(Potion potion) {
-        ItemStack stack = PotionPickSetting.stack(potion, form);
-        String name = PotionPickSetting.name(potion, form);
-        if (!filterText.isEmpty() && !Strings.CI.contains(name, filterText)) return;
+        ItemStack stack = PotionPickSetting.stack(potion, form.get());
+        String name = PotionPickSetting.name(potion, form.get());
+        String detail = PotionPickSetting.effectText(potion);
+        if (!filterText.isEmpty()
+            && !Strings.CI.contains(name, filterText)
+            && !Strings.CI.contains(detail, filterText)) return;
 
-        WItemWithLabel itemLabel = theme.itemWithLabel(stack, name);
-        table.add(itemLabel);
+        // 两行放一格：第二行是效果和时长（同类药水名字一样，靠这行区分）
+        WTable info = table.add(theme.table()).expandCellX().widget();
+        info.add(theme.itemWithLabel(stack, name)).expandCellX().widget();
+        if (!detail.isEmpty()) {
+            info.row();
+            info.add(theme.label(detail)).expandCellX().widget();
+        }
 
-        WButton select = table.add(theme.button("选择")).expandCellX().right().widget();
+        WButton select = table.add(theme.button("选择")).right().widget();
         select.action = () -> {
             onSelect.accept(potion);
             onClose();

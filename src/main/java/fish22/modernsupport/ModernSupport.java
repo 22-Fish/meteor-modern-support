@@ -21,17 +21,22 @@ import fish22.modernsupport.modules.FireworkBoost;
 import fish22.modernsupport.modules.GhostMine;
 import fish22.modernsupport.modules.ItemUse;
 import fish22.modernsupport.modules.LegalRotationConfig;
+import fish22.modernsupport.modules.MaceAura;
 import fish22.modernsupport.modules.OneKeyPotion;
 import fish22.modernsupport.modules.OneKeyWallClip;
 import fish22.modernsupport.modules.OpenAI;
 import fish22.modernsupport.modules.PearlBot;
 import fish22.modernsupport.modules.Printer;
 import fish22.modernsupport.modules.SimplePlace;
+import fish22.modernsupport.modules.SilentSwitchConfig;
 import fish22.modernsupport.modules.SpearNoise;
 import fish22.modernsupport.modules.Spin;
 import fish22.modernsupport.settings.ActionSetting;
+import fish22.modernsupport.settings.ApiKeyRenderer;
+import fish22.modernsupport.settings.ApiKeySetting;
 import fish22.modernsupport.settings.ItemUseListSetting;
 import fish22.modernsupport.settings.PotionPickSetting;
+import fish22.modernsupport.settings.PotionUseListSetting;
 import fish22.modernsupport.settings.PearlPointSetting;
 import fish22.modernsupport.settings.ScheduledTaskListSetting;
 import fish22.modernsupport.settings.WhiteListSetting;
@@ -62,6 +67,7 @@ import meteordevelopment.meteorclient.systems.Systems;
 import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.systems.modules.Modules;
 import meteordevelopment.meteorclient.systems.modules.movement.elytrafly.ElytraFly;
+import meteordevelopment.meteorclient.utils.Utils;
 import meteordevelopment.meteorclient.utils.misc.Keybind;
 import meteordevelopment.meteorclient.utils.misc.Names;
 import meteordevelopment.orbit.EventHandler;
@@ -155,7 +161,57 @@ public class ModernSupport extends MeteorAddon {
             PotionPickSetting potionSetting = (PotionPickSetting) setting;
             WButton button = table.add(theme.button(potionSetting.displayName())).expandCellX().widget();
             button.action = () -> mc.setScreen(new PotionPickerScreen(theme, "选择药水",
-                potionSetting::set, potionSetting.form()));
+                potionSetting::set, potionSetting::form));
+        });
+
+        // 注册「一键药水」药水列表设置的 GUI 渲染:
+        // 顶部「新增药水」按钮 + 每行 [药水(点击更换)][背包使用][快捷键][删除]
+        SettingsWidgetFactory.registerCustomFactory(PotionUseListSetting.class, theme -> (table, setting) -> {
+            PotionUseListSetting listSetting = (PotionUseListSetting) setting;
+
+            WTable potionTable = table.add(theme.table()).expandX().widget();
+
+            // 新增药水按钮: 打开药水选择界面, 选完加入列表末尾
+            WButton addBtn = potionTable.add(theme.button("新增药水")).expandCellX().widget();
+            addBtn.action = () -> mc.setScreen(new PotionPickerScreen(theme, "选择药水", potion ->
+                listSetting.get().add(new PotionUseListSetting.Entry(potion, false, Keybind.none())),
+                listSetting::form));
+
+            potionTable.row();
+
+            // 快捷键控件列表 (渲染时重建, 避免累积旧控件)
+            List<WKeybind> keybindWidgets = listSetting.getKeybindWidgets();
+            keybindWidgets.clear();
+
+            // 每行: 药水按钮(点击更换) + 背包使用勾选 + 快捷键 + 删除
+            List<PotionUseListSetting.Entry> entries = listSetting.get();
+            for (int i = 0; i < entries.size(); i++) {
+                int idx = i;
+                PotionUseListSetting.Entry entry = entries.get(i);
+
+                // 按钮上标上时长: 普通/延长药水名字一样, 靠时长区分（拿不准就点开看第二行）
+                String duration = listSetting.durationText(entry);
+                String label = listSetting.displayName(entry) + (duration.isEmpty() ? "" : " " + duration);
+
+                WButton potionBtn = potionTable.add(theme.button(label)).expandCellX().widget();
+                potionBtn.action = () -> mc.setScreen(new PotionPickerScreen(theme, "选择药水",
+                    potion -> entry.potion = potion, listSetting::form));
+
+                potionTable.add(theme.label("背包使用"));
+                WCheckbox backpackCb = potionTable.add(theme.checkbox(entry.backpackUse)).widget();
+                backpackCb.action = () -> entry.backpackUse = backpackCb.checked;
+
+                WKeybind keybind = potionTable.add(theme.keybind(entry.keybind, Keybind.none())).widget();
+                keybindWidgets.add(keybind);
+
+                WButton delBtn = potionTable.add(theme.button("删除")).widget();
+                delBtn.action = () -> {
+                    entries.remove(idx);
+                    reloadSettingScreen(listSetting);
+                };
+
+                potionTable.row();
+            }
         });
 
         // 注册「openAI 白名单用户」列表设置的 GUI 渲染:
@@ -249,6 +305,26 @@ public class ModernSupport extends MeteorAddon {
             }
         });
 
+        // 注册「openAI APIKEY」设置的 GUI 渲染:
+        // 掩码输入框（只显示一排点）+「保存」按钮，值写到 openai/APIKEY.txt，不进配置
+        SettingsWidgetFactory.registerCustomFactory(ApiKeySetting.class, theme -> (table, setting) -> {
+            ApiKeySetting apiKeySetting = (ApiKeySetting) setting;
+
+            Cell<WTextBox> cell = table.add(theme.textBox(
+                apiKeySetting.get(),
+                apiKeySetting.placeholder(),
+                (text, c) -> true,
+                ApiKeyRenderer.class
+            ));
+            cell.minWidth(Utils.getWindowWidth() - Utils.getWindowWidth() / 4.0);
+            WTextBox textBox = cell.expandX().widget();
+            // 输入框失去焦点（点别处/回车/关界面）时自动保存到文件
+            textBox.actionOnUnfocused = () -> apiKeySetting.set(textBox.get());
+
+            WButton saveBtn = table.add(theme.button("保存")).widget();
+            saveBtn.action = () -> apiKeySetting.set(textBox.get());
+        });
+
         // 注册「珍珠点」设置的 GUI 渲染: 顶部「新增珍珠点」按钮 + 每行 [用户名][坐标][删除]
         //
         // 注意 Meteor 的 group() 是「整组共用一张 WTable」：它先加 [标签] 这一列，
@@ -312,9 +388,6 @@ public class ModernSupport extends MeteorAddon {
         // 初始化合法转头 API
         LegalRotation.init();
 
-        // 初始化配置分块（meteor-client/config/ 下的模块配置快照）
-        ModuleConfigs.init();
-
         // 订阅模块开关事件：开关状态变化时自动保存配置
         MeteorClient.EVENT_BUS.subscribe(ModernSupport.class);
 
@@ -329,10 +402,12 @@ public class ModernSupport extends MeteorAddon {
         Modules.get().add(new EatModify());
         // 一键烟花（从「鞘翅飞行」模块拆出来的独立模块，排在「一键使用物品」下面）
         Modules.get().add(new FireworkUse());
-        // 一键药水（往正下方扔一瓶药水）/ 一键卡墙（按配置角度扔末影珍珠）
+        // 一键药水（往正下方扔一瓶药水）/ 一键穿墙（战斗分类，按配置角度扔末影珍珠）
         Modules.get().add(new OneKeyPotion());
         Modules.get().add(new OneKeyWallClip());
         Modules.get().add(new LegalRotationConfig());
+        // 静默切换配置（静默切换的显示配置，排在「合法转头配置」下面）
+        Modules.get().add(new SilentSwitchConfig());
         // openAI: 把 AEBot (服务端 AI 假人) 搬到客户端, 走自己的聊天栏收发
         Modules.get().add(new OpenAI());
         // 珍珠点大管家（从 meteor-miku 移植）：私聊关键字 → 自动走过去点开珍珠点
@@ -368,6 +443,8 @@ public class ModernSupport extends MeteorAddon {
         Modules.get().add(new AutoSugarcane());
         // 鞘翅自动替换（滑翔中快坏的鞘翅自动换成背包里耐久最高的那把）
         Modules.get().add(new ElytraAutoReplace());
+        // 重锤光环（鞘翅飞行时拉升 → 俯冲 → 切甲重锤下砸 → 穿回鞘翅）
+        Modules.get().add(new MaceAura());
         // 简单放置（配合投影模组使用）
         Modules.get().add(new SimplePlace());
         // 投影打印机（在范围内自动搭投影，放置逻辑用「简单放置」那一套）
@@ -391,6 +468,13 @@ public class ModernSupport extends MeteorAddon {
         // 全量翻译: 模块标题在构造时已自动翻译, 这里补模块设置 (构造时设置项还未创建)
         // 和 Meteor 设置主界面 (Config) 的设置
         I18n.applyAll();
+
+        // 配置分块（meteor-client/config/ 下的模块配置快照）: 放在模块全部注册之后,
+        // 首次生成的白板配置才会包含本 mod 的模块
+        ModuleConfigs.init();
+
+        // 退出时保存: JVM 关闭钩子把当前勾选的配置块写回磁盘（Meteor 自带钩子只写 modules.nbt）
+        Runtime.getRuntime().addShutdownHook(new Thread(AutoSave::saveOnExit, "Meteor-ConfigSave"));
     }
 
     @EventHandler

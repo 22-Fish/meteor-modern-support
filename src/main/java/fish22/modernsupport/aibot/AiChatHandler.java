@@ -40,9 +40,9 @@ public final class AiChatHandler {
         }
     }
 
-    /** 公屏聊天记录（check_chat 工具用，最多 100 条） */
+    /** 客户端聊天栏全部聊天（check_chat 工具用：公屏、私聊、系统提示、命令返回都在里面，最多 200 条） */
     private static final List<String> recentChatMessages = new ArrayList<>();
-    private static final int MAX_CHAT_HISTORY = 100;
+    private static final int MAX_CHAT_HISTORY = 200;
     /** 同一玩家 1 秒内只处理一次触发 */
     private static final Map<String, Long> lastTriggerTime = new HashMap<>();
     private static final long MIN_TRIGGER_INTERVAL_MS = 1000;
@@ -62,6 +62,8 @@ public final class AiChatHandler {
     private static volatile boolean apiBusy = false;
     private static volatile String currentChatter = null;
     private static Thread currentAiThread = null;
+    /** 最近一次 AI 处理的错误（聊天界面用来显示，成功后清掉） */
+    private static volatile String lastError = null;
 
     /** 待发送的消息队列：AI 回复拆成的多行、工具发的公屏消息都排在这里，由发送线程按间隔一条条发出去 */
     private static final Deque<String> sendQueue = new ArrayDeque<>();
@@ -115,7 +117,41 @@ public final class AiChatHandler {
     }
 
     public static String getCurrentChatter() { return currentChatter; }
-    public static List<String> getRecentChatMessages() { return recentChatMessages; }
+
+    /** 最近一次 AI 处理的错误，没有则返回 null */
+    public static String getLastError() { return lastError; }
+
+    /** AI 线程报告一次错误（聊天界面会显示出来） */
+    public static void reportError(String message) { lastError = message; }
+
+    private static void clearError() { lastError = null; }
+
+    /** 客户端聊天栏最近的全部聊天（副本，避免调用方边读边改） */
+    public static List<String> getRecentChatMessages() {
+        synchronized (recentChatMessages) {
+            return new ArrayList<>(recentChatMessages);
+        }
+    }
+
+    /**
+     * 记录一条客户端聊天栏消息（公屏、私聊、系统提示、命令返回等全部记）。
+     * 由模块的 ReceiveMessageEvent 调用，和触发识别无关：识别不出来的消息也会记下来，方便 AI 查。
+     */
+    public static void recordClientChat(String raw) {
+        if (raw == null || raw.isEmpty()) return;
+        String text = AiConfig.isIgnoreFormatting() ? AI.stripColor(raw) : raw;
+        synchronized (recentChatMessages) {
+            recentChatMessages.add(text);
+            if (recentChatMessages.size() > MAX_CHAT_HISTORY) recentChatMessages.remove(0);
+        }
+    }
+
+    /** 清空 check_chat 用的聊天栏记录 */
+    public static void clearClientChat() {
+        synchronized (recentChatMessages) {
+            recentChatMessages.clear();
+        }
+    }
 
     /** agent 板块「强制触发」按钮：取公屏最近 10 条消息，强制触发一次公屏回复 */
     public static void forceTriggerFromRecentChat() {
@@ -127,8 +163,9 @@ public final class AiChatHandler {
         List<String> messages = recentPublicMessagesFromChatHud(10);
         if (messages.isEmpty()) {
             // 兜底：聊天栏历史读不到时，用模块自己记录的公屏聊天。
-            int from = Math.max(0, recentChatMessages.size() - 10);
-            messages = new ArrayList<>(recentChatMessages.subList(from, recentChatMessages.size()));
+            List<String> recorded = getRecentChatMessages();
+            int from = Math.max(0, recorded.size() - 10);
+            messages = new ArrayList<>(recorded.subList(from, recorded.size()));
         }
         if (messages.isEmpty()) {
             AI.LOG("公屏还没有聊天记录，无法强制触发");
@@ -389,14 +426,6 @@ public final class AiChatHandler {
         // 自己发的同一条消息会同时走本地发送和服务器回显，历史只记第一条。
         if (isSelf && isDuplicateContent(parsed.name(), parsed.text(), now)) return;
 
-        // 公屏聊天记录：自己的普通发言也算，AI 自己发出去的回复会在更早的 isRecentlySent 里排掉。
-        if (!isPrivate) {
-            recentChatMessages.add(AiConfig.getPublicChatFormat()
-                .replace("{name}", parsed.name())
-                .replace("{text}", parsed.text()));
-            if (recentChatMessages.size() > MAX_CHAT_HISTORY) recentChatMessages.remove(0);
-        }
-
         // 自动聊天：任何符合公屏/私聊格式的消息都进入聚合，不看触发词和白名单。
         if (AiConfig.isAutoChatEnabled()) {
             queueAutoChat(parsed);
@@ -486,6 +515,7 @@ public final class AiChatHandler {
         if (isBusy()) return false;
         apiBusy = true;
         currentChatter = usageName;
+        clearError();
 
         Thread thread = new Thread(() -> {
             try {
@@ -498,6 +528,35 @@ public final class AiChatHandler {
                 currentAiThread = null;
             }
         }, "openai-ai");
+        thread.setDaemon(true);
+        currentAiThread = thread;
+        thread.start();
+        return true;
+    }
+
+    /**
+     * 从「聊天界面」发出一条消息：只和 AI 对话，回复只显示在界面里，不发到服务器。
+     *
+     * @return 是否成功发起（AI 正忙时返回 false）
+     */
+    public static boolean startGuiChat(String userMessage) {
+        if (userMessage == null || userMessage.isBlank()) return false;
+        if (isBusy()) return false;
+        apiBusy = true;
+        currentChatter = null;
+        clearError();
+
+        Thread thread = new Thread(() -> {
+            try {
+                AiDialogue.callAI(userMessage.trim(), response -> { /* 回复由聊天界面从上下文里读出来显示 */ });
+            } catch (Exception e) {
+                AI.ERROR("AI 出错了: " + e.getMessage());
+            } finally {
+                apiBusy = false;
+                currentChatter = null;
+                currentAiThread = null;
+            }
+        }, "openai-chat-ui");
         thread.setDaemon(true);
         currentAiThread = thread;
         thread.start();
@@ -525,19 +584,17 @@ public final class AiChatHandler {
         }
     }
 
-    /** AI 回复的每一行都排进发送队列：公屏触发走公屏，私聊触发走私聊命令 */
+    /**
+     * AI 的最终回复：不再自动发到服务器，只在本地聊天栏显示一份（方便调试）。
+     *
+     * <p>要不要让别人看到，由 AI 自己决定 —— 它得调用 send_message 工具才会真的发出去。
+     */
     private static void reply(String target, boolean isPrivate, String response) {
         if (response == null || response.isEmpty()) return;
         for (String rawLine : response.split("\n", -1)) {
-            String line = AI.formatMarkdown(rawLine.trim());
+            String line = AI.stripColor(rawLine.trim());
             if (line.isEmpty()) continue;
-
-            if (isPrivate && target != null) {
-                rememberSent(line);   // 私聊回显里只剩正文，正文也记一份，免得 AI 认成新消息
-                enqueue(buildPrivateCommand(target, line));
-            } else {
-                enqueue(line);
-            }
+            AI.LOG("[AI] " + line);
         }
     }
 

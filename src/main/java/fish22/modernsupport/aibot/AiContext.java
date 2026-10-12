@@ -33,6 +33,8 @@ public final class AiContext {
     private static long contextTokens = 0;
     /** 上次序列化后的字符数（用来估算 token） */
     private static int lastChars = 0;
+    /** 上下文改动计数：聊天界面靠它知道什么时候要重画对话 */
+    private static volatile int version = 0;
 
     private AiContext() {}
 
@@ -83,9 +85,58 @@ public final class AiContext {
             Files.createDirectories(file.getParent());
             Files.writeString(file, json);
             lastChars = json.length();
+            version++;
         } catch (IOException e) {
             AI.ERROR("保存对话上下文失败: " + e.getMessage());
         }
+    }
+
+    /** 上下文改动计数（聊天界面靠它判断要不要重建显示） */
+    public static int getVersion() {
+        return version;
+    }
+
+    /** 主对话的一份快照（复制一份再交给界面，避免和 AI 线程同时改同一个列表） */
+    public static List<AiApiClient.Message> snapshotMainConversation() {
+        List<AiApiClient.Message> live = getMainConversation();
+        for (int attempt = 0; attempt < 3; attempt++) {
+            try {
+                synchronized (live) {
+                    return new ArrayList<>(live);
+                }
+            } catch (java.util.ConcurrentModificationException ignored) {
+                // AI 线程正好在改，重试一次
+            }
+        }
+        return new ArrayList<>();
+    }
+
+    /** 清空全部对话上下文（方便测试）：清完把系统提示词补回来 */
+    public static void clearAll() {
+        if (AI.getConfigDir() == null) {
+            AI.ERROR("上下文未初始化，无法清空");
+            return;
+        }
+        if (AiChatHandler.isCallingApi()) {
+            AI.LOG("AI 正在处理一次对话，等它说完再清空");
+            return;
+        }
+
+        List<AiApiClient.Message> messages = getMainConversation();
+        synchronized (messages) {
+            messages.clear();
+        }
+        contextTokens = 0;
+        save();
+
+        // check_chat 用的聊天栏记录也一起清掉，测试时更干净
+        AiChatHandler.clearClientChat();
+
+        // 上下文最前面必须有系统提示词，清空后重新拼一条
+        AiConfig.ensureSystemPrompt();
+        save();
+
+        AI.LOG("已清空全部对话上下文");
     }
 
     /**
@@ -134,19 +185,23 @@ public final class AiContext {
     public static void setSystemPrompt(String prompt) {
         List<AiApiClient.Message> messages = getMainConversation();
         AiApiClient.Message message = new AiApiClient.Message(AiApiClient.systemMsg(prompt == null ? "" : prompt));
-        if (headSize(messages) == 1) messages.set(0, message);
-        else messages.add(0, message);
+        synchronized (messages) {
+            if (headSize(messages) == 1) messages.set(0, message);
+            else messages.add(0, message);
 
-        for (int i = messages.size() - 1; i >= 1; i--) {
-            if ("system".equals(messages.get(i).getRole())) messages.remove(i);
+            for (int i = messages.size() - 1; i >= 1; i--) {
+                if ("system".equals(messages.get(i).getRole())) messages.remove(i);
+            }
         }
     }
 
     /** 清掉系统提示词后面开头的孤儿消息（工具结果等），系统提示词那条不动 */
     public static void dropLeadingOrphans() {
         List<AiApiClient.Message> messages = getMainConversation();
-        int head = headSize(messages);
-        while (messages.size() > head && !"user".equals(messages.get(head).getRole())) messages.remove(head);
+        synchronized (messages) {
+            int head = headSize(messages);
+            while (messages.size() > head && !"user".equals(messages.get(head).getRole())) messages.remove(head);
+        }
     }
 
     /**
@@ -249,24 +304,26 @@ public final class AiContext {
             }
             if (biggest == null) break;
 
-            // 系统提示词一直待在上下文最前面，删减只能从它后面开始
-            int head = headSize(biggest);
+            synchronized (biggest) {
+                // 系统提示词一直待在上下文最前面，删减只能从它后面开始
+                int head = headSize(biggest);
 
-            // 清理开头的孤儿消息（tool 结果等）
-            while (biggest.size() > head && !"user".equals(biggest.get(head).getRole())) biggest.remove(head);
-            if (biggest.size() <= head + 1) break;
+                // 清理开头的孤儿消息（tool 结果等）
+                while (biggest.size() > head && !"user".equals(biggest.get(head).getRole())) biggest.remove(head);
+                if (biggest.size() <= head + 1) break;
 
-            // 找下一轮的 user 头，把这一整轮删掉；找不到说明只剩最后一轮，不删
-            int roundEnd = -1;
-            for (int i = head + 1; i < biggest.size(); i++) {
-                if ("user".equals(biggest.get(i).getRole())) {
-                    roundEnd = i;
-                    break;
+                // 找下一轮的 user 头，把这一整轮删掉；找不到说明只剩最后一轮，不删
+                int roundEnd = -1;
+                for (int i = head + 1; i < biggest.size(); i++) {
+                    if ("user".equals(biggest.get(i).getRole())) {
+                        roundEnd = i;
+                        break;
+                    }
                 }
-            }
-            if (roundEnd < 0) break;
+                if (roundEnd < 0) break;
 
-            biggest.subList(head, roundEnd).clear();
+                biggest.subList(head, roundEnd).clear();
+            }
             rounds++;
             json = buildJson();
         }

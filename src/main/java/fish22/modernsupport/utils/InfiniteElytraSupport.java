@@ -131,6 +131,8 @@ public class InfiniteElytraSupport {
     /** 每 tick 主逻辑（由鞘翅飞行模块调用，不分简单控制模式） */
     public static void onTick() {
         if (!isActive() || mc.player == null) return;
+        // 重锤光环接管中：它自己管胸甲与起飞，无限鞘翅换甲让位
+        if (ElytraFlySupport.isExternalTakeover()) return;
 
         // 滑翔计数：滑翔时累加，否则归零
         if (mc.player.isFallFlying()) {
@@ -395,10 +397,16 @@ public class InfiniteElytraSupport {
     /** 换装前伪造静止输入：停止冲刺 + 发送无移动输入包 */
     private static void sendPacketsForInventoryAction() {
         if (mc.player == null || mc.getConnection() == null) return;
-        // 冲刺中换装会被反作弊判为异常，先停止冲刺
+        // 冲刺中换装会被反作弊判为异常，先停止冲刺。
+        // 这一发必须自己发（原版的疾跑包要等下一 tick 的玩家 tick，赶不上本 tick 的换装点击），
+        // 发完还要把本地状态和原版记账一起同步（见 ElytraFlySupport#syncSprintToServer）：
+        // 只发包不改本地的话，客户端一直以为在疾跑、原版不会再补 START，服务端却已经认为没疾跑，
+        // 下一次换甲又发一发 STOP —— 在服务端看来就是「重复的停止疾跑」
+        //（Grim BadPacketsF, state=false）
         if (mc.player.isSprinting()) {
             mc.getConnection().send(new ServerboundPlayerCommandPacket(
                 mc.player, ServerboundPlayerCommandPacket.Action.STOP_SPRINTING));
+            ElytraFlySupport.syncSprintToServer(false);
         }
         // 无移动输入包（WASD/跳跃/冲刺归零，保留潜行）
         Input cur = mc.player.input.keyPresses;

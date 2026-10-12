@@ -7,6 +7,7 @@ import fish22.modernsupport.modules.FireworkBoost;
 import fish22.modernsupport.modules.ElytraFlyPlus;
 import fish22.modernsupport.mixin.FireworkRocketEntityAccess;
 import fish22.modernsupport.mixin.LivingEntityGlideInvoker;
+import fish22.modernsupport.mixin.LocalPlayerSprintAccessor;
 import meteordevelopment.meteorclient.MeteorClient;
 import meteordevelopment.meteorclient.events.packets.PacketEvent;
 import meteordevelopment.meteorclient.events.world.PlaySoundEvent;
@@ -63,7 +64,7 @@ import static meteordevelopment.meteorclient.MeteorClient.mc;
  *       「关闭」= 模块不做任何飞行控制，甲飞 / 无限鞘翅 照常可用；
  *       「原版」= 照搬 Meteor 官方那套控制（实现在模块里，本类不接管）；
  *       「合法」= 合法平飞，真鞘翅时走「合法方向控制 + 原版滑翔物理」；</li>
- *   <li><b>甲飞</b>：甲飞模式（关闭 / 普通 / Grim模式 / Grim Lag），换装维持滑翔，可与上面的
+ *   <li><b>甲飞</b>：甲飞模式（关闭 / 普通 / Grim模式），换装维持滑翔，可与上面的
  *       关闭 / 原版 / 合法 模式叠加。其中：
  *       <ul>
  *         <li>关闭 + 甲飞：只有换装维持滑翔，没有任何额外的方向控制；</li>
@@ -338,13 +339,17 @@ public class ElytraFlySupport {
     public static boolean travelAsElytra(Player player) {
         if (!shouldUseElytraMovement(player)) return false;
 
-        // 移动运算窗口：这一整段（烟花加速方向 + 滑翔速度运算）都用合法转头的真实角度
+        // 先让「自动拉升 / 烟花加速」定完这一 tick 的服务器朝向（它们在这一步调合法转头
+        // rotate()，V3 的爬升角校正也在这里压角），再开移动运算窗口
+        // —— 窗口一开就把真实角度抄进「移动包那份角度」，必须在朝向定完之后，
+        //    否则压角后的朝向只作用于移动运算和烟花盒子，移动包还发压角前那一份
+        //    （Grim 按发出去那份算 fireworksBox → 每 tick 超框回弹）
+        ElytraAutoPullup.beforeMove(player);
+        FireworkBoost.beforeMove(player);
+
+        // 移动运算窗口：这一整段（滑翔速度运算）都用合法转头的真实角度
         LegalRotation.pushMoveWindow();
         try {
-            // 烟花加速（独立模块）：滑翔运算之前套用，方向 = 本 tick 实际运算朝向
-            ElytraAutoPullup.beforeMove(player);
-            FireworkBoost.beforeMove(player);
-
             // 原版 travelFallFlying 的顺序：先算滑翔速度写回动量，再按这个动量 move
             Vec3 movement = ((LivingEntityGlideInvoker) player).meteor$updateFallFlyingMovement(player.getDeltaMovement());
             player.setDeltaMovement(movement);
@@ -432,7 +437,8 @@ public class ElytraFlySupport {
         if (glidingRealignTicks > 0) return false;
 
         return mc.player != null
-            && (mc.player.isFallFlying() || ticksSinceStartFlying <= startFlyingWindowTicks());
+            && (mc.player.isFallFlying()
+                || ticksSinceStartFlying <= startFlyingWindowTicks());
     }
 
     /**
@@ -559,13 +565,75 @@ public class ElytraFlySupport {
         if (mc.player == null) return false;
         // 「自动替换鞘翅」起飞/滑翔期间同样屏蔽：换装点击到达服务端时输入不带移动/跳跃键，
         // Grim 的 MultiActionsC 才不会把点击包直接取消（取消 = 服务端没换成鞘翅、起飞被拒）。
-        // 滑翔运算不看移动输入（见 travelAsElytra），屏蔽对移动零影响
         boolean autoSwap = autoSwapInputOn();
-        if (!isArmorFlyEnabled() && !autoSwap) return false;
+        // 重锤光环的外部起飞：同上，起飞窗口内也把移动/跳跃键从输入包里抹掉
+        boolean external = isExternalTakeoffActive();
+        if (!isArmorFlyEnabled() && !autoSwap && !external) return false;
         // 「允许在岩浆中飞行」开启时岩浆里和空中一样屏蔽：岩浆里同样在换装，移动/疾跑键留在输入包里
         // 会被 Grim 的 MultiActionsC/D 把换装的点击包直接取消（换装落空）。
         if (mc.player.onGround() || fluidStopsFlight(mc.player) || mc.player.isPassenger()) return false;
-        return serverSeesGliding() || autoSwap;
+        // 条件必须和「本 tick 走滑翔运算」完全一致（{@link #shouldUseElytraMovement}）：
+        // 只有走滑翔运算时移动才真的不看 WASD（滑翔运算忽略输入，屏蔽对移动零影响）；
+        // 退回原版空中运算的那些 tick 是 WASD 在推着我们走的，这时候还把按键抹掉就是
+        // 「跟服务端说没按键、自己却按着走」—— 服务端预测和实际位移对不上就是回弹
+        return shouldUseElytraMovement(mc.player) || autoSwap || external;
+    }
+
+    /**
+     * 把「本地疾跑」和「原版记账」一起同步成服务端实际收到的状态
+     *
+     * <p>我们代替原版发疾跑包 / 拦掉疾跑包时用（{@code onPacketSend} 里拦 START_SPRINTING、
+     * {@link InfiniteElytraSupport} 换甲前停疾跑、{@link GrimCriticalsSupport} 攻击前停疾跑）。
+     *
+     * <p>原版的账本（{@code LocalPlayer#wasSprinting}）只在「它自己发的那一发」之后才更新，
+     * 我们改包不改它的话，下一 tick 原版会补一发服务端没预期的包
+     * （重复停止疾跑 = Grim {@code BadPacketsF}, {@code state=false}）
+     */
+    static void syncSprintToServer(boolean sprinting) {
+        if (mc.player == null) return;
+        mc.player.setSprinting(sprinting);
+        ((LocalPlayerSprintAccessor) mc.player).setWasSprinting(sprinting);
+    }
+
+    /** 上一 tick 拦掉了一发 START_SPRINTING（服务端没收到），下一 tick 开头要把原版记账一起扳回来 */
+    private static boolean sprintPacketSuppressed;
+
+    /** 拦掉一发疾跑包（见 {@link #hideSprintWhileGliding()} 的说明）：原版那份记账改不动，留给下一 tick 开头收尾 */
+    private static void markSprintPacketSuppressed() {
+        sprintPacketSuppressed = true;
+    }
+
+    /**
+     * 滑翔期间把「本地疾跑」和「服务端那边以为的疾跑」一起收掉（由 {@link #onPreTickAlways()} 每 tick 调用）
+     *
+     * <p>原版发不发疾跑包只看「当前的 isSprinting」和「上一次发出去的那份记账」，而那份记账是在
+     * 包发出去<b>之后</b>才写死的（{@code LocalPlayer#sendIsSprintingIfNeeded}）—— 在 PacketEvent.Send
+     * 里拦包只能改前者、改不动后者。于是拦下一发 START 之后，原版以为服务端已经知道我们在疾跑：
+     * 之后本地的疾跑状态一变，它就补一发服务端没预期的疾跑包（强制疾跑模块每 tick 把本地置回疾跑、
+     * 向后飞时原版自己又停疾跑，表现就是反复补包，服务端那边就是 Grim BadPacketsF「重复的疾跑状态」）
+     *
+     * <p>所以放在 TickEvent.Pre（原版那套检查之前）：服务端那边真以为我们在疾跑就先补一发 STOP 收掉，
+     * 再把本地与记账一起压成「没疾跑」—— 这一 tick 原版看到的两个值一致，自己一包都不发。
+     * 强制疾跑之类的模块在玩家 tick 之后又把本地置回疾跑，也只是被下一 tick 在这里再收一次
+     */
+    private static void hideSprintWhileGliding() {
+        if (mc.player == null) return;
+        if (!shouldHideMoveInput()) {
+            sprintPacketSuppressed = false;
+            return;
+        }
+
+        // 服务端那边以为我们在疾跑才补 STOP（拦掉的那发 START 服务端没收到，跟着补就是重复停止疾跑）
+        boolean serverSprinting = !sprintPacketSuppressed
+            && ((LocalPlayerSprintAccessor) mc.player).getWasSprinting();
+        sprintPacketSuppressed = false;
+
+        if (serverSprinting && mc.getConnection() != null) {
+            mc.getConnection().send(new ServerboundPlayerCommandPacket(
+                mc.player, ServerboundPlayerCommandPacket.Action.STOP_SPRINTING));
+        }
+        ((LocalPlayerSprintAccessor) mc.player).setWasSprinting(false);
+        if (mc.player.isSprinting()) mc.player.setSprinting(false);
     }
 
     // ====== 兼容 grim 输入检测（起飞包配一对跳跃输入包） ======
@@ -591,6 +659,15 @@ public class ElytraFlySupport {
         // 会把换装窗口里那次起飞直接取消）
         if (fluidStopsFlight(mc.player) || mc.player.isPassenger()) return false;
         if (!startedGlidingThisTick) return false;
+
+        // 重锤光环的起飞包：胸甲槽就是鞘翅，这里必须强制「按下跳跃」，否则 Grim ElytraB
+        // 在起飞包后的第一个 update 包上看到 jump=false 报 [no jump] 直接取消起飞。
+        // 原版这一 tick 自己那发自动起飞不会重复发：模块起飞时已经把本地置成滑翔
+        //（见 markLocalGlideForExternalTakeoff），原版 tryToStartFallFlying 直接返回 false
+        if (isExternalTakeoffActive()) {
+            jumpInputReleasedForStart = false;
+            return true;
+        }
 
         // 「空包防踢」保持鞘翅的那一发：本地胸甲槽此刻还是鞘翅，但这一发同样是完整的起飞，
         // 必须按下跳跃——否则 Grim ElytraB 在起飞包之后的第一个 update 包上看到 jump=false，报 [no jump]。
@@ -641,10 +718,10 @@ public class ElytraFlySupport {
      */
     private static boolean grimInputSequenceOn() {
         if (!isArmorFlyEnabled()) return false;
-        // 「Grim Lag」自动带上：史莱姆那边是 Grim 预设把 fuckGrimAC 打开，起飞包前后各配一发输入包
+        // 「起飞限频绕过」自动带上：史莱姆那边是 Grim 预设把 fuckGrimAC 打开，起飞包前后各配一发输入包
         //（起飞前松开、起飞后按下，绕 Grim ElytraB 的 no release / no jump），甲飞的起飞包是自动发的，
         // 这边照同一个效果处理
-        if (ElytraLagSyncSupport.isGrimLag()) return true;
+        if (ElytraLagSyncSupport.isEnabled()) return true;
         return grimInputSequence != null && grimInputSequence.get();
     }
 
@@ -661,9 +738,18 @@ public class ElytraFlySupport {
             && (takeoffRequested || autoSwappedElytra) && mc.player != null;
     }
 
-    /** 「兼容 grim 输入检测」和「自动替换起飞」共用同一套起飞包前后输入配对，任一生效都要走 */
+    /**
+     * 「兼容 grim 输入检测」「自动替换起飞」「重锤光环外部起飞」共用同一套起飞包前后输入配对，
+     * 任一生效都要走。
+     *
+     * <p>重锤光环多一个 {@link #externalTakeoffPending}：「起飞前的配对预备」。它必须从空中第一
+     * tick 就生效，不能只在起飞包发出之后（{@link #isExternalTakeoffActive()}）才生效 ——
+     * 不然第一发起飞包那一刻服务端看到的输入还是「按着跳跃」（玩家自己按着，或模块刚在地上
+     * 按着起跳），Grim ElytraB 报 no release 把这个起飞包直接取消，之后每 3 tick 的重试
+     * 输入状态没变，一发都过不去
+     */
     private static boolean grimInputOrAutoSwap() {
-        return grimInputSequenceOn() || autoSwapInputOn();
+        return grimInputSequenceOn() || autoSwapInputOn() || isExternalTakeoffActive() || externalTakeoffPending;
     }
 
     /**
@@ -677,16 +763,14 @@ public class ElytraFlySupport {
     /**
      * 甲飞模式（Off = 关闭；常量名 Lazy = 旧「懒换」，现显示为「Grim模式」）
      *
-     * <p><b>Grim Lag</b>：内核就是 Grim 模式（服务端说停滑才换一次甲），外面套史莱姆
-     * {@code ElytraExtra} 的「延后同步」（{@link ElytraLagSyncSupport}）——起飞包之后
-     * 把服务端说停滑的同步包和 transaction ping 扣下若干 tick，换甲频率因此被压到
-     * 「每 延后同步刻数 tick 一次」，用来绕开按甲飞频率抓人的新反作弊。
+     * <p>它带一个可选的「起飞限频绕过」（{@link ElytraLagSyncSupport}，史莱姆 {@code ElytraExtra}
+     * 的 max-delay-ticks）：那个功能只扣「服务端说停滑」这一路入站包，本类的换甲逻辑一个字不改
+     * —— 包晚到多久，滑翔位就晚多久掉，换甲自然跟着晚，见 {@link #lazyTick()}
      */
     public enum ArmorMode {
         Off("关闭"),
         Normal("普通"),
-        Lazy("Grim模式"),
-        GrimLag("Grim Lag");
+        Lazy("Grim模式");
 
         private final String displayName;
 
@@ -818,7 +902,7 @@ public class ElytraFlySupport {
 
     /** 「简单控制模式」（关闭 / 原版 / 合法），由 {@link ElytraFlyPlus} 注入 */
     public static Setting<FlyMode> simpleMode;
-    /** 甲飞模式（关闭/普通/Grim模式/Grim Lag） */
+    /** 甲飞模式（关闭 / 普通 / Grim模式） */
     public static Setting<ArmorMode> armorMode;
     /** 甲飞：「允许在岩浆中飞行」（默认开；开启后岩浆里也照常换装 + 按滑翔运算飞，见 {@link #lavaFlightOn()}） */
     public static Setting<Boolean> lavaFlight;
@@ -831,11 +915,11 @@ public class ElytraFlySupport {
     public static Setting<Boolean> grimInputSequence;
     /** 甲飞换甲间隔（tick）：两次换装之间至少间隔的 tick 数，1 = 每 tick 都允许换（旧行为） */
     public static Setting<Integer> armorSwapInterval;
-    /** Grim Lag：「允许手动切换暂停」（史莱姆 armor-fly → enable-manually-swap，默认开） */
-    public static Setting<Boolean> allowManualSwap;
     /** 甲飞：「换鞘翅后维持滑翔」窗口（tick）：起飞包发出后本地还按滑翔运算移动多久，见 {@link #startFlyingWindowTicks()} */
     public static Setting<Integer> startFlyingWindow;
     public static Setting<Boolean> autoFirework;
+    /** 合法模式：「精确水平」（烟花加速中平飞用能维持完全水平的俯仰角，默认关） */
+    public static Setting<Boolean> legalExactLevel;
     /** 合法模式的「合法转头优先级」（和其他模块抢转向时用；设置没注入时退回 API 配置的默认优先级） */
     public static Setting<Integer> legalRotationPriority;
     public static Setting<Integer> fwIntervalLv1;
@@ -855,6 +939,8 @@ public class ElytraFlySupport {
     public static Setting<Integer> hoverFwIntervalLv2;
     public static Setting<Integer> hoverFwIntervalLv3;
     public static Setting<Boolean> autoSwapElytra;
+    /** 「自动替换鞘翅」的子选项：关模块时把本模块换上去的鞘翅换回胸甲 */
+    public static Setting<Boolean> autoSwapRestoreChest;
     public static Setting<Boolean> discardMomentum;
     public static Setting<Boolean> freezeFirework;
 
@@ -880,6 +966,16 @@ public class ElytraFlySupport {
     public static Setting<Integer> pullupFwIntervalLv1;
     public static Setting<Integer> pullupFwIntervalLv2;
     public static Setting<Integer> pullupFwIntervalLv3;
+    /** 重锤光环（独立模块「重锤光环」注入）：自动烟花是否允许使用背包中的烟花 */
+    public static Setting<Boolean> maceBackpackFirework;
+    /** 重锤光环：背包交换的发包方式 */
+    public static Setting<BackpackUse.Mode> maceBackpackMode;
+    /** 重锤光环：背包烟花换到哪一格使用 */
+    public static Setting<BackpackUse.TargetSlot> maceBackpackTarget;
+    /** 重锤光环：各等级烟花的释放间隔（tick） */
+    public static Setting<Integer> maceFwIntervalLv1;
+    public static Setting<Integer> maceFwIntervalLv2;
+    public static Setting<Integer> maceFwIntervalLv3;
     /** 烟花加速值（史莱姆 mod 默认 1.7） */
     public static Setting<Double> fireworkBoostSpeed;
     /** 史莱姆的 auto-rescale-firework-box */
@@ -985,8 +1081,22 @@ public class ElytraFlySupport {
     /** 本 tick 的起飞包是不是「自动替换鞘翅」发的（配「按下跳跃」输入用，见 {@link #shouldPressJumpInput}） */
     private static boolean autoSwapTakeoffThisTick = false;
 
-    /** 「自动替换鞘翅」这一轮的鞘翅是不是本模块换上去的（滑翔结束时只收回这种鞘翅，玩家自己穿的不管） */
+    /**
+     * 「自动替换鞘翅」这一轮的鞘翅是不是本模块换上去的。
+     *
+     * <p>只用来管两件事：起飞输入窗口（见 {@link #autoSwapInputOn}），
+     * 和「模块关闭时换回胸甲」（玩家自己穿的那件不跟着关模块被换掉）。
+     * 收工（退出滑翔 / 落地）换回胸甲看 {@link #autoSwapRestorePending}，不再只看这一件。
+     */
     private static boolean autoSwappedElytra = false;
+
+    /**
+     * 「自动替换鞘翅」这一轮被触发过（按下跳跃发起飞 / 进入滑翔）：收工时无条件把胸甲槽的鞘翅换回胸甲，只换一次。
+     *
+     * <p>不管胸甲槽那件鞘翅是本模块换上去的还是玩家自己穿的，都换；
+     * 但只在收工那一刻（退出滑翔 / 落地）换，之后站着再手动穿鞘翅不动它。
+     */
+    private static boolean autoSwapRestorePending = false;
 
     /** 上一 tick 是否滑翔（检测滑翔状态转变，起飞成功瞬间放烟花） */
     private static boolean prevFlying = false;
@@ -1006,6 +1116,10 @@ public class ElytraFlySupport {
 
     /** 距下次自动烟花的剩余 tick 数（合法平飞，飞行/悬停共用） */
     private static int legalFwCooldown = 0;
+
+    /** 「精确水平」反解出的俯仰角缓存（同一 tick 只解一次） */
+    private static int exactLevelPitchTick = -1;
+    private static float exactLevelPitchCache = 0.0F;
 
     /** 甲飞模式下待释放的自动烟花等级（-1 表示无）：换装窗口内释放，见 {@link #releaseWindowFirework} */
     private static int windowFwPendingLevel = -1;
@@ -1274,10 +1388,31 @@ public class ElytraFlySupport {
         return result;
     }
 
-    /** 服务器位置纠正后，上一 tick 真实移动速度按史莱姆的 SET_BACK 分支清零 */
+    /**
+     * 服务器位置纠正后，上一 tick 真实移动速度按史莱姆的 SET_BACK 分支清零。
+     *
+     * <p>同时把我们记的「服务端坐标」也改成纠正后的位置：不改的话，下一发移动包的位移
+     * 会被算成「纠正后坐标 − 纠正前坐标」这个巨大的假值，重缩放拿它当上一 tick 速度
+     * （盒子上下限跟着偏），容易再被拉一次
+     */
     public static void captureFireworkRescaleReceive(PacketEvent.Receive event) {
         if (event == null || event.packet == null) return;
-        if (event.packet instanceof ClientboundPlayerPositionPacket) {
+        if (event.packet instanceof ClientboundPlayerPositionPacket position) {
+            if (mc.player != null) {
+                Vec3 absolute = PositionMoveRotation.calculateAbsolute(
+                    new PositionMoveRotation(
+                        mc.player.position(),
+                        mc.player.getKnownMovement(),
+                        mc.player.getYRot(),
+                        mc.player.getXRot()
+                    ),
+                    position.change(),
+                    position.relatives()
+                ).position();
+                fireworkRescaleLastX = absolute.x;
+                fireworkRescaleLastY = absolute.y;
+                fireworkRescaleLastZ = absolute.z;
+            }
             fireworkRescaleLastRealMovement = Vec3.ZERO;
             fireworkRescaleOverride = null;
         }
@@ -1287,8 +1422,10 @@ public class ElytraFlySupport {
         fireworkRescaleLastX = mc.player != null ? mc.player.getX() : 0.0;
         fireworkRescaleLastY = mc.player != null ? mc.player.getY() : 0.0;
         fireworkRescaleLastZ = mc.player != null ? mc.player.getZ() : 0.0;
-        fireworkRescaleLastPitch = mc.player != null ? mc.player.getXRot() : 0.0F;
-        fireworkRescaleLastYaw = mc.player != null ? mc.player.getYRot() : 0.0F;
+        // 朝向要用「服务器记的那一份」（最近发出去的合法转头角度），不是相机：
+        // 静默转头时这两者不一样，用相机开局会让第一个 tick 的烟花盒子两边对不上
+        fireworkRescaleLastPitch = mc.player != null ? LegalRotation.getServerPitch() : 0.0F;
+        fireworkRescaleLastYaw = mc.player != null ? LegalRotation.getServerYaw() : 0.0F;
         fireworkRescaleLastRealMovement = Vec3.ZERO;
         fireworkRescaleLastInWater = false;
         fireworkRescaleLastInLava = false;
@@ -1331,12 +1468,40 @@ public class ElytraFlySupport {
     private static boolean shouldApplyFireworkBoost() {
         if (fireworkBoostSpeed == null) return false;
         if (mc.player == null || mc.level == null) return false;
-        // 甲飞时本地滑翔标志被服务器同步的滑翔 bit 反复覆盖（会闪成 false），
-        // 这里跟移动运算用同一套判断：服务器认这一 tick 在滑翔就算滑翔。
-        // 注意：这个窗口里服务器不一定真认滑翔，所以方向按严格模式另行处理
-        // （见 applyFireworkBoost：不认滑翔时动量沿服务器已知朝向维持）。
-        if (!mc.player.isFallFlying() && !shouldAlignFireworkBoostWithServer()) return false;
+        if (!inFireworkGlideWindow()) return false;
         return hasActiveOwnedFirework();
+    }
+
+    /**
+     * 烟花加速此刻的「在滑翔」窗口：真鞘翅看本地滑翔状态；甲飞看
+     * 「鞘翅飞行模块开着 + 服务器认这一 tick 在滑翔」
+     * （和 {@link #travelAsElytra} 的滑翔移动用同一套判断）。
+     *
+     * <p>甲飞时本地滑翔标志被服务器同步的滑翔 bit 反复覆盖（会闪成 false），
+     * 这个窗口里服务器不一定真认滑翔，所以方向按严格模式另行处理
+     * （见 {@link #applyFireworkBoost()}：不认滑翔时动量沿服务器已知朝向维持）。
+     *
+     * <p>渲染也用这个判断：鞘翅飞行模块关掉后 {@code ticksSinceStartFlying} 不再推进，
+     * 只看 {@link #serverSeesGliding()} 会一直停在关模块前的旧值上，界面就收不掉了。
+     */
+    public static boolean inFireworkGlideWindow() {
+        if (mc.player == null) return false;
+        return mc.player.isFallFlying() || shouldAlignFireworkBoostWithServer();
+    }
+
+    /**
+     * 渲染用：此刻画不画「烟花加速」的角度指示。
+     *
+     * <p>比烟花加速的生效条件更严一点：<b>甲飞模式设置着、但鞘翅飞行模块已经关掉时一律不画</b>。
+     * 甲飞是「每 tick 换装 + 发起飞包」维持滑翔的，关模块那一刻本地滑翔标志和
+     * {@code ticksSinceStartFlying} 都可能停在甲飞留下的状态上（人已经开始下落了界面还在画）。
+     *
+     * <p>真鞘翅滑翔（甲飞模式没开）不受影响，照常画。
+     */
+    public static boolean shouldRenderFireworkGuide() {
+        if (mc.player == null) return false;
+        if (isArmorFlyActive() && !isArmorFlyEnabled()) return false;
+        return mc.player.isFallFlying() || shouldAlignFireworkBoostWithServer();
     }
 
     /**
@@ -1358,6 +1523,30 @@ public class ElytraFlySupport {
             if (attachedTo.isPresent() && attachedTo.getAsInt() == mc.player.getId()) return true;
         }
         return false;
+    }
+
+    /**
+     * 附着在自己身上的活跃烟花里，剩余寿命最少的那一发的剩余 tick；没有返回 -1。
+     *
+     * <p>重锤光环的「起飞自动烟花」用它判断「现在有没有烟花加速、还剩几 tick」：
+     * 只剩 2 tick 以内（或压根没有）就补一发。
+     */
+    public static int ownedFireworkRemainingTicks() {
+        if (mc.level == null || mc.player == null) return -1;
+        int best = -1;
+        for (FireworkRocketEntity rocket : mc.level.getEntitiesOfClass(
+            FireworkRocketEntity.class,
+            mc.player.getBoundingBox().inflate(16.0)
+        )) {
+            if (!(rocket instanceof FireworkRocketEntityAccess access) || !rocket.isAlive()) continue;
+            OptionalInt attachedTo = rocket.getEntityData().get(
+                FireworkRocketEntityAccess.meteor$getDataAttachedToTarget()
+            );
+            if (attachedTo.isEmpty() || attachedTo.getAsInt() != mc.player.getId()) continue;
+            int remaining = access.meteor$getLifetime() - access.meteor$getLife();
+            if (best == -1 || remaining < best) best = remaining;
+        }
+        return best;
     }
 
     // ====== 烟花加速重缩放（史莱姆 applyAxisLimit V1/V2） ======
@@ -1887,6 +2076,7 @@ public class ElytraFlySupport {
         autoSwapArmTicks = 0;
         autoSwapTakeoffThisTick = false;
         autoSwappedElytra = false;
+        autoSwapRestorePending = false;
         prevFlying = false;
         startedGlidingThisTick = false;
         startedGlidingLastTick = false;
@@ -1896,6 +2086,8 @@ public class ElytraFlySupport {
         rubberbandWindow = 0;
         rubberbandCooldown = 0;
         jumpInputReleasedForStart = false;
+        externalTakeoffPending = false;
+        clearTakeoffWatch();
         floatingCheckRefreshTicks = -1;
         flyingPacketsWithoutPosition = 0;
         antiKickPacketThisTick = false;
@@ -1910,9 +2102,7 @@ public class ElytraFlySupport {
         resetLandingNoFallTracking();
         Freeze.clearMovePacketBypass();
         Freeze.setExternalFrozen(false);
-        // 「Grim Lag」：清暂停状态；上一次会话扣着的包在这一步放掉
-        grimLagChestElytraTicks = 0;
-        grimLagAbort = false;
+        // 「起飞限频绕过」：上一次会话扣着的包在这一步放掉
         ElytraLagSyncSupport.reset();
         MeteorClient.EVENT_BUS.subscribe(SOUND_LISTENER);
     }
@@ -1920,8 +2110,22 @@ public class ElytraFlySupport {
     public static void onDeactivate() {
         // 解除合法平飞可能挂上的外部冻结
         Freeze.setExternalFrozen(false);
+        // 关模块后「服务器认滑翔」的窗口立刻作废：那个窗口是甲飞自己每 tick 换装 + 发起飞包
+        // 维持的，模块关了就不会再推进，留着会让滑翔运算 / 拉升 / 渲染一直以为人还在飞
+        ticksSinceStartFlying = START_FLYING_WINDOW_EXPIRED;
+        startedGlidingThisTick = false;
+        startedGlidingLastTick = false;
         // 「空包防踢」正好把鞘翅留在胸甲槽时被关掉：先把胸甲换回来，别把鞘翅留在身上
         if (elytraHoldTicks > 0 && mc.player != null) swapBackChestplate();
+        // 「模块关闭时换回胸甲」（默认开）：这一轮的鞘翅是本模块「自动替换」换上去的，
+        // 关模块时顺手换回胸甲；玩家自己穿的鞘翅（autoSwappedElytra=false）不动。
+        // 开着容器时不换：换装靠点背包格子，点不到玩家背包的护甲槽。
+        if (autoSwappedElytra && mc.player != null && mc.player.containerMenu.containerId == 0
+            && (autoSwapRestoreChest == null || autoSwapRestoreChest.get())) {
+            swapBackChestplate();
+        }
+        autoSwappedElytra = false;
+        autoSwapRestorePending = false;
         floatingCheckRefreshTicks = -1;
         flyingPacketsWithoutPosition = 0;
         antiKickPacketThisTick = false;
@@ -1934,15 +2138,17 @@ public class ElytraFlySupport {
         rubberbandCount = 0;
         rubberbandWindow = 0;
         rubberbandCooldown = 0;
+        externalTakeoffPending = false;
+        clearTakeoffWatch();
         bypassFreezeIntercept = false;
         hoverPlusThisTick = false;
         noPositionPacketThisTick = false;
         resetLandingNoFallTracking();
         Freeze.clearMovePacketBypass();
-        // 「Grim Lag」：清暂停状态；关模块时不能再扣着服务端的包，全部放行
-        grimLagChestElytraTicks = 0;
-        grimLagAbort = false;
+        // 「起飞限频绕过」：关模块时不能再扣着服务端的包，全部放行
         ElytraLagSyncSupport.reset();
+        // 甲飞停了，本地那个由换装撑起来的滑翔位也要收掉（见 clearLocalGlideOnArmorStop）
+        clearLocalGlideOnArmorStop();
         MeteorClient.EVENT_BUS.unsubscribe(SOUND_LISTENER);
     }
 
@@ -1952,7 +2158,7 @@ public class ElytraFlySupport {
      * 以及冻结悬停防踢脉冲的计时（按 tick 递减，见 {@link #tickAntiKick()}）。
      */
     public static void onPreTickAlways() {
-        // 「Grim Lag」：延迟窗口计时 / 窗口到期放包
+        // 「起飞限频绕过」：窗口计时 / 窗口到期补 pong + 放包
         ElytraLagSyncSupport.onPreTick();
         startedGlidingLastTick = startedGlidingThisTick;
         startedGlidingThisTick = false;
@@ -1969,8 +2175,41 @@ public class ElytraFlySupport {
         fallDistanceBeforeTick = mc.player != null ? mc.player.fallDistance : 0.0;
         // 冻结悬停防踢脉冲：按 tick 递减，到点这一 tick 由 tickAntiKick 补发
         if (floatingCheckRefreshTicks > 0) floatingCheckRefreshTicks--;
+        // 滑翔期间收掉本地疾跑（连原版记账一起，见 hideSprintWhileGliding）
+        hideSprintWhileGliding();
         // 兜底：上一 tick 万一没把「放行标记」用掉，别留到这一 tick 放行客户端的位置包
         Freeze.clearMovePacketBypass();
+        // 兜底：上一 tick 登记的起飞没发出去（输入类不是 KeyboardInput）就在这一 tick 开头补发
+        flushStaleTakeoff();
+    }
+
+    /**
+     * 重锤光环专用的「每 tick 收尾」：鞘翅飞行模块没开的时候，上面那套记账没人跑。
+     *
+     * <p>{@link #onPreTickAlways()} 挂在鞘翅飞行模块的 TickEvent.Pre 上，模块没开就一次都不执行，
+     * 于是「本 tick 发过起飞包」这个标记在第一次起飞包之后永远停在 true：
+     * {@link #shouldHideJumpInput()} 每 tick 都被它踢进「本 tick 不屏蔽」分支，顺手把
+     * 「服务端已看到松开」清掉，{@link #skipStartThisTick()} 就恒为真 ——
+     * 重锤光环的起飞包一发都发不出去（表现就是换回鞘翅后不复飞，开着鞘翅飞行模块才正常）。
+     *
+     * <p>模块开着时不重复跑：那一 tick 的收尾由 {@link #onPreTickAlways()} 负责，
+     * 这里再跑一次会把同 tick 刚登记的那发起飞包清掉（起飞包后的「按下跳跃」输入就配不上了）。
+     */
+    public static void onPreTickForExternal() {
+        if (isElytraFlyModuleActive()) return;
+        startedGlidingLastTick = startedGlidingThisTick;
+        startedGlidingThisTick = false;
+        autoSwapTakeoffThisTick = false;
+        ticksSinceStartFlying = startedGlidingLastTick
+            ? 0
+            : Math.min(ticksSinceStartFlying + 1, startFlyingWindowTicks() + 1);
+        flushStaleTakeoff();
+    }
+
+    /** 鞘翅飞行模块（{@link ElytraFlyPlus}）是不是开着（它才是上面那套每 tick 收尾的宿主） */
+    private static boolean isElytraFlyModuleActive() {
+        ElytraFlyPlus module = Modules.get().get(ElytraFlyPlus.class);
+        return module != null && module.isActive();
     }
 
     /** 每 tick 主逻辑（TickEvent.Pre，由鞘翅飞行模块调用） */
@@ -1998,6 +2237,18 @@ public class ElytraFlySupport {
         // 防踢脉冲的判定必须排在换装之前：「空包防踢」要让本 tick 的换装把鞘翅多留一 tick
         planAntiKick();
 
+        // 外部接管（重锤光环）期间：本类不做任何方向控制与换装，滑翔 / 胸甲全交给重锤光环
+        if (externalTakeover) {
+            if (glidingRealignTicks > 0) glidingRealignTicks--;
+            // 一键烟花：接管期间等不到甲飞换装窗口，排队的这一发直接放
+            //（模块自己维持真鞘翅滑翔，使用包不会被拦，放出去就能生效）
+            if (oneKeyPending && mc.player.isFallFlying()) {
+                oneKeyPending = false;
+                LegalRotation.runAfterSend(ElytraFlySupport::releaseFireworkOnce);
+            }
+            return;
+        }
+
         if (isLegalMode()) {
             // 合法：真鞘翅走合法方向控制，开了甲飞则叠加换装维持滑翔
             if (isArmorFlyActive()) legalArmorTick();
@@ -2022,6 +2273,9 @@ public class ElytraFlySupport {
 
     /** 发包监听（由鞘翅飞行模块调用） */
     public static void onPacketSend(PacketEvent.Send event) {
+        // 「起飞限频绕过」：起飞包刷窗口锚点 + 扣包窗口里压住 transaction pong（史莱姆那两手的发包侧）
+        ElytraLagSyncSupport.onSend(event);
+
         // 「grim悬停」：记账本 tick 有没有「不带坐标的移动包」出去（客户端自己的旋转包也算）。
         // 必须放在所有 return 之前——补包那一路（bypassFreezeIntercept）也要算进去。
         if (event.packet instanceof ServerboundMovePlayerPacket lookPacket && !lookPacket.hasPosition()) {
@@ -2035,28 +2289,16 @@ public class ElytraFlySupport {
         // 无条件取消含位置的移动包，连它自己发的这一发也会被取消（防踢因此完全失效）。
         if (bypassFreezeIntercept) return;
 
-        // 「Grim Lag」反踢出（史莱姆的 anti-kick）：发过起飞包的那一 tick，客户端自己的移动包
-        // 强制换成带完整坐标的那一发 —— 服务端处理它时正认滑翔、位置也刷新到最新，
-        // 不会攒出「悬浮过久」的计数。原包取消、换成同一 tick 的一发位置包，不额外多包。
-        if (ElytraLagSyncSupport.shouldForcePositionPacket()
-            && event.packet instanceof ServerboundMovePlayerPacket move
-            && !move.hasPosition()) {
-            event.cancel();
-            mc.getConnection().send(new ServerboundMovePlayerPacket.PosRot(
-                new Vec3(mc.player.getX(), mc.player.getY(), mc.player.getZ()),
-                mc.player.getYRot(), mc.player.getXRot(),
-                mc.player.onGround(), mc.player.horizontalCollision));
-            return;
-        }
-
-        // 甲飞飞行中拦截疾跑包：滑翔中疾跑对 Grim 是异常（SprintE/SprintF），
-        // 而且 MultiActionsC 的 sprinting=true 同样会取消换装点击包（换装又会落空）。
-        // 拦截后同步停掉本地疾跑：不然客户端已经记下「发过疾跑」（wasSprinting），
-        // 服务端却永远收不到，落地跑动时预测速度会对不上。
+        // 甲飞飞行中拦截疾跑包：滑翔中疾跑对 Grim 是异常，而且 MultiActionsC 的 sprinting=true
+        // 同样会取消换装点击包（换装又会落空）。
+        // 原版的记账（wasSprinting）要等这发包返回之后才写死，这里改不动它（会被这发 START 的值
+        // 盖回来），所以只登记「这发没发出去」，下一 tick 开头由 hideSprintWhileGliding 把本地
+        // 与记账一起压回没疾跑——省掉原版那一发服务端没预期的疾跑包（Grim BadPacketsF）
         if (event.packet instanceof ServerboundPlayerCommandPacket cmd
             && cmd.getAction() == ServerboundPlayerCommandPacket.Action.START_SPRINTING
             && shouldHideMoveInput()) {
             event.cancel();
+            markSprintPacketSuppressed();
             mc.player.setSprinting(false);
             return;
         }
@@ -2066,7 +2308,9 @@ public class ElytraFlySupport {
         // 但此时服务器可能已停飞（穿胸甲），直接发出去服务器不发射；卡到滑翔窗口再发。
         // 模块内部发出的使用包（延迟重发、换装窗口内释放一键烟花）带 bypassFireworkIntercept
         // 标志，直接放行——它们在窗口内发出时烟花就在手上，再延后重发反而会失效。
-        if (isArmorFlyActive() && event.packet instanceof ServerboundUseItemPacket useItem) {
+        // 外部接管（重锤光环）期间不拦：它自己穿着真鞘翅，服务器看到的就是滑翔，
+        // 烟花直接放得出去；再走甲飞那套「延后到换装窗口」的拦截反而永远放不出来
+        if (isArmorFlyActive() && !externalTakeover && event.packet instanceof ServerboundUseItemPacket useItem) {
             if (!bypassFireworkIntercept && isFireworkInHand(useItem.getHand())) {
                 pendingFireworkPacket = useItem;
                 event.cancel();
@@ -2099,8 +2343,8 @@ public class ElytraFlySupport {
 
     /** 收包监听（由鞘翅飞行模块调用） */
     public static void onPacketReceive(PacketEvent.Receive event) {
-        // 「Grim Lag」：起飞包窗口内收到服务端「你不在滑翔」的同步包就把入站包整段扣下，
-        // 窗口过了再按原顺序放（史莱姆的动态延迟 / 延后同步）
+        // 「起飞限频绕过」：窗口内收到「服务端说你在停滑」的同步包就开始扣包，
+        // 并把这一轮 transaction 的 pong 压到窗口结束（史莱姆的 max-delay-ticks / onPacketPing）
         ElytraLagSyncSupport.onReceive(event);
         if (event.isCancelled()) return;
 
@@ -2130,16 +2374,18 @@ public class ElytraFlySupport {
     // ====== 甲飞逻辑 ======
 
     private static void armorTick() {
-        // 打开容器/界面时不动手，避免误点
-        if (mc.player.containerMenu.containerId != 0) return;
-
         // 落地/流体：恢复正常状态（胸甲槽若还是鞘翅则换回胸甲）。
         // 水一律算收工，岩浆看「允许在岩浆中飞行」（见 fluidStopsFlight）：
         // 收工后就不换装也不发起飞包，等离开流体再自己接着飞。
+        // 这一支排在最前（先于「开容器不动手」）：清滑翔位、清排队烟花都不发点击，开容器落地也得做，
+        // 「起飞限频绕过」扣着的包和窗口也一起放掉 —— 不然人已经落地、本地还挂着滑翔，落地就是一顿位置纠正
         if (mc.player.onGround() || fluidStopsFlight(mc.player)) {
+            // 「起飞限频绕过」：落地不用再压同步，扣着的包（含服务端这一下停滑）全部放行
+            ElytraLagSyncSupport.reset();
             // 服务器清滑翔标志要等一个同步往返，本地主动清掉，落地即取消甲飞
             cancelLocalGliding();
-            swapBackChestplate();
+            // 换甲要点背包格子（发点击），只有没开容器时才动手
+            if (mc.player.containerMenu.containerId == 0) swapBackChestplate();
             wasFlying = false;
             armorSwapCooldown = 0;
             windowFwPendingLevel = -1;
@@ -2148,6 +2394,9 @@ public class ElytraFlySupport {
             cancelPendingManualFirework();
             return;
         }
+
+        // 打开容器/界面时不动手，避免误点
+        if (mc.player.containerMenu.containerId != 0) return;
 
         // 兼容 grim 输入检测：起飞包隔 tick 发（本 tick 只发松开包，让下次起飞前是「松开」状态）
         if (!skipStartThisTick()) {
@@ -2169,7 +2418,6 @@ public class ElytraFlySupport {
 
         switch (mode) {
             case Lazy -> lazyTick();
-            case GrimLag -> grimLagTick();
             default -> normalTick();
         }
     }
@@ -2190,8 +2438,30 @@ public class ElytraFlySupport {
 
     // ====== Grim 模式（LAZY）======
 
-    /** Grim 模式：滑翔中不动，只在服务器判定停飞时才做一次「换鞘翅 → 起飞 → 换回」 */
+    /**
+     * Grim 模式：滑翔中不动，只在服务器判定停飞时才做一次「换鞘翅 → 起飞 → 换回」
+     *
+     * <p>平时看的就是 {@code isFallFlying()}。本地滑翔位被 {@link ElytraLagSyncSupport}
+     * 撑着不掉（史莱姆的假滑翔），所以换甲时机改由「服务端说停滑」那一包驱动 ——
+     * 史莱姆也是在这个包的处理里换的甲，包被扣在窗口里多久，换甲就晚多久
+     */
     private static void lazyTick() {
+        // 「起飞限频绕过」：窗口里扣下的「服务端说停滑」刚放出来 → 换一次甲
+        if (ElytraLagSyncSupport.consumeTakeoffRequest()) {
+            wasFlying = true;
+            // 胸甲槽本来就是真鞘翅（玩家自己穿的、或上一轮没换回来）时只补起飞包，不动背包 ——
+            // 走 flashSwapElytra 找不到背包里的鞘翅会拐去 swapBackChestplate，把玩家自己穿的换掉了
+            if (isValidElytra(mc.player.getItemBySlot(EquipmentSlot.CHEST))) {
+                sendStartFlying();
+                flushPendingFirework();
+                releaseOneKeyFirework();
+                releaseWindowFirework();
+            } else {
+                flashSwapElytra();
+            }
+            return;
+        }
+
         // 已在滑翔：什么都不做（懒）
         if (mc.player.isFallFlying()) {
             wasFlying = true;
@@ -2200,94 +2470,6 @@ public class ElytraFlySupport {
 
         // 空中停飞：自动换装（无需按跳跃）
         wasFlying = true;
-
-        flashSwapElytra();
-    }
-
-    // ====== Grim Lag 模式（内核 = Grim 模式，外面套史莱姆的「延后同步」）======
-
-    /** 「允许手动切换暂停」：胸甲槽连续多少 tick 是真鞘翅就认定玩家自己在穿鞘翅飞（史莱姆写死 5） */
-    private static final int GRIM_LAG_ABORT_TICKS = 5;
-
-    /** 「允许手动切换暂停」：胸甲槽连续是鞘翅的 tick 数（史莱姆的 armorGlideAbortCounter） */
-    private static int grimLagChestElytraTicks = 0;
-
-    /** 判定玩家自己在穿鞘翅飞 → 暂停换甲（史莱姆的 thisFallFlyingArmorFlyAbort） */
-    private static boolean grimLagAbort = false;
-
-    /**
-     * Grim Lag：内核和 {@link #lazyTick()}（Grim 模式）完全一样 —— 本地还在滑翔就什么都不做，
-     * 服务端说停滑了才做一次「换鞘翅 → 起飞 → 换回胸甲」（{@link #flashSwapElytra()}）
-     *
-     * <p>外面只多一层史莱姆的「延后同步」（{@link ElytraLagSyncSupport}）：起飞包之后
-     * {@code 延后同步刻数} tick 内，服务端说停滑的同步包和 transaction ping 被扣住，
-     * 这一段里本地滑翔位一直是真、反作弊那边也一直认我们在滑翔
-     *
-     * <p>所以这一层同时是「本地不用立刻换甲」和「窗口内根本不换甲」：
-     * 换甲频率从 Grim 模式的「服务端一停滑就换」压到「每 {@code 延后同步刻数} tick 一次」，
-     * 新反作弊按甲飞频率抓人时就不会回弹
-     */
-    private static void grimLagTick() {
-        // 「允许手动切换暂停」（史莱姆 onArmorStateTick）：胸甲槽连续 5 tick 是真鞘翅 →
-        // 认定玩家自己穿上鞘翅在飞，暂停换甲；胸甲槽一不是鞘翅就恢复
-        if (grimLagHandControlOn() && mc.player.isFallFlying()
-            && isValidElytra(mc.player.getItemBySlot(EquipmentSlot.CHEST))) {
-            if (++grimLagChestElytraTicks >= GRIM_LAG_ABORT_TICKS) grimLagAbort = true;
-        } else {
-            grimLagChestElytraTicks = 0;
-            grimLagAbort = false;
-        }
-
-        // 暂停中：什么都不做（史莱姆 isCurrentArmorGliding() 为假时不换装）
-        if (grimLagAbort) return;
-
-        // 服务端说停滑了（开了延后同步时，是窗口结束、扣下的那一包放回来之后）→ 换一次甲 + 发起飞包。
-        // 本地滑翔位被 keepGlideDataValue 撑着一直是真，所以换甲时机只能看这个信号
-        if (ElytraLagSyncSupport.consumeTakeoffRequest()) {
-            grimLagTakeoff();
-            return;
-        }
-
-        // 兜底：起飞包发出去之后服务端一直没吭声（换装落空 / 包丢了），补一次换甲，
-        // 不然本地会一直「自以为在滑翔」地飞，服务端那边早就把我们当没滑翔（最后被当悬浮踢）
-        if (ElytraLagSyncSupport.shouldRetryTakeoff()) {
-            grimLagTakeoff();
-            return;
-        }
-
-        // 延后同步窗口内不换甲（兜底：窗口内不该有换甲请求，有也压到窗口结束）
-        if (ElytraLagSyncSupport.isDelayWindow()) {
-            wasFlying = true;
-            return;
-        }
-
-        // 下面就是 Grim 模式的懒逻辑：还在滑翔就什么都不做
-        if (mc.player.isFallFlying()) {
-            wasFlying = true;
-            return;
-        }
-
-        // 本地没在滑翔（首次起飞、落地后重新起飞）：换一次，和 Grim 模式一样
-        grimLagTakeoff();
-    }
-
-    /**
-     * Grim Lag 换一次甲：换进鞘翅 → 起飞包 → 换回胸甲（{@link #flashSwapElytra()}）
-     *
-     * <p>胸甲槽本来就是真鞘翅（玩家自己穿的、或上一轮没换回来）时就只补起飞包，不动背包 ——
-     * 走 {@code findElytra()} 找不到鞘翅会拐去 {@code swapBackChestplate()}，
-     * 那把玩家自己穿的鞘翅换成胸甲了
-     */
-    private static void grimLagTakeoff() {
-        wasFlying = true;
-
-        if (isValidElytra(mc.player.getItemBySlot(EquipmentSlot.CHEST))) {
-            sendStartFlying();
-            flushPendingFirework();
-            releaseOneKeyFirework();
-            releaseWindowFirework();
-            return;
-        }
 
         flashSwapElytra();
     }
@@ -2305,6 +2487,7 @@ public class ElytraFlySupport {
             takeoffRequested = false;
             takeoffRetryTicks = 0;
             autoSwappedElytra = false;
+            autoSwapRestorePending = false;
             return;
         }
 
@@ -2324,12 +2507,24 @@ public class ElytraFlySupport {
             takeoffRequested = false;
             takeoffRetryTicks = 0;
             if (autoFirework.get()) tryFireworkOnce();
+            // 这一轮也记成「触发过」：不管这件鞘翅是谁穿上的，收工时都换回胸甲
+            if (autoSwapElytra.get()) autoSwapRestorePending = true;
+        } else if (!flying && prevFlying && (autoSwapRestorePending || autoSwappedElytra)) {
+            // 退出滑翔（这一 tick 从滑翔变成没滑翔）：自动替换鞘翅只在这一刻把胸甲槽的鞘翅换回胸甲一次，
+            // 不管那件鞘翅是本模块换上去的还是玩家自己穿的；
+            // 不再每 tick 检查「不在滑翔」就换（那样落地后手动穿鞘翅也会被换掉）
+            swapBackChestplate();
+            autoSwappedElytra = false;
+            autoSwapRestorePending = false;
         }
         prevFlying = flying;
 
-        // 落地/进水：解除冻结；开了自动替换则把鞘翅换回胸甲
-        if (mc.player.onGround() || mc.player.isInWater()) {
-            // 滑翔贴地/入水：本地滑翔状态还在时不动手，等服务器广播停止滑翔后下 tick 再处理
+        // 落地：解除冻结；开了自动替换则把鞘翅换回胸甲
+        // 水里不算收工（仅限真鞘翅）：原版在水里只是改用流体运算移动，滑翔状态（isFallFlying）
+        // 并不会被清掉，服务端照样认滑翔、烟花也放得出，所以水里继续跑下面的合法控制；
+        // 只有「不在滑翔时泡在水里」才和落地一样收工（那时按跳跃键也不该去发起飞包，服务端必拒）
+        if (mc.player.onGround() || (mc.player.isInWater() && !mc.player.isFallFlying())) {
+            // 滑翔贴地：本地滑翔状态还在时不动手，等服务器广播停止滑翔后下 tick 再处理
             // （避免把滑翔擦地误判成落地，导致换装来回切换）
             Freeze.setExternalFrozen(false);
             if (mc.player.isFallFlying()) {
@@ -2342,9 +2537,11 @@ public class ElytraFlySupport {
             // 落地清掉还排着队的一键烟花（和 armorTick 的同一处一样）：
             // 空中没滑翔时排的那一发不该留到下一次起飞才放（「地面按一下、空中放一发」）
             cancelPendingManualFirework();
-            if (autoSwapElytra.get()) {
+            // 这一轮触发过的换装（起飞没成功就落地了）也还回去；已经收工后玩家自己再穿鞘翅不动它
+            if (autoSwapRestorePending || autoSwappedElytra) {
                 swapBackChestplate();
                 autoSwappedElytra = false;
+                autoSwapRestorePending = false;
             }
             return;
         }
@@ -2363,17 +2560,14 @@ public class ElytraFlySupport {
                 // 起飞未成功前按间隔自动重试（服务器拒绝起飞包时等几 tick 再重发），直到成功或落地。
                 if (jumpPressed && !takeoffRequested) {
                     takeoffRequested = true;
+                    // 记下这一轮触发过：收工时无条件把胸甲槽的鞘翅换回胸甲（玩家自己穿的也换）
+                    autoSwapRestorePending = true;
                     // 延后 1 tick 再换装+起飞：这一 tick 的输入包被压成全松开（见 shouldHideMoveInput），
                     // 换装点击到达服务端时输入不带移动键，Grim MultiActionsC 才不会把点击直接取消
                     //（取消 = 服务端没换成鞘翅、起飞被拒，只能重试）
                     autoSwapArmTicks = 1;
                 }
 
-                // 滑翔结束（服务器不再认滑翔，此时也没在请求起飞）：把鞘翅换回胸甲
-                if (!takeoffRequested && autoSwappedElytra) {
-                    swapBackChestplate();
-                    autoSwappedElytra = false;
-                }
                 if (!takeoffRequested) return;
                 // 等「输入全松开」那一 tick 过去（防 MultiActionsC 吃掉换装点击）
                 if (autoSwapArmTicks > 0) {
@@ -2468,11 +2662,14 @@ public class ElytraFlySupport {
         // 用「服务器认滑翔」的窗口判断（本地滑翔标志 或 本 tick/上一 tick 发过起飞包）。
         // 否则甲飞模式下方向控制根本不会执行：WASD 横向移动无效、
         // 烟花加速方向会跟着视觉朝向（俯仰也是相机俯仰）而不是平飞目标朝向。
-        if (serverSeesGliding()) {
-            legalFlightControl(forward, back, left, right);
-        } else {
-            // 服务器这一 tick 不认滑翔（换装窗口断开、起飞包还没生效、回弹自愈期间…）也照样转头
-            rotateArmorInAir(forward, back, left, right);
+        // 外部接管了方向控制（重锤光环）：这块整段让位（含悬停冻结），但上面的换装维持滑翔照跑
+        if (!externalControlSuspend) {
+            if (serverSeesGliding()) {
+                legalFlightControl(forward, back, left, right);
+            } else {
+                // 服务器这一 tick 不认滑翔（换装窗口断开、起飞包还没生效、回弹自愈期间…）也照样转头
+                rotateArmorInAir(forward, back, left, right);
+            }
         }
     }
 
@@ -2515,9 +2712,10 @@ public class ElytraFlySupport {
         int rotationPriority = legalRotationPriority == null
             ? LegalRotation.defaultPriority()
             : legalRotationPriority.get();
+        float yaw = calcLegalYaw(forward, back, left, right);
         LegalRotation.rotate(
-            calcLegalYaw(forward, back, left, right),
-            calcLegalPitch(jump, sneak),
+            yaw,
+            calcLegalPitch(jump, sneak, yaw),
             LegalRotation.Mode.QUIET,
             rotationPriority
         );
@@ -2595,7 +2793,7 @@ public class ElytraFlySupport {
         // ====== 有输入：飞行 ======
         // 先转向再解除冻结（同 tick）：避免解除冻结后先沿旧朝向移动再转头
         float targetYaw = calcLegalYaw(forward, back, left, right);
-        float targetPitch = calcLegalPitch(jump, sneak);
+        float targetPitch = calcLegalPitch(jump, sneak, targetYaw);
         // 优先级用「简单控制 → 合法转头优先级」（设置还没注入时退回 API 配置的默认优先级）：
         // 比这一份低的模块抢不过我们，比这一份高的模块会把我们这一 tick 的转向顶掉
         int rotationPriority = legalRotationPriority == null
@@ -2639,23 +2837,83 @@ public class ElytraFlySupport {
 
     /**
      * 计算目标俯仰：空格看天、潜行看地；配合方向键移动时斜着升/降（±45），
-     * 单独按（不移动）垂直升/降（∓90）；空格+潜行平飞（-3）、
-     * 仅移动时微俯 -1.9°（原版滑翔需要微俯视才有水平加速，保持速度不掉）。
+     * 单独按（不移动）垂直升/降（∓90）；空格+潜行平飞、仅移动平飞都是 0°。
+     * 两个平飞分支在「精确水平」开着且烟花加速中会换成能维持完全水平的角度
+     * （见 {@link #exactLevelPitch(float, float)}）。
      * 纯向上限制（无烟花+低速时空格不转向上）在飞行分支入口以悬停方式处理。
      */
-    private static float calcLegalPitch(boolean jump, boolean sneak) {
+    private static float calcLegalPitch(boolean jump, boolean sneak, float yaw) {
         float pitch = mc.player.getXRot();
         boolean moving = PlayerUtils.isMoving();
         if (sneak && jump) {
-            pitch = -3;
+            pitch = exactLevelPitch(0, yaw);
         } else if (jump) {
             pitch = moving ? -45 : -90;
         } else if (sneak) {
             pitch = moving ? 45 : 90;
         } else if (moving) {
-            pitch = -1.9f;
+            pitch = exactLevelPitch(0, yaw);
         }
         return Mth.clamp(pitch, -90, 90);
+    }
+
+    /**
+     * 精确水平：烟花加速中平飞时，把固定的微俯角换成「这一 tick 垂直速度恰好为 0」的俯仰角。
+     *
+     * <p>固定 0° 在烟花加速下并不是真的水平（滑翔运算的抬升项补不满重力，会慢慢下沉）。
+     * 这里直接用滑翔运算反解角度（越低头越往下，二分即可），
+     * 出发速度取烟花加速这一 tick 要设的那一份（加速模块没开就用当前实际速度）。
+     * 没开这个选项 / 不在烟花加速中时原样返回固定角。
+     */
+    private static float exactLevelPitch(float fallback, float yaw) {
+        if (legalExactLevel == null || !legalExactLevel.get()) return fallback;
+        if (mc.player == null || mc.level == null) return fallback;
+        if (!inFireworkGlideWindow() || !hasActiveOwnedFirework()) return fallback;
+
+        if (exactLevelPitchTick == mc.player.tickCount) return exactLevelPitchCache;
+
+        double speed = mc.player.getDeltaMovement().horizontalDistance();
+        FireworkBoost boost = Modules.get().get(FireworkBoost.class);
+        if (boost != null && boost.isActive() && fireworkBoostSpeed != null) {
+            speed = fireworkBoostSpeed.get();
+        }
+        speed = Math.max(0.1, speed);
+
+        float low = -20.0F;
+        float high = 20.0F;
+        for (int i = 0; i < 20; i++) {
+            float mid = (low + high) * 0.5F;
+            if (boostedTickVelocityY(mid, speed, yaw) > 0.0) {
+                low = mid;    // 还在往上飘，继续低头
+            } else {
+                high = mid;
+            }
+        }
+
+        exactLevelPitchTick = mc.player.tickCount;
+        exactLevelPitchCache = (low + high) * 0.5F;
+        return exactLevelPitchCache;
+    }
+
+    /**
+     * 精确水平反解用：指定俯仰下，这一 tick 烟花加速后实际会走出来的垂直速度。
+     * 和 {@link #applyFireworkBoost()} 走同一条路（含重缩放压缩/覆盖），保证反解的结果就是真实位移。
+     */
+    private static double boostedTickVelocityY(float pitch, double speed, float yaw) {
+        Vec3 look = mc.player.calculateViewVector(pitch, yaw);
+        Vec3 motion = look.scale(speed);
+        if (fireworkRescale == null || !fireworkRescale.get()) {
+            return calculateGlidingVelocity(mc.player, motion, look, true).y;
+        }
+
+        Vec3 savedOverride = fireworkRescaleOverride;
+        fireworkRescaleOverride = null;
+        Vec3 limited = applyFireworkRescale(motion, look, !mc.player.isNoGravity());
+        Vec3 override = fireworkRescaleOverride;
+        fireworkRescaleOverride = savedOverride;
+
+        if (override != null) return override.y;
+        return calculateGlidingVelocity(mc.player, limited, look, true).y;
     }
 
     /**
@@ -2804,7 +3062,304 @@ public class ElytraFlySupport {
     public static boolean isGlidingNow() {
         if (mc.player == null) return false;
         if (mc.player.isFallFlying()) return true;
-        return isArmorFlyActive() && serverSeesGliding();
+        // 必须看「甲飞真的在跑」（模块开着）：只看模式设置的话，关掉鞘翅飞行模块之后
+        // 「服务器认滑翔」的窗口还停在旧值上，拉升 / 渲染会一直以为人还在飞
+        return isArmorFlyEnabled() && serverSeesGliding();
+    }
+
+    // ====== 外部接管 / 外部起飞（重锤光环专用） ======
+
+    /**
+     * 外部模块（重锤光环）是否在接管滑翔：接管期间本类的简单控制 / 甲飞换装 / 无限鞘翅
+     * 全部让位，由重锤光环自己管转向、胸甲与起飞。
+     */
+    private static boolean externalTakeover = false;
+
+    /** 重锤光环每 tick 写入：锁定目标时置真，脱锁后置假 */
+    public static void setExternalTakeover(boolean on) {
+        if (on && !externalTakeover) {
+            // 接管瞬间解除「合法平飞悬停」留下的外部冻结：不清的话玩家会被冻住，
+            // 位置包被拦、烟花也放不出去（重锤光环自己管移动，不需要这个冻结）
+            Freeze.setExternalFrozen(false);
+        }
+        externalTakeover = on;
+    }
+
+    public static boolean isExternalTakeover() {
+        return externalTakeover;
+    }
+
+    /**
+     * 外部模块（重锤光环）是否只接管「方向控制」：接管期间本类不再自己转头
+     * （合法平飞的 WASD 转向、悬停冻结、原版模式的官方控制都让位），
+     * 但<b>甲飞的换装维持滑翔照常跑</b> —— 甲飞的滑翔就是靠它换装换来的，停了就掉下来了。
+     */
+    private static boolean externalControlSuspend = false;
+
+    public static void setExternalControlSuspend(boolean on) {
+        externalControlSuspend = on;
+    }
+
+    public static boolean isExternalControlSuspend() {
+        return externalControlSuspend;
+    }
+
+    /** 重锤光环最近一次外部起飞所在的 tick（-1000 表示没有；用 tick 差判断窗口，不依赖别处递减） */
+    private static int externalTakeoffTick = -1000;
+
+    /**
+     * 重锤光环的外部起飞是否在登记窗口内（起飞那一 tick + 下一 tick）。
+     * grim 输入包配对用它（起飞那一 tick 强制「按下跳跃」，见 {@link #shouldPressJumpInput()}）。
+     */
+    public static boolean isExternalTakeoffActive() {
+        if (mc.player == null) return false;
+        int delta = mc.player.tickCount - externalTakeoffTick;
+        return delta >= 0 && delta <= 1;
+    }
+
+    /** 重锤光环自己发了起飞包时登记窗口（不发包，只登记） */
+    public static void markExternalTakeoff() {
+        if (mc.player == null) return;
+        externalTakeoffTick = mc.player.tickCount;
+        noteTakeoffSent();
+    }
+
+    /**
+     * 重锤光环专用的起飞：发一个起飞包 + 登记「兼容 grim 输入检测」的输入序列
+     * （起飞包那一 tick 输入带「按下跳跃」，下一 tick 带「松开」，见 shouldHideJumpInput /
+     * shouldPressJumpInput）。不动甲飞的换装，胸甲槽上得先自己换成鞘翅。
+     */
+    public static void externalStartFlying() {
+        if (mc.player == null || mc.getConnection() == null) return;
+        sendStartFlying();
+        markExternalTakeoff();
+        markLocalGlideForExternalTakeoff();
+    }
+
+    /**
+     * 重锤光环「不配 grim 输入序列」的起飞：只发起飞包 + 登记窗口 + 本地置滑翔
+     * （关掉「兼容 grim 输入检测」时的老路子，不冒充输入包）
+     */
+    public static void externalStartFlyingPlain() {
+        if (mc.player == null || mc.getConnection() == null) return;
+        markExternalTakeoff();
+        mc.getConnection().send(new ServerboundPlayerCommandPacket(
+            mc.player, ServerboundPlayerCommandPacket.Action.START_FALL_FLYING));
+        markLocalGlideForExternalTakeoff();
+    }
+
+    // ====== 起飞包的发送时机（重锤光环 / 鞘翅弹跳合法模式共用） ======
+
+    /** 登记着、还没发出去的起飞包；null = 没有 */
+    private static Runnable pendingTakeoff;
+    /** 登记那一发时玩家的 tickCount（用来判断「是不是上一个 tick 留下的」） */
+    private static int pendingTakeoffTick;
+
+    /**
+     * 登记一发起飞，等本 tick 的输入包要发出去的那一刻再真正发包（见 {@link #flushPendingTakeoff()}）。
+     *
+     * <p>为什么不当场发：原版的输入包（{@code ServerboundPlayerInputPacket}）是在
+     * {@code LocalPlayer.tick} 里发的，而 Meteor 的 TickEvent.Pre 在 {@code Minecraft.tick} 最开头
+     * （整个实体 tick 之前）。从发起飞包到发「按下跳跃」输入包之间隔了几毫秒，这中间网络线程
+     * 随时可能把一个事务回包（pong）发出去 —— Grim 把 pong / tick 结束包也算「update」，
+     * 于是它变成「起飞包之后的第一个 update」，此时输入还是松开 → 报 ElytraB no jump + setback。
+     * 挪到输入包跟前发，这个窗口就没了。
+     *
+     * <p>兜底：输入类不是 {@code KeyboardInput}（别人换了输入实现）时那一 tick 不会 flush，
+     * 下一个 tick 的收尾会把这一发补出去（顺序仍然是「松开 → 起飞包 → 按下」，只是晚一个 tick）。
+     */
+    public static void requestTakeoff(Runnable sender) {
+        pendingTakeoff = sender;
+        pendingTakeoffTick = mc.player != null ? mc.player.tickCount : 0;
+    }
+
+    /** 丢掉还登记着、没发出去的那发起飞（关模块时用） */
+    public static void cancelPendingTakeoff() {
+        pendingTakeoff = null;
+    }
+
+    /**
+     * 把登记好的起飞包发出去。
+     * 由 {@link fish22.modernsupport.mixin.MixinElytraKeyboardInput} 在 {@code KeyboardInput#tick}
+     * 末尾调用：紧接着客户端就发本 tick 的输入包，两个包之间几乎挨着。
+     */
+    public static void flushPendingTakeoff() {
+        Runnable sender = pendingTakeoff;
+        if (sender == null) return;
+        pendingTakeoff = null;
+        sender.run();
+    }
+
+    /**
+     * 兜底：上一个 tick 登记的起飞还没发出去（输入类不是 {@code KeyboardInput}，那一 tick
+     * 没走 {@link #flushPendingTakeoff()}）就在这一 tick 开头补发。同 tick 登记的不管，
+     * 留给输入包前面那一发。
+     */
+    public static void flushStaleTakeoff() {
+        if (pendingTakeoff == null || mc.player == null) return;
+        if (mc.player.tickCount - pendingTakeoffTick < 1) return;
+        flushPendingTakeoff();
+    }
+
+    /**
+     * 外部模块（重锤光环）起飞前的「输入配对预备」。
+     *
+     * <p>模块在空中、还没滑翔、这一轮又要起飞时置真：从这一 tick 起输入包里的跳跃键就报
+     * 「松开」（见 {@link #shouldHideJumpInput}），等服务端看到这个松开包之后
+     * （{@link #skipStartThisTick()}）才允许发起飞包。起飞包那一 tick 再报「按下」
+     * （见 {@link #shouldPressJumpInput}），正好是 Grim ElytraB 要的「松开 → 起飞包 → 按下」。
+     *
+     * <p>只影响跳跃键，不影响 {@link #shouldHideMoveInput}（那个还是只看
+     * {@link #isExternalTakeoffActive()} 的两 tick 窗口）。
+     */
+    private static boolean externalTakeoffPending = false;
+
+    public static void setExternalTakeoffPending(boolean on) {
+        // 刚打开的这一轮：还没看到「松开跳跃」包，起飞包必须等（见 skipStartThisTick）。
+        // 只在这一轮的开头清一次，不能每 tick 都清 —— 每 tick 清的话那个放行状态永远推进不了
+        if (on && !externalTakeoffPending) jumpInputReleasedForStart = false;
+        externalTakeoffPending = on;
+    }
+
+    public static boolean isExternalTakeoffPending() {
+        return externalTakeoffPending;
+    }
+
+    /**
+     * 重锤光环「自动起飞」在地上按下的那一跳：只让本 tick 的输入包把跳跃键报成「按下」，
+     * 由原版自己起跳（服务端按输入包预测这一跳），玩家的按键映射一个字节都不动。
+     *
+     * <p>为什么不按 {@code options.keyJump.setDown(true)}：原版双击空格的检测（创造飞行开关、
+     * 鞘翅起飞）看的是「按键状态这一 tick 刚从松开变成按下」，我们把键一直按着就没有这个上升沿，
+     * 双击空格直接失效；也没法区分哪一份是玩家按的、哪一份是模块按的。
+     * 改成只在输入包里报一跳，玩家按键、别的模块读的按键状态都是原样。
+     *
+     * <p>写法见 {@link fish22.modernsupport.mixin.MixinElytraKeyboardInput}（和 grim 起飞
+     * 配对那一发「按下跳跃」同一条路），由重锤光环每 tick 先清零再按需置上。
+     */
+    private static boolean externalJumpInput = false;
+
+    public static void setExternalJumpInput(boolean on) {
+        externalJumpInput = on;
+    }
+
+    public static boolean shouldForceJumpInput() {
+        return externalJumpInput;
+    }
+
+    /** 服务端最近一次同步过来的滑翔位（FALL_FLYING）：true = 服务端认滑翔 */
+    private static boolean serverGlideFlag = false;
+
+    /**
+     * 上面那个滑翔位属于哪个玩家实例。
+     *
+     * <p>换世界 / 重生会换一个 LocalPlayer 实例，旧值不能沿用（新世界服务端不发滑翔位变化的话
+     * 就会一直以为「服务端还在认滑翔」，本地会把假滑翔标志补回去）
+     */
+    private static Player serverGlideFlagOwner;
+
+    /**
+     * 由 {@link fish22.modernsupport.mixin.MixinSynchedEntityData} 在应用实体数据前调用：
+     * 记下服务端这一包里的滑翔位（改写「继续滑翔」之前的那一份 = 服务端真实态度）。
+     */
+    public static void noteServerGlideFlag(boolean gliding) {
+        serverGlideFlag = gliding;
+        serverGlideFlagOwner = mc.player;
+    }
+
+    /** 服务端（最后一次同步）认不认滑翔 */
+    public static boolean serverSaysGliding() {
+        return serverGlideFlag && mc.player != null && mc.player == serverGlideFlagOwner;
+    }
+
+    /**
+     * 本地滑翔标志跟服务端对齐：服务端认滑翔、本地标志却掉了（回弹被清掉、原版没同步上）
+     * 就把本地补回来。
+     *
+     * <p>不补的话本地走普通空中运算、服务端（Grim）按滑翔运算预测，每个 tick 的位移都对不上，
+     * 表现就是一连串位置纠正（连续回弹），而且本地滑翔标志一直不回来，起飞包也发不出去
+     */
+    public static void relockLocalGlide() {
+        if (!serverSaysGliding() || mc.player == null) return;
+        if (mc.player.isFallFlying()) return;
+        if (mc.player.onGround() || mc.player.isPassenger() || mc.player.isSpectator()) return;
+        if (mc.player.getAbilities().flying || mc.player.isDeadOrDying()) return;
+        mc.player.startFallFlying();
+    }
+
+    /**
+     * 重锤光环自己发了起飞包之后，本地一并置成滑翔。
+     *
+     * <p>原版 {@code LocalPlayer.aiStep} 只在「本地没在滑翔 + 穿着鞘翅 + 本 tick 按下跳跃」
+     * 时才调 {@code tryToStartFallFlying()}，成功就补一个起飞包；重锤光环的起飞包是自己发的，
+     * 同一 tick 再来一发会被 Grim ElytraC 判「起飞过频」两个一起取消。本地先置成滑翔，
+     * 原版那次调用直接返回 false，一个 tick 就只有重锤光环发的那一发。
+     *
+     * <p>和甲飞 / 自动替换鞘翅同一套做法（那个 {@code Player#tryToStartFallFlying} 的 mixin 就是这么替代掉的）：
+     * 本地标志只是跟滑翔运算对齐，服务端到底认不认还是看同步回来的滑翔位，
+     * 起飞包被驳回时由起飞看门狗清掉重发。
+     */
+    public static void markLocalGlideForExternalTakeoff() {
+        if (mc.player == null || mc.player.isFallFlying()) return;
+        if (mc.player.onGround() || mc.player.isPassenger() || mc.player.isSpectator()) return;
+        if (mc.player.getAbilities().flying || mc.player.isDeadOrDying()) return;
+        mc.player.startFallFlying();
+    }
+
+    /**
+     * 收到位置纠正（回弹）后把本地滑翔标志和服务端对齐：
+     * 服务端认滑翔 → 本地补上（见 {@link #relockLocalGlide()}）；
+     * 服务端没在滑翔 → 本地那个是模块/原版自己伪造的标志，清掉，这样模块才会重新发起飞包
+     */
+    public static void realignGlideAfterSetback() {
+        if (mc.player == null || mc.player.onGround()) return;
+        if (serverSaysGliding()) relockLocalGlide();
+        else cancelLocalGliding();
+    }
+
+    /** 没发起过起飞包 */
+    private static final int TAKEOFF_WATCH_NONE = -1000;
+
+    /** 起飞看门狗：起飞包发出后这么多 tick 服务端还没同步滑翔位，就当这发起飞被驳回了 */
+    private static final int TAKEOFF_CONFIRM_TIMEOUT_TICKS = 6;
+
+    /** 我们（模块自己）最近一次发出起飞包的 tick，见 {@link #noteTakeoffSent()} */
+    private static int takeoffWatchTick = TAKEOFF_WATCH_NONE;
+
+    /**
+     * 模块自己发了起飞包时登记（只有外部起飞 / 鞘翅弹跳的起飞走这里，甲飞每 tick 的
+     * 换装起飞不受影响）。
+     */
+    public static void noteTakeoffSent() {
+        if (mc.player == null) return;
+        takeoffWatchTick = mc.player.tickCount;
+    }
+
+    public static void clearTakeoffWatch() {
+        takeoffWatchTick = TAKEOFF_WATCH_NONE;
+    }
+
+    /**
+     * 起飞看门狗（每 tick 调）。
+     *
+     * <p>起飞包发出后 {@value #TAKEOFF_CONFIRM_TIMEOUT_TICKS} tick 服务端还没把滑翔位同步回来
+     * （{@link #serverSaysGliding()} 还是假），说明这发起飞被反作弊/服务端驳回了。
+     * 这时本地那个滑翔标志（模块自己 {@code tryToStartFallFlying} 或原版客户端按跳跃时自己
+     * 置上的）是假的：不清掉模块会一直以为「已经在飞」，再也不发起飞包 ——
+     * 表现就是失败一次之后每次起飞都被驳回、只能关模块重开
+     *
+     * @return true 表示刚清掉一个假滑翔标志（调用方可以立刻重试）
+     */
+    public static boolean watchdogClearUnconfirmedTakeoff() {
+        if (mc.player == null || takeoffWatchTick == TAKEOFF_WATCH_NONE) return false;
+        if (serverSaysGliding()) {
+            takeoffWatchTick = TAKEOFF_WATCH_NONE;
+            return false;
+        }
+        if (mc.player.tickCount - takeoffWatchTick < TAKEOFF_CONFIRM_TIMEOUT_TICKS) return false;
+        takeoffWatchTick = TAKEOFF_WATCH_NONE;
+        if (mc.player.isFallFlying() && !mc.player.onGround()) cancelLocalGliding();
+        return true;
     }
 
     /** 拉升模块是否正在接管爬升角（它自己定角，V3 的爬升角校正不插手） */
@@ -2895,6 +3450,87 @@ public class ElytraFlySupport {
                 legalFwCooldown = interval;
             }
         });
+    }
+
+    // ====== 重锤光环：自动烟花 / 起飞自动烟花 ======
+
+    /** 重锤光环自动烟花：间隔到点排一发（等级选择同自动烟花，热栏第一个烟花优先） */
+    public static void tickMaceFirework() {
+        if (mc.player == null || maceFwIntervalLv1 == null) return;
+        if (takeoffFireworkPending) return;
+        if (legalFwCooldown > 0) {
+            legalFwCooldown--;
+            return;
+        }
+        int level = maceFireworkLevel();
+        if (level == -1) return;
+        queueMaceFirework(level, maceIntervalForLevel(level));
+    }
+
+    /**
+     * 重锤光环「起飞自动烟花」：重新起飞时补一发。
+     *
+     * <p>条件就是「现在没有烟花加速」或「当前这发烟花加速 2 tick 内就结束」——
+     * 还在加速中（剩余 &gt; 2）就不浪费烟花。每 tick 调，烟花一结束就补上，
+     * 正好覆盖「刚换回鞘翅、需要立刻加速爬升」的那几 tick。
+     */
+    public static boolean maceTakeoffFirework() {
+        if (mc.player == null || maceFwIntervalLv1 == null) return false;
+        int remaining = ownedFireworkRemainingTicks();
+        if (remaining > 2) return false;
+        int level = maceFireworkLevel();
+        if (level == -1) return false;
+        return queueMaceFirework(level, maceIntervalForLevel(level));
+    }
+
+    /** 重锤光环自动烟花挑等级：热栏第一个烟花的等级优先，其次最低可用等级 */
+    private static int maceFireworkLevel() {
+        boolean searchBackpack = maceBackpackFirework != null && maceBackpackFirework.get();
+        int hotbarLevel = getHotbarFireworkLevel();
+        if (hasFireworkOfLevel(hotbarLevel, searchBackpack)) return hotbarLevel;
+        for (int level = 1; level <= 3; level++) {
+            if (hasFireworkOfLevel(level, searchBackpack)) return level;
+        }
+        return -1;
+    }
+
+    /** 重锤光环自动烟花：按等级取释放间隔 */
+    private static int maceIntervalForLevel(int level) {
+        return switch (level) {
+            case 2 -> maceFwIntervalLv2.get();
+            case 3 -> maceFwIntervalLv3.get();
+            default -> maceFwIntervalLv1.get();
+        };
+    }
+
+    /** 重锤光环自动烟花：按等级释放一发（背包设置用重锤光环自己的） */
+    private static boolean tryUseMaceFireworkOfLevel(int level) {
+        Predicate<ItemStack> pred = fireworkOfLevel(level);
+        if (maceBackpackFirework != null && maceBackpackFirework.get()) {
+            return BackpackUse.use(pred, maceBackpackMode.get(), maceBackpackTarget.get());
+        }
+        return useFireworkFromHotbar(pred);
+    }
+
+    /**
+     * 重锤光环：排队一次释放。
+     * 接管期间身上是真鞘翅、服务器也认滑翔，按真鞘翅那套延后到移动包发送后释放；
+     * 没接管时才会落到甲飞的换装窗口队列（和鞘翅飞行的自动烟花共用同一套冷却，不会同 tick 双放）
+     */
+    private static boolean queueMaceFirework(int level, int interval) {
+        if (isFrozenNow()) return false;
+        if (isArmorFlyActive() && !externalTakeover) {
+            if (windowFwPendingLevel != -1) return false;
+            windowFwPendingLevel = level;
+            windowFwPendingInterval = interval;
+            return true;
+        }
+        LegalRotation.runAfterSend(() -> {
+            if (tryUseMaceFireworkOfLevel(level)) {
+                legalFwCooldown = interval;
+            }
+        });
+        return true;
     }
 
     /** 按烟花等级取飞行间隔 */
@@ -3115,11 +3751,6 @@ public class ElytraFlySupport {
     /** 这件东西能不能当滑翔装备用（鞘翅，或者带滑翔组件的胸甲） */
     private static boolean isValidElytra(ItemStack stack) {
         return stack.is(Items.ELYTRA) || stack.has(DataComponents.GLIDER);
-    }
-
-    /** 「允许手动切换暂停」是否开启（甲飞分组里的设置，没注入时按史莱姆默认「开」处理） */
-    private static boolean grimLagHandControlOn() {
-        return allowManualSwap == null || allowManualSwap.get();
     }
 
     /** 尝试起飞：本地检查 + 发包 */
@@ -3536,7 +4167,9 @@ public class ElytraFlySupport {
         // 末尾补的那发原地移动包就一定落在滑翔窗口里（下一 tick 开头换回胸甲，见 onTick）。
         // 换装没跑到这里（换甲冷却 / 开着容器 / Grim 模式认为还在滑翔）时请求留着，
         // 由 tickAntiKick 把计时退回 0，下一 tick 再试。
-        if (holdElytraRequested) {
+        // 「起飞限频绕过」：鞘翅绝不跨 tick 停留 —— 服务端那边按「跨 tick」给鞘翅记耐久
+        // （反无限耐久插件补的就是这个洞），所以这一支只在没开这个功能时走
+        if (holdElytraRequested && !ElytraLagSyncSupport.isEnabled()) {
             holdElytraRequested = false;
             // 保持几 tick 见 elytraHoldTicks：Grim 兼容模式要多等一 tick 躲开 MultiActionsC
             elytraHoldTicks = grimInputSequenceOn() ? 2 : 1;
@@ -3597,7 +4230,7 @@ public class ElytraFlySupport {
         // 重置「起飞包窗口」：接下来「换鞘翅后维持滑翔」这么多 tick 内即使某个 tick 没换成鞘翅，本地也照样按滑翔运算移动
         ticksSinceStartFlying = 0;
         mc.getConnection().send(new ServerboundPlayerCommandPacket(mc.player, ServerboundPlayerCommandPacket.Action.START_FALL_FLYING));
-        // 「Grim Lag」：起飞包是延迟窗口的锚点（史莱姆的 lastStartGlidingTick），顺带补反踢出 / 补 pong
+        // 「起飞限频绕过」：起飞包是窗口锚点（史莱姆的 lastStartGlidingTick）
         ElytraLagSyncSupport.onStartFlying();
     }
 
@@ -3628,6 +4261,25 @@ public class ElytraFlySupport {
         if (mc.player != null && mc.player.isFallFlying()) {
             mc.player.stopFallFlying();
         }
+    }
+
+    /**
+     * 甲飞收工（关掉整个模块 / 把「甲飞模式」切回关闭）时收掉本地那个由换装撑起来的滑翔位
+     *
+     * <p>甲飞靠每 tick「换鞘翅 → 发起飞包 → 换回胸甲」把服务端的滑翔位撑着，本地那份是模块
+     * 自己置上的假标志（「起飞限频绕过」还会把服务端发回来的「停滑」同步改回滑翔，本地标志
+     * 根本掉不下来）。模块一停，撑标志的那套就不跑了：本地继续按滑翔运算移动，而服务端那边
+     * 胸甲槽已经换回胸甲、自己停了滑翔（原版 {@code LivingEntity#updateFallFlying} 每 tick
+     * 检查「身上还有没有滑翔组件」），两端每 tick 位移都对不上 —— 就是停甲飞之后那串回弹。
+     * 这里在收工这一步主动清掉本地标志，跟着服务端一起停。
+     *
+     * <p>胸甲槽还穿着鞘翅（「合法 + 自动替换鞘翅」那件是玩家身上真的穿着的）时不动：
+     * 那是真滑翔，清了反而把本地和服务器拆开
+     */
+    public static void clearLocalGlideOnArmorStop() {
+        if (mc.player == null || mc.player.onGround()) return;
+        if (mc.player.getItemBySlot(EquipmentSlot.CHEST).has(DataComponents.GLIDER)) return;
+        cancelLocalGliding();
     }
 
     /** 指定手是否手持烟花 */

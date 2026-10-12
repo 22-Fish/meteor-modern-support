@@ -21,7 +21,7 @@ import java.util.function.Predicate;
 import static meteordevelopment.meteorclient.MeteorClient.mc;
 
 /**
- * 一键投掷（一键药水 / 一键卡墙）的公共部分
+ * 一键投掷（一键穿墙）的公共部分
  *
  * <p>按下快捷键把物品投出去一次，物品从哪来：
  * <ul>
@@ -39,6 +39,7 @@ public abstract class ThrowModule extends Module {
     private final Setting<Keybind> keybind;
     private final Setting<Double> pitch;
     private final Setting<Double> yawOffset;
+    private final Setting<Boolean> followMovement;
     private final Setting<Boolean> backpackUse;
     private final Setting<BackpackUse.Mode> backpackMode;
     private final Setting<BackpackUse.TargetSlot> backpackTarget;
@@ -68,6 +69,13 @@ public abstract class ThrowModule extends Module {
             .defaultValue(0.0)
             .range(-180, 180)
             .sliderRange(-180, 180)
+            .build()
+        );
+
+        followMovement = sgGeneral.add(new BoolSetting.Builder()
+            .name("跟随移动键")
+            .description("按着移动键时朝那个方向扔（W前/A左/S后/D右），不按就用上面的水平偏移")
+            .defaultValue(true)
             .build()
         );
 
@@ -121,7 +129,7 @@ public abstract class ThrowModule extends Module {
         // 开着容器（箱子之类）时不触发：背包交换的点击会点到容器菜单上
         if (mc.player.containerMenu.containerId != 0) return;
 
-        float yaw = mc.player.getYRot() + yawOffset.get().floatValue();
+        float yaw = mc.player.getYRot() + (float) throwYawOffset();
         float throwPitch = pitch.get().floatValue();
 
         if (backpackUse.get()) {
@@ -129,5 +137,21 @@ public abstract class ThrowModule extends Module {
         } else {
             BackpackUse.fromHotbar(target(), hand -> BackpackUse.useAngled(hand, yaw, throwPitch));
         }
+    }
+
+    /**
+     * 这次投掷的水平偏移（在朝向基础上偏多少度）
+     *
+     * <p>开了「跟随移动键」且按着移动键时，按移动方向算（W前 0、D右 +90、S后 180、A左 -90，
+     * 斜着走就是 45 那类角度）；没按移动键就用设置里的「水平偏移」
+     */
+    private double throwYawOffset() {
+        if (!followMovement.get()) return yawOffset.get();
+
+        double right = (mc.options.keyRight.isDown() ? 1 : 0) - (mc.options.keyLeft.isDown() ? 1 : 0);
+        double forward = (mc.options.keyUp.isDown() ? 1 : 0) - (mc.options.keyDown.isDown() ? 1 : 0);
+        if (right == 0 && forward == 0) return yawOffset.get();
+
+        return Math.toDegrees(Math.atan2(right, forward));
     }
 }

@@ -1,6 +1,7 @@
 package fish22.modernsupport.mixin;
 
 import fish22.modernsupport.utils.AutoSave;
+import fish22.modernsupport.utils.ModuleConfigs;
 import meteordevelopment.meteorclient.systems.modules.Modules;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
@@ -37,6 +38,8 @@ public abstract class MixinModules {
     @Inject(method = "load(Ljava/io/File;)V", at = @At("RETURN"))
     private void onLoadReturn(CallbackInfo ci) {
         AutoSave.setLoading(false);
+        // modules.nbt 读完之后才套用勾选的配置块：读之前套会被这次读取覆盖掉
+        ModuleConfigs.onModulesLoaded();
     }
 
     /**

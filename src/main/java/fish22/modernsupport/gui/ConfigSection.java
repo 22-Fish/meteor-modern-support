@@ -1,6 +1,7 @@
 package fish22.modernsupport.gui;
 
 import fish22.modernsupport.utils.ModuleConfigs;
+import fish22.modernsupport.utils.ConfigSaveMode;
 import fish22.modernsupport.utils.I18n;
 import meteordevelopment.meteorclient.gui.GuiTheme;
 import meteordevelopment.meteorclient.gui.widgets.containers.WContainer;
@@ -10,6 +11,7 @@ import meteordevelopment.meteorclient.gui.widgets.containers.WTable;
 import meteordevelopment.meteorclient.gui.widgets.containers.WVerticalList;
 import meteordevelopment.meteorclient.gui.widgets.pressable.WButton;
 import meteordevelopment.meteorclient.gui.widgets.pressable.WCheckbox;
+import meteordevelopment.meteorclient.gui.widgets.input.WDropdown;
 
 import java.util.List;
 
@@ -35,6 +37,12 @@ public class ConfigSection extends WVerticalList {
 
     private void rebuild() {
         clear();
+
+        // 保存时机: 每次变化保存 / 退出时保存
+        WHorizontalList saveRow = add(theme.horizontalList()).expandX().widget();
+        saveRow.add(theme.label(I18n.t("Text.config-save-mode", "保存时机")));
+        WDropdown<ConfigSaveMode> saveDropdown = saveRow.add(theme.dropdown(ConfigSaveMode.values(), ModuleConfigs.saveMode())).expandX().widget();
+        saveDropdown.action = () -> ModuleConfigs.setSaveMode(saveDropdown.get());
 
         // 顶部：当前勾选配置 + 新增配置按钮
         WHorizontalList top = add(theme.horizontalList()).expandX().widget();

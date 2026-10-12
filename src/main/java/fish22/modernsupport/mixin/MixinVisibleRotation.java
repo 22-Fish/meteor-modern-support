@@ -36,7 +36,7 @@ import static meteordevelopment.meteorclient.MeteorClient.mc;
  *
  * <p>合法转头全程只动「这一 tick 的移动运算与移动包」，视角角度、相机、鼠标输入都不变；
  * 所以第三视角里看到的一直是玩家自己的视角朝向，看不出服务器认为你在看哪。
- * 模块「合法转头API配置」的「可见旋转方向」（默认开启）就是补上这块显示。
+ * 模块「合法转头配置」的「可见旋转方向」（默认开启）就是补上这块显示。
  *
  * <p>做法是渲染状态上的覆盖：原版 {@code LivingEntityRenderer#extractRenderState}
  * 把实体角度抄进 {@code LivingEntityRenderState}（模型只认这份数据，相机不认），

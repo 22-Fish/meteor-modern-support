@@ -40,6 +40,7 @@
   "Setting.Meteor.standard-font-sharpness": "抗锯齿强度",
   "Setting.Meteor.standard-font-sharpness.Description": "把抗锯齿的灰边压实一点, 低分辨率下小字看着更清晰; 关闭 = 原样渲染, 越往右笔画越实.",
   "Text.StandardFontFailed": "标准字体加载失败, 继续用上一个能用的字体 (详见日志)",
+  "Text.config-save-mode": "保存时机",
 
   "Setting.Meteor.accent": "强调色",
   "Setting.Meteor.accent.Description": "GUI 的主要颜色.",

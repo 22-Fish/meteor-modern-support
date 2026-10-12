@@ -11,9 +11,9 @@ import meteordevelopment.meteorclient.settings.Setting;
 import meteordevelopment.meteorclient.settings.SettingGroup;
 import meteordevelopment.meteorclient.systems.modules.Categories;
 import meteordevelopment.meteorclient.systems.modules.Module;
-import meteordevelopment.meteorclient.systems.modules.Modules;
 import meteordevelopment.meteorclient.systems.modules.player.Rotation;
 import meteordevelopment.orbit.EventHandler;
+import fish22.modernsupport.utils.ElytraFlySupport;
 import fish22.modernsupport.utils.LegalRotation;
 import net.minecraft.network.protocol.game.ClientboundPlayerPositionPacket;
 import net.minecraft.network.protocol.game.ServerboundPlayerCommandPacket;
@@ -33,7 +33,7 @@ import static meteordevelopment.meteorclient.MeteorClient.mc;
  * 作者 Luna）：自动按住前进、锁定偏航与俯仰角持续滑翔，被反作弊回弹（收到位置纠正包）后
  * 按「重启延迟」自动重新起飞。
  *
- * <p>与「鞘翅飞行」互斥：两边都在控制滑翔，同时开只会互相打架。
+ * <p>与「鞘翅飞行」不互斥，两边可以同时开。
  *
  * <h3>模式</h3>
  * <ul>
@@ -54,6 +54,12 @@ import static meteordevelopment.meteorclient.MeteorClient.mc;
  * <h3>固定相机</h3>
  * 偏航/俯仰锁定不再转本地视角，改走「合法转头API-严格模式」：只把服务器看到的朝向转到
  * 锁定值，相机不动。偏航锁定为「智能」时按<b>相机角度</b>挑最接近的那个 45° 锁定值。
+ *
+ * <h3>起飞 / 回弹自愈</h3>
+ * 起飞包一律等离地第二 tick 再发（第一 tick 在 Grim 眼里「上一刻还在地上」，会被取消 + 强制回位）。
+ * 本地滑翔标志不再当准：服务端同步过来的滑翔位才是准的 —— 服务端认滑翔而本地掉了就补回来，
+ * 服务端没认而本地还挂着（起飞包被驳回，标志是自己 tryToStartFallFlying 伪造的）就清掉重发，
+ * 所以「起飞失败一次之后一直起不来、只能关模块重开」不会再出现
  */
 public class ElytraBounce extends Module {
 
@@ -152,7 +158,18 @@ public class ElytraBounce extends Module {
     private final Setting<Boolean> grimInput = sgGeneral.add(new BoolSetting.Builder()
         .name("兼容grim输入检测")
         .description("离地瞬间模拟按键输入包（先松开再按下）后再起飞，躲开 Grim 起飞包的输入检测")
-        .defaultValue(false)
+        .defaultValue(true)
+        .visible(this::legalMode)
+        .build()
+    );
+
+    /** 两次起飞尝试之间至少隔多少 tick（仅原版模式；从地面进空中那一次不受限） */
+    private final Setting<Integer> takeoffInterval = sgGeneral.add(new IntSetting.Builder()
+        .name("起飞尝试间隔")
+        .description("空中两次起飞尝试之间至少隔多少 tick：被驳回了也不会连着补包（连着补包就是连续回弹）")
+        .defaultValue(20)
+        .range(1, 20)
+        .sliderRange(1, 20)
         .visible(this::legalMode)
         .build()
     );
@@ -206,6 +223,15 @@ public class ElytraBounce extends Module {
     /** 本 tick 是不是刚离地（上一 tick 还在地面） */
     private boolean justLeftGround;
 
+    /** 离地后连续在空中多少 tick（落地清零）：起飞包要等这个够了才发，见 {@link #tickLegal()} */
+    private int airTicks;
+
+    /** 「想离地起飞」的意图锁：离地那一 tick 或按着跳跃时置上，发出起飞包（或落地）才清 */
+    private boolean takeoffWanted;
+
+    /** 起飞尝试间隔：还差多少 tick 才允许下一发起飞包（落地清零，见 onPreTick） */
+    private int takeoffCooldown;
+
     /** 落地维持滑翔：落地后强行维持本地滑翔状态的剩余 tick 数 */
     private int keepGlideTicks;
 
@@ -234,26 +260,27 @@ public class ElytraBounce extends Module {
 
     @Override
     public void onActivate() {
-        // 两边都在控制滑翔，同时开只会互相打架：开这个就把「鞘翅飞行」关掉
-        Module elytraFly = Modules.get().get(ElytraFlyPlus.class);
-        if (elytraFly != null && elytraFly.isActive()) elytraFly.toggle();
-
         active = this;
         prevFov = mc.options.fovEffectScale().get();
         rubberbanded = false;
         tickDelay = restartDelay.get();
         prevOnGround = mc.player != null && mc.player.onGround();
         keepGlideTicks = 0;
+        takeoffCooldown = 0;
         resetGrimInput();
     }
 
     @Override
     public void onDeactivate() {
         unpress();
+        ElytraFlySupport.cancelPendingTakeoff();
         rubberbanded = false;
         if (active == this) active = null;
         justLeftGround = false;
+        airTicks = 0;
+        takeoffWanted = false;
         keepGlideTicks = 0;
+        takeoffCooldown = 0;
         resetGrimInput();
         if (prevFov != 0 && !sprint.get()) mc.options.fovEffectScale().set(prevFov);
     }
@@ -263,10 +290,22 @@ public class ElytraBounce extends Module {
         if (mc.player == null) return;
         if (checkConditions() && sprint.get()) mc.player.setSprinting(true);
 
+        // 兜底：上一 tick 登记的起飞没发出去（输入类不是 KeyboardInput）就在这一 tick 补发
+        ElytraFlySupport.flushStaleTakeoff();
+
         boolean onGround = mc.player.onGround();
         justLeftGround = prevOnGround && !onGround;
         boolean landed = onGround && !prevOnGround;
         prevOnGround = onGround;
+        if (onGround) {
+            airTicks = 0;
+            takeoffWanted = false;
+            // 落地就是新的一轮：进空中那一次照常起飞，不隔间隔（间隔只管空中重试）
+            takeoffCooldown = 0;
+        } else {
+            airTicks++;
+        }
+        if (takeoffCooldown > 0) takeoffCooldown--;
 
         // 落地维持滑翔：落地那一 tick 起强行维持本地滑翔状态「维持tick」那么多 tick。
         // 只在水平速度够快时启用：速度慢了服务端预测本来就能对上，维持滑翔反而会被拉回
@@ -283,6 +322,11 @@ public class ElytraBounce extends Module {
                 forceKeepGlide();
             }
         }
+
+        // 起飞看门狗：起飞包被反作弊驳回时（服务端一直没同步滑翔位），本地那个滑翔标志
+        // 是模块自己 tryToStartFallFlying 伪造的，清掉才能重新发起飞包 ——
+        // 不清的话 tickLegal 开头就把「已经在飞」当成真的，之后再也不会补包
+        if (!keepGlideActive()) ElytraFlySupport.watchdogClearUnconfirmedTakeoff();
 
         if (legalMode()) tickLegal();
 
@@ -381,12 +425,33 @@ public class ElytraBounce extends Module {
         // 地面 / 条件不满足（水里、骑乘、爬梯、创造飞行…）：输入原样上报，不起飞
         if (mc.player.onGround() || !checkConditions()) return;
 
-        // 已经本地滑翔、又不是刚离地 / 没排队的重启：不补包（合法模式不每 tick 维持滑翔）
-        if (mc.player.isFallFlying() && !grimTakeoffPending && !justLeftGround) return;
+        // 服务端说在滑翔、本地标志却掉了（回弹被清掉 / 还没同步上）：先把本地补回来。
+        // 不补的话本地走普通空中运算、服务端按滑翔预测，每个 tick 都对不上 = 连续回弹
+        ElytraFlySupport.relockLocalGlide();
+
+        // 服务端已经在滑翔：这一发起飞包不用碰（发了 Grim 判 ElytraA already gliding 直接取消，
+        // 原版服务端那边还会 stopFallFlying 把滑翔打断）—— 本地标志对齐就行
+        if (ElytraFlySupport.serverSaysGliding() && !justLeftGround) {
+            takeoffWanted = false;
+            grimTakeoffPending = false;
+            return;
+        }
+
+        // 本地滑翔、又不是刚离地 / 没排队的重启：不补包（合法模式不每 tick 维持滑翔）
+        if (mc.player.isFallFlying() && !grimTakeoffPending && !justLeftGround) {
+            // 已经在飞：这一轮的「想起飞」用掉了
+            takeoffWanted = false;
+            return;
+        }
 
         boolean keyTakeoff = autoJump.get() || mc.options.keyJump.isDown();
         boolean wantTakeoff = manualTakeoff.get() ? grimTakeoffPending : (keyTakeoff || justLeftGround);
-        if (!wantTakeoff) return;
+        if (wantTakeoff) takeoffWanted = true;
+        if (!takeoffWanted) return;
+
+        // 离地第一 tick 不发起飞包：Grim 那边「上一刻还在地上」会取消起飞包 + 强制回位，
+        // 等第二 tick（服务端那边 lastOnGround 已经翻假）再发
+        if (airTicks < 2) return;
 
         // 兼容 grim 输入检测：还没轮到「松开」窗口就先排队，这一 tick 只让输入包带「松开」，
         // 下一 tick 窗口开了再发（落地维持滑翔时本地一直是滑翔，靠排队才补得上这一发）
@@ -395,11 +460,23 @@ public class ElytraBounce extends Module {
             return;
         }
 
+        // 起飞尝试间隔：空中被驳回了也不会隔几 tick 连着补包。
+        // 必须排在「本地置滑翔」之前：本地置了滑翔却不发包，服务端没滑翔，本地滑翔运算
+        // 每个 tick 都对不上，又是一串回弹
+        if (takeoffCooldown > 0) return;
+
         // 本地起不来（没穿鞘翅 / 水里）：这一 tick 先不起飞，下一 tick 再试
         if (!mc.player.isFallFlying() && !mc.player.tryToStartFallFlying()) return;
 
-        sendStartFlying();
+        // 真的登记了一发才算一次「起飞尝试」
+        takeoffCooldown = takeoffInterval.get();
+
+        // 起飞包不当场发：登记到「本 tick 输入包要发出去」的那一刻（见 ElytraFlySupport#requestTakeoff），
+        // 免得起飞包和「按下跳跃」输入包之间空出几毫秒，让服务端的事务回包被当成
+        // 「起飞后的第一个 update」判 ElytraB no jump（一次标记就是一次回弹）
+        ElytraFlySupport.requestTakeoff(this::sendStartFlying);
         grimTakeoffPending = false;
+        takeoffWanted = false;
         if (grimOn()) grimPressTick = true;
     }
 
@@ -513,7 +590,11 @@ public class ElytraBounce extends Module {
         if (mc.player == null) return;
         if (event.packet instanceof ClientboundPlayerPositionPacket) {
             rubberbanded = true;
-            mc.player.stopFallFlying();
+            // 位置纠正后把本地滑翔标志和服务端对齐，不能无条件清：
+            // 服务端真在滑翔时把本地清掉，本地就按普通空中运算走，和服务端的滑翔预测
+            // 每个 tick 都对不上 → 又是一发位置纠正 …… 越修越回弹，只能关模块重开。
+            // 落地维持滑翔那几 tick 本地标志是故意撑着的，那时不动它
+            if (!keepGlideActive()) ElytraFlySupport.realignGlideAfterSetback();
         }
     }
 
@@ -537,6 +618,8 @@ public class ElytraBounce extends Module {
         if (mc.getConnection() == null) return;
         mc.getConnection().send(new ServerboundPlayerCommandPacket(
             mc.player, ServerboundPlayerCommandPacket.Action.START_FALL_FLYING));
+        // 起飞看门狗起点：服务端几 tick 内没同步滑翔位就当这发起飞被驳回了（见 ElytraFlySupport）
+        ElytraFlySupport.noteTakeoffSent();
     }
 
     /** 当前是否满足弹跳飞行的条件（官方 checkConditions） */

@@ -1,5 +1,6 @@
 package fish22.modernsupport.modules;
 
+import fish22.modernsupport.utils.SilentSwitch;
 import meteordevelopment.meteorclient.events.entity.player.DoItemUseEvent;
 import meteordevelopment.meteorclient.events.entity.player.FinishUsingItemEvent;
 import meteordevelopment.meteorclient.MeteorClient;
@@ -42,7 +43,8 @@ import static meteordevelopment.meteorclient.MeteorClient.mc;
  *       颜色从「初始颜色」慢慢过渡到「结束颜色」</li>
  *   <li><b>长按仅进食一个</b>：按住右键吃完一份就不再吃，得松开重新按右键</li>
  *   <li><b>工具自动进食</b>：手里拿着工具右键时，自动从快捷栏或背包里拿一份食物过来吃，
- *       吃完不管右键还按着没有都换回原样</li>
+ *       吃完不管右键还按着没有都换回原样。快捷栏里有食物时可以开「静默切换」：
+ *       本地选中槽位一动不动，只让服务端拿着食物那一格</li>
  *   <li><b>单次点击进食</b>：右键点一下就自动把这一份吃完，切槽位 / 被别的模块打断 / 吃完就停</li>
  * </ul>
  *
@@ -148,6 +150,14 @@ public class EatModify extends Module {
         .build()
     );
 
+    private final Setting<Boolean> silentSwitch = sgTool.add(new BoolSetting.Builder()
+        .name("静默切换")
+        .description("快捷栏里拿食物时不切本地槽位，只让服务端拿着食物那一格（本地选中槽位和画面都不动）")
+        .defaultValue(true)
+        .visible(toolEat::get)
+        .build()
+    );
+
     // ==================== 运行状态 ====================
 
     /** 吃完一份后要松开右键才能再吃（长按仅进食一个） */
@@ -176,6 +186,9 @@ public class EatModify extends Module {
 
     /** 快捷栏吃着的时候，吃完要切回哪一格 */
     private int restoreSlot = -1;
+
+    /** 工具自动进食是不是走的静默切换（走静默的话本地槽位从头到尾没动过） */
+    private boolean silentEating;
 
     /** 换回对账用的槽位（主背包区） */
     private int verifySrc = -1;
@@ -207,12 +220,14 @@ public class EatModify extends Module {
     @Override
     public void onActivate() {
         resetState();
+        SilentSwitch.start();
     }
 
     @Override
     public void onDeactivate() {
         // 关模块前把手上的工具换回去，别把工具留在背包里
         endToolEat();
+        SilentSwitch.stop();
         autoEating = false;
         autoSlot = -1;
         waitRelease = false;
@@ -240,7 +255,8 @@ public class EatModify extends Module {
         }
 
         // 单次点击进食：记下这次右键，之后松开也接着把这一份吃完
-        if (clickOnce.get() && !autoEating && isConsumable(mainHand)) {
+        // 主手副手都算：副手拿食物时原版也是右键就开吃（主手优先，原版自己决定用哪只手）
+        if (clickOnce.get() && !autoEating && (isConsumable(mainHand) || isConsumable(offHand))) {
             autoEating = true;
             autoSlot = mc.player.getInventory().getSelectedSlot();
             return;
@@ -275,6 +291,9 @@ public class EatModify extends Module {
             return;
         }
 
+        // 工具自动进食（静默切换）：每 tick 续租一次，服务端一直拿着食物那一格
+        if (toolEating && silentEating && foodHotbarSlot >= 0) SilentSwitch.keep(foodHotbarSlot);
+
         // 右键松开了，「只吃一个」的锁解除
         if (waitRelease && !mc.options.keyUse.isDown()) waitRelease = false;
 
@@ -290,11 +309,21 @@ public class EatModify extends Module {
             autoSlot = -1;
         }
 
-        // 保险：早就过了该吃完的时间还挂在「正在使用」上（服务器没回包之类）→ 真停掉，别卡住
-        if (autoEating && !mc.options.keyUse.isDown() && mc.player.getUseItemRemainingTicks() < -40) {
+        // 保险：早就过了该吃完的时间还挂在「正在使用」上（服务器没回包 / 这一口被切槽打断之类）→ 真停掉，别卡住
+        // 长按右键也照停：按着不放正好是这个状态的高发场景，要求松手才肯停的话，一按就是一直卡着
+        if ((autoEating || toolEating) && mc.player.isUsingItem() && mc.player.getUseItemRemainingTicks() < -40) {
             autoEating = false;
             autoSlot = -1;
-            if (mc.player.isUsingItem()) mc.gameMode.releaseUsingItem(mc.player);
+            if (holdOne.get() && mc.options.keyUse.isDown()) waitRelease = true;
+
+            // 放行这一下：不然会被 keepUsing 拦掉（autoEating 刚清掉、toolEating + 单次点击还在），
+            // 客户端就一直挂在「正在使用」，下面换回工具那一步永远走不到
+            releasing = true;
+            try {
+                mc.gameMode.releaseUsingItem(mc.player);
+            } finally {
+                releasing = false;
+            }
         }
 
         // 工具自动进食：进食停了（吃完 / 被打断 / 松开右键）→ 换回工具
@@ -320,7 +349,8 @@ public class EatModify extends Module {
         // 原版快捷栏格子：左边 = 屏幕中心 - 91 + 槽位*20，上边 = 屏幕高 - 22
         // 物品是画在格子左上角 +3 处的 16x16，也就是物品中心在格子 +11 处，
         // 所以「框」是绕着物品中心的 22x22（左右上下各比物品多 3 像素），这里就按这个来盖
-        int slot = mc.player.getInventory().getSelectedSlot();
+        // 进度条画在「服务端认的那一格」：静默切换进食时食物在那一格，本地选中槽位没动
+        int slot = Math.max(0, SilentSwitch.slot());
         int left = event.screenWidth / 2 - 91 + slot * 20;
         int bottom = event.screenHeight - 22 + 22;
 
@@ -345,8 +375,17 @@ public class EatModify extends Module {
             if (!result.found() || result.isMainHand() || result.isOffhand()) continue;
 
             foodHotbarSlot = result.slot();
-            restoreSlot = mc.player.getInventory().getSelectedSlot();
-            selectSlot(foodHotbarSlot);
+
+            // 静默切换：本地选中槽位一个字都不动，只让服务端拿着食物那一格
+            if (silentSwitch.get()) {
+                // 记一份回来用的槽位：收尾要明确把服务端钉回这格（本地槽位真被带跑了也能切回来）
+                restoreSlot = mc.player.getInventory().getSelectedSlot();
+                silentEating = true;
+                SilentSwitch.keep(foodHotbarSlot);
+            } else {
+                restoreSlot = mc.player.getInventory().getSelectedSlot();
+                selectSlot(foodHotbarSlot);
+            }
             beginToolEating();
             return;
         }
@@ -387,6 +426,12 @@ public class EatModify extends Module {
         if (!toolEating) return;
         toolEating = false;
 
+        // 静默切换吃的：放开接管，服务端切回原来那格（工具本来就还在手上）
+        if (silentEating) {
+            silentEating = false;
+            silentToolBack();
+        }
+
         // 主背包换过来的：换回原槽位（换回去之后原手持格又是工具）
         if (srcSlot >= 0 && swapButton >= 0 && mc.player != null) {
             verifySrc = srcSlot;
@@ -405,10 +450,31 @@ public class EatModify extends Module {
             selectSlot(restoreSlot);
         }
 
+        // 还按着右键就把「只吃一个」的锁打上：这一口要是没走到「用完物品」事件（被切槽打断之类），
+        // 长按就会立刻重吃下一份、食物格一直被按住、工具一直切不回来
+        if (holdOne.get() && mc.options.keyUse.isDown()) waitRelease = true;
+
         srcSlot = -1;
         swapButton = -1;
         foodHotbarSlot = -1;
         restoreSlot = -1;
+    }
+
+    /**
+     * 静默接管收尾：保证服务端手持物切回原来那格
+     * <p>
+     * 不能只调 {@link SilentSwitch#release()}：静默期间只要有别人发过换手包（插件把那一下同步回来了、
+     * 玩家自己切了格），记账就被作废成「没接管」，release() 那一份就不发包了 —— 服务端会一直停在
+     * 食物那格，本地槽位一动不动，看起来就是「切不回去」
+     * <p>
+     * 所以先把原来那格明确交给服务端（记账没了/拿着别的都会真发这一包），再放开接管
+     */
+    private void silentToolBack() {
+        int back = restoreSlot;
+        if (back < 0 && mc.player != null) back = mc.player.getInventory().getSelectedSlot();
+
+        if (back >= 0 && back <= 8) SilentSwitch.keep(back);
+        SilentSwitch.release();
     }
 
     /** 食物优先级：列表里有金苹果就先金苹果，其余按列表顺序 */
@@ -471,6 +537,11 @@ public class EatModify extends Module {
     }
 
     private void resetState() {
+        // 静默切换吃着的时候被打断（换世界、掉线之类）：先把服务端放回本地槽位
+        if (silentEating) {
+            silentEating = false;
+            silentToolBack();
+        }
         waitRelease = false;
         autoEating = false;
         autoSlot = -1;

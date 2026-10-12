@@ -92,6 +92,8 @@ public abstract class MixinSettings {
             if ((legacyFlags & LEGACY_ARMOR_MODE) != 0) addLegacyArmorMode(freshGroups);
             // 老配置用的是官方的「发包」平飞：现在归「无限鞘翅·发包」，给无限鞘翅板块补上模式=发包
             if ((legacyFlags & LEGACY_PACKET_MODE) != 0) addLegacyPacketMode(freshGroups);
+            // 老配置用的是「Grim Lag」模式：现在 = Grim模式 + 打开「延后同步」
+            if ((legacyFlags & LEGACY_GRIM_LAG_MODE) != 0) addLegacyDelaySync(freshGroups);
 
             tag.put("groups", freshGroups);
         } catch (Exception ignored) {
@@ -107,14 +109,20 @@ public abstract class MixinSettings {
     @Unique
     private static final int LEGACY_PACKET_MODE = 2;
 
+    /** migrateSettingTags 的返回值：老配置选的是已删掉的「Grim Lag」模式（现在 = Grim模式 + 延后同步） */
+    @Unique
+    private static final int LEGACY_GRIM_LAG_MODE = 4;
+
     /**
      * 老 tag 里的设置名/枚举值改名。
      *
-     * @return {@link #LEGACY_ARMOR_MODE} / {@link #LEGACY_PACKET_MODE} 的位或
+     * @return {@link #LEGACY_ARMOR_MODE} / {@link #LEGACY_PACKET_MODE} / {@link #LEGACY_GRIM_LAG_MODE} 的位或
      */
     @Unique
     private static int migrateSettingTags(CompoundTag groupTag) {
         int flags = 0;
+        // 「Grim Lag」那堆设置里已经删掉的项，循环结束后从 tag 里摘掉
+        ListTag retired = new ListTag();
 
         for (Tag settingTagRaw : groupTag.getListOrEmpty("settings")) {
             if (!(settingTagRaw instanceof CompoundTag settingTag)) continue;
@@ -146,10 +154,57 @@ public abstract class MixinSettings {
                 // 老的「无限鞘翅」开关 → 新的「无限鞘翅模式」（开 = 换甲，关 = 关闭）
                 settingTag.putString("name", "无限鞘翅模式");
                 settingTag.putString("value", value.equals("true") ? "换甲" : "关闭");
+            } else if (name.equals("甲飞模式") && value.equals("Grim Lag")) {
+                // 已删掉的「Grim Lag」模式 → 「Grim模式」（延后同步由 addLegacyDelaySync 补上）
+                settingTag.putString("value", "Grim模式");
+                flags |= LEGACY_GRIM_LAG_MODE;
+            } else if (name.equals("Grim Lag: 启用延后同步")) {
+                settingTag.putString("name", "起飞限频绕过");
+            } else if (name.equals("Grim Lag: 延后同步刻数")) {
+                settingTag.putString("name", "绕过窗口刻数");
+            } else if (name.equals("延后同步")) {
+                // 「延后同步」已改名为「起飞限频绕过」
+                settingTag.putString("name", "起飞限频绕过");
+            } else if (name.equals("延后同步刻数")) {
+                // 「延后同步刻数」已改名为「绕过窗口刻数」
+                settingTag.putString("name", "绕过窗口刻数");
+            } else if (name.startsWith("Grim Lag: ")) {
+                // 其余「Grim Lag: xxx」设置已经删掉了，留着只会一直是失效项
+                retired.add(settingTag);
             }
         }
 
+        if (!retired.isEmpty()) {
+            ListTag settings = groupTag.getListOrEmpty("settings");
+            settings.removeAll(retired);
+            groupTag.put("settings", settings);
+        }
+
         return flags;
+    }
+
+    /** 给「甲飞」分组补一条 起飞限频绕过=true（老配置用「Grim Lag」模式时调用，那一模式默认就是开着的） */
+    @Unique
+    private static void addLegacyDelaySync(ListTag groups) {
+        for (Tag groupTagRaw : groups) {
+            if (!(groupTagRaw instanceof CompoundTag groupTag)) continue;
+            if (!groupTag.getStringOr("name", "").equals("甲飞")) continue;
+
+            ListTag settings = groupTag.getListOrEmpty("settings");
+            for (Tag settingTagRaw : settings) {
+                if (settingTagRaw instanceof CompoundTag settingTag
+                    && settingTag.getStringOr("name", "").equals("起飞限频绕过")) {
+                    return; // 老配置里本来就有一条（上面改过名），不覆盖
+                }
+            }
+
+            CompoundTag delaySyncTag = new CompoundTag();
+            delaySyncTag.putString("name", "起飞限频绕过");
+            delaySyncTag.putString("value", "true");
+            settings.add(delaySyncTag);
+            groupTag.put("settings", settings);
+            return;
+        }
     }
 
     /** 给「无限鞘翅」分组补一条 无限鞘翅模式=发包（老配置用官方发包平飞时调用） */

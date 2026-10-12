@@ -26,11 +26,18 @@ import meteordevelopment.meteorclient.settings.Setting;
 import net.minecraft.network.Connection;
 import net.minecraft.network.PacketListener;
 import net.minecraft.network.protocol.Packet;
+import net.minecraft.network.protocol.common.ClientboundDisconnectPacket;
+import net.minecraft.network.protocol.common.ClientboundKeepAlivePacket;
 import net.minecraft.network.protocol.common.ClientboundPingPacket;
+import net.minecraft.network.protocol.common.ClientboundTransferPacket;
 import net.minecraft.network.protocol.common.ServerboundPongPacket;
 import net.minecraft.network.protocol.game.ClientboundBundlePacket;
+import net.minecraft.network.protocol.game.ClientboundRespawnPacket;
 import net.minecraft.network.protocol.game.ClientboundSetEntityDataPacket;
+import net.minecraft.network.protocol.game.ClientboundStartConfigurationPacket;
+import net.minecraft.network.protocol.game.ServerboundPlayerCommandPacket;
 import net.minecraft.network.syncher.SynchedEntityData;
+import net.minecraft.world.entity.Entity;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -40,58 +47,40 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import static meteordevelopment.meteorclient.MeteorClient.mc;
 
 /**
- * 「Grim Lag」甲飞的频率限制层（史莱姆 {@code ElytraExtra} 的 max-delay-ticks / 延后同步）
+ * 甲飞的「起飞限频绕过」（史莱姆 {@code ElytraExtra} 的 max-delay-ticks / 飞行状态同步延后刻数）
  *
- * <p><b>内核不是这里，是 Grim 模式本身</b>：{@link ElytraFlySupport} 的 Grim Lag 分支照抄
- * Grim 模式（本地还在滑翔就什么都不做，服务端说停滑了才做一次「换鞘翅 → 起飞 → 换回胸甲」）
- *
- * <p>还有一件同样是史莱姆那套的前提：<b>本地全程认自己在滑翔</b>
- * （史莱姆 {@code handleEntityDataUpdate} 把同步数据里的滑翔位改回 1，注释里写着
- * 「may cause fake gliding !!! must be careful」）。本地滑翔位一旦掉假，客户端就退回普通空中
- * 运算，而服务端 / 反作弊那边（被我们扣住的 transaction）还认滑翔 —— 两端每 tick 位移都对不上，
- * 表现就是「每 tick 被拉回、位置钉在原地、最后被原版当悬浮踢掉」。
- * 起飞时本地置一次滑翔（{@link #onStartFlying()}），此后停滑同步包一律改回 1（{@link #keepGlideDataValue}）
- *
- * <p>这里只负责把「服务端说停滑」这个信号延后几 tick 再交给内核：
+ * <p>照搬史莱姆 {@code onArmorGlideDelay} + {@code onPacketPing}：起飞包发出之后
+ * {@code 绕过窗口刻数} tick 内，收到「服务端说我们不在滑翔」的自身同步包就把入站包整段扣住，
+ * 并把这一轮 transaction 的 pong 压到窗口结束才补发
  *
  * <ol>
- *   <li><b>扣住停滑同步包</b>：服务端说我们不在滑翔，是随自身实体同步包来的（滑翔位清零）。
- *       扣下它，本地 {@code isFallFlying()} 就还是真，内核（Grim 模式）自然不换甲；</li>
- *   <li><b>扣住 transaction ping</b>：Grim 把这条状态挂在 transaction 上
- *       （{@code PacketSelfMetadataListener} → {@code addRealTimeTask}），
- *       要等这一发 ping 的 pong 从我们这边绕回去才真正应用。扣下 ping，pong 就发不出去，
- *       反作弊那边这几 tick 也一直认我们在滑翔 —— 我们本地照旧按滑翔运算移动，
- *       两边不会分叉；</li>
- *   <li><b>窗口到了按原顺序放包</b>：放包这一下就是史莱姆的换甲时机
- *       （{@code thisTickTickStartFallFly} 那一手），内核在下一 tick 换一次甲，
- *       起飞包重新支起下一个窗口。本地滑翔位全程由 {@link #keepGlideDataValue} 撑着，不掉假。</li>
+ *   <li>起飞包发出（记窗口锚点，史莱姆的 {@code lastStartGlidingTick}）</li>
+ *   <li>窗口内收到「服务端说我们不在滑翔」的自身同步包 → 开始整段扣包
+ *       （史莱姆的 {@code currentDelaying}），并记住最近那一发 transaction ping</li>
+ *   <li>扣包期间客户端回出去的 pong 一律不发（史莱姆的 {@code onPacketPing}）
+ *       Grim 的滑翔状态挂在这条 transaction 上（{@code PacketSelfMetadataListener} → {@code addRealTimeTask}），
+ *       pong 不出去它就一直认我们在滑翔，起飞/停滑的节奏因此被压下来</li>
+ *   <li>刻数一到：把压住的那一发 ping 补处理一次（客户端这时才回 ack，反作弊那边此刻才推进），
+ *       再按原顺序放回扣下的包 —— 放包这一下就是换甲时机（{@link #consumeTakeoffRequest()}）</li>
  * </ol>
  *
- * <p>效果就是新反作弊抓不到的东西：服务端看到的「起飞 → 停滑」节奏从每 tick 一次
- * 降到每「延后同步刻数」tick 一次（旧版那套「换甲太高频会被回弹」正是栽在频率上）
+ * <p>还有史莱姆 {@code handleEntityDataUpdate} 的另一半，缺了它这套是废的：
+ * <b>本地也不认这个「停滑」位</b>（{@link #keepGlideDataValue()} 把它改回 1，
+ * 史莱姆那段注释写着 may cause fake gliding !!! must be careful）。
+ * 不挡的话窗口一结束本地滑翔位就掉，客户端改用普通空中运算，服务端那边却已经认滑翔 ——
+ * 两边各算各的，就是被位置纠正的那个位移差
  *
- * <p>只扣这两类包，其它入站包照常处理，所以不会有史莱姆整段扣包那种卡顿 / 回拉
+ * <p>只有会话类包例外（keep-alive 直接放行、断开/复活/重配置/传送到来时把扣下的全放掉）
  */
 public final class ElytraLagSyncSupport {
 
     // ====== 设置引用（鞘翅飞行模块创建设置后注入） ======
 
-    /**
-     * 「启用延后同步」：史莱姆那个 max-delay-ticks 是「可选项」（默认不启用，值是 5）
-     *
-     * <p>对应史莱姆 {@code armorGlideMaxDelayTicks} 的 {@code present} 位：关掉就完全不动入站包，
-     * 换甲节奏按 Grim 模式本身走
-     */
+    /** 「起飞限频绕过」*/
     public static Setting<Boolean> enabled;
 
-    /** 「延后同步刻数」：起飞包之后这么多 tick 内，停滑同步包与 transaction ping 一律扣下（史莱姆的 max-delay-ticks） */
+    /** 「绕过窗口刻数」：起飞包之后这么多 tick 内的入站包扣住*/
     public static Setting<Integer> syncDelayTicks;
-
-    /** 「反踢出」：发过起飞包的那一 tick 强制发一发带完整坐标的移动包（史莱姆的 anti-kick / resyncPos） */
-    public static Setting<Boolean> antiKick;
-
-    /** 「补 pong」：起飞包后补一发哨兵 pong，放包时再补一发被扣 ping 的同 id pong（史莱姆的 GrimBadPacket 修复） */
-    public static Setting<Boolean> pongFix;
 
     // ====== 常量 ======
 
@@ -101,14 +90,8 @@ public final class ElytraLagSyncSupport {
     /** 共享标志位里「滑翔」那一位的位号（原版 {@code Entity#FALL_FLYING_FLAG_INDEX}） */
     private static final int FALL_FLYING_FLAG_INDEX = 7;
 
-    /** 起飞包后补的那发 pong 用的哨兵 id（史莱姆的 {@code Integer.MIN_VALUE}） */
-    private static final int BAD_PACKET_PONG_ID = Integer.MIN_VALUE;
-
-    /** 「延后同步刻数」没注入时的兜底值（史莱姆默认 5） */
+    /** 「绕过窗口刻数」没注入时的兜底值 */
     private static final int DEFAULT_SYNC_DELAY_TICKS = 5;
-
-    /** 兜底重试间隔（tick）：起飞包之后这么久都没等到「服务端说停滑」，就按「起飞包没被认」重试 */
-    private static final int STALL_RETRY_TICKS = 20;
 
     // ====== 状态 ======
 
@@ -130,54 +113,63 @@ public final class ElytraLagSyncSupport {
     /** 最近一发起飞包发出的 tick（窗口锚点，史莱姆的 {@code lastStartGlidingTick}） */
     private static volatile int lastStartGlidingTick = Integer.MIN_VALUE / 2;
 
-    /** 最近一发收到的 transaction ping（「补 pong」用，史莱姆的 {@code lastTransactionRecv} 那一手） */
+    /** 最近一发收到的 transaction ping（史莱姆的 {@code lastTransactionRecv} 那一手） */
     private static volatile Packet<?> lastPingPacket;
     private static volatile Connection lastPingConnection;
 
-    /** 反踢出：本 tick 的移动包要带完整坐标（史莱姆的 {@code resyncPos}） */
-    private static volatile boolean forcePositionPacket;
+    /** 本轮触发那一刻的那一发 ping（史莱姆注入同 id ping 用的就是它；放包时补的就是这一发） */
+    private static volatile Packet<?> delayedPingPacket;
+    private static volatile Connection delayedPingConnection;
 
-    /** 服务端说我们停滑了 → 该换一次甲了（史莱姆在同步包处理里当场换甲） */
+    /** 压 pong 中：扣包窗口里客户端回出去的 transaction pong 一律不发（史莱姆的 {@code onPacketPing}） */
+    private static volatile boolean suppressPong;
+
+    /** 自己补发的包不参与压 pong 判断 */
+    private static volatile boolean bypassPongSuppress;
+
+    /** 服务端说我们停滑了 → 该换一次甲了（史莱姆在 {@code handleEntityDataUpdate} 里当场换） */
     private static volatile boolean takeoffRequested;
-
-    /** 这一轮起飞之后有没有收到过「服务端说停滑」（一直收不到 = 起飞包没被服务端认，得重试） */
-    private static volatile boolean stopGlideSinceStart = true;
 
     private ElytraLagSyncSupport() {
     }
 
     // ====== 状态查询 ======
 
-    /** 甲飞模式是不是「Grim Lag」且模块真的在跑 */
-    public static boolean isGrimLag() {
-        return ElytraFlySupport.armorMode != null
-            && ElytraFlySupport.armorMode.get() == ElytraFlySupport.ArmorMode.GrimLag
+    /**
+     * 「起飞限频绕过」现在生不生效：开关开着 + 甲飞模式是「Grim模式」+ 模块真的在跑
+     *
+     * <p>它接的就是 Grim模式 的节奏（服务端说停滑才换甲），所以只配 Grim模式 用
+     */
+    public static boolean isEnabled() {
+        return enabled != null && enabled.get()
+            && ElytraFlySupport.armorMode != null
+            && ElytraFlySupport.armorMode.get() == ElytraFlySupport.ArmorMode.Lazy
             && ElytraFlySupport.isArmorFlyEnabled();
-    }
-
-    /** 现在是不是「延后同步」窗口内（Grim Lag 的换甲间隔就是它，内核靠它压频率） */
-    public static boolean isDelayWindow() {
-        return isGrimLag() && delayTicks() > 0 && inWindow();
-    }
-
-    /** 反踢出：本 tick 的移动包要不要强制带完整坐标 */
-    public static boolean shouldForcePositionPacket() {
-        return forcePositionPacket;
-    }
-
-    /** 兜底：起飞包发出去之后一直没等到「服务端说停滑」，说明这一发没被服务端认（换装落空 / 包丢了），补一次 */
-    public static boolean shouldRetryTakeoff() {
-        return isGrimLag() && !stopGlideSinceStart && tick - lastStartGlidingTick >= STALL_RETRY_TICKS;
     }
 
     /**
      * 本地是不是「不认服务端停滑广播」的状态（{@code MixinSynchedEntityData} 用）
      *
-     * <p>史莱姆 {@code handleEntityDataUpdate} 在 TICK 模式下就是把同步数据里的滑翔位改回 1：
-     * 客户端全程滑翔，换甲时机另由这一包触发。照搬
+     * <p>史莱姆 {@code handleEntityDataUpdate} 就是把同步数据里的滑翔位改回 1：客户端全程滑翔，
+     * 换甲时机由那一包触发。照搬
+     *
+     * <p>落地（本地 onGround）不算：人已经站在地上了，服务端那边「停滑」是正常结算，
+     * 再把这个位撑住就变成落地还挂着滑翔，接着就是位置纠正
      */
     public static boolean isKeepingGlide() {
-        return isGrimLag() && mc.player != null && mc.player.isFallFlying();
+        return isEnabled() && mc.player != null && mc.player.isFallFlying() && !mc.player.onGround();
+    }
+
+    /**
+     * 渲染用：本地这个被撑住的假滑翔位要不要把人物摆成趴着的滑翔姿势
+     * （由 {@link fish22.modernsupport.mixin.MixinElytraGlideAnimation} 在
+     * {@code AvatarRenderer#extractFlightData} 入口调用）
+     *
+     * <p>只在「本地滑翔位是被我们撑着的」时候成立（{@link #isKeepingGlide()}）；
+     * 真滑翔（本地标志来自服务器同步）不干预，趴着是对的
+     */
+    public static boolean shouldSuppressGlideAnimation(Entity entity) {
+        return entity != null && entity == mc.player && isKeepingGlide();
     }
 
     /** 把同步数据里的滑翔位改回 1（史莱姆 {@code handleEntityDataUpdate} 那一手） */
@@ -189,7 +181,7 @@ public final class ElytraLagSyncSupport {
     }
 
     /**
-     * 取走「该换甲了」的请求（换甲成功 / 换不了都会清掉，下一次停滑同步再请求）
+     * 取走「服务端说停滑了，该换一次甲了」（内核在 Grim模式 那一支里消费）
      */
     public static boolean consumeTakeoffRequest() {
         if (!takeoffRequested) return false;
@@ -199,21 +191,23 @@ public final class ElytraLagSyncSupport {
 
     // ====== 生命周期 ======
 
-    /** 每 tick（主线程）：窗口一过就把扣下的包放回去；不在 Grim Lag 时把状态清干净 */
+    /** 每 tick（主线程）：窗口一过就补 pong、把扣下的包按原顺序放回去；不在用就把状态清干净 */
     public static void onPreTick() {
         tick++;
-        forcePositionPacket = false;
 
-        if (!isGrimLag()) {
-            if (delaying || !heldPackets.isEmpty()) reset();
+        if (!isEnabled()) {
+            if (delaying || !heldPackets.isEmpty() || suppressPong) reset();
             return;
         }
         if (mc.player == null) return;
 
-        // 窗口到期：先停扣包，再按原顺序把扣下的包补处理。放包这一下就是「服务端说停滑」，
-        // 内核在紧接着的 grimLagTick 里换一次甲（本地滑翔位由 keepGlideDataValue 撑着，不掉假）
+        // 刻数满了：先停扣包，补一发压住的 pong（「停滑」在反作弊那边此刻才推进），
+        // 再按原顺序把扣下的包补处理 —— 那一发停滑这时才被处理，补处理时把「该换甲了」
+        // 记下来，内核在同一 tick 稍后的 armorTick 里换一次甲
         if (delaying && !inWindow()) {
             delaying = false;
+            suppressPong = false;
+            replyDelayedPing();
             flushHeld();
         }
     }
@@ -221,103 +215,124 @@ public final class ElytraLagSyncSupport {
     /** 模块开启 / 关掉：清状态并把还扣着的包放掉（不能吞包，keep-alive 之类还等着处理） */
     public static void reset() {
         delaying = false;
-        forcePositionPacket = false;
+        suppressPong = false;
+        replyDelayedPing();
+        flushHeld();
         takeoffRequested = false;
         lastStartGlidingTick = Integer.MIN_VALUE / 2;
-        stopGlideSinceStart = true;
         lastPingPacket = null;
         lastPingConnection = null;
-        flushHeld();
+        delayedPingPacket = null;
+        delayedPingConnection = null;
     }
 
-    /** 发出起飞包：窗口锚点 + 反踢出 + 补 pong（史莱姆 {@code onPlayerCommand} 记 START_FALL_FLYING 那一手） */
+    /** 发出起飞包：记下窗口锚点（史莱姆 {@code onPlayerCommand} 记 START_FALL_FLYING 那一手） */
     public static void onStartFlying() {
-        if (!isGrimLag()) return;
-        // 每发一发起飞包都重新计时，窗口跟着换甲节奏走
+        if (!isEnabled()) return;
         lastStartGlidingTick = tick;
-        stopGlideSinceStart = false;
-        // 反踢出：这一 tick 的移动包带完整坐标
-        if (antiKickOn()) forcePositionPacket = true;
-        // GrimBadPacket 修复：起飞包后补一发哨兵 pong
-        if (pongFixOn()) sendPong(BAD_PACKET_PONG_ID);
-        // 本地全程认自己在滑翔（史莱姆的 fake gliding）：起飞这一下本地也置成滑翔，
-        // 之后服务端发来的停滑同步包由 keepGlideDataValue 改回 1，本地滑翔位就不会再掉
-        if (mc.player != null && !mc.player.isFallFlying()) mc.player.startFallFlying();
     }
 
-    // ====== 收包（延后同步就发生在这一步） ======
+    // ====== 收包（扣包就发生在这一步） ======
 
     /**
      * 收包监听：在 {@link ElytraFlySupport#onPacketReceive} 最前面调用
      *
-     * <p>只在窗口内动手，而且只扣两类包：服务端说我们不在滑翔的自身实体同步包
-     * （一出现本轮就开始扣）、以及紧接着那一发 transaction ping。
-     * 其余入站包（世界、别人、位置纠正）一律照常，不卡客户端。
+     * <p>窗口内看到「服务端说我们不在滑翔」的自身同步包就开始整段扣包，
+     * 一直到窗口结束；窗口外才到的停滑同步不扣，内核当 tick 就地换甲（和没开这个功能一样）
      */
     public static void onReceive(PacketEvent.Receive event) {
-        if (!isGrimLag()) {
-            if (delaying || !heldPackets.isEmpty()) reset();
+        // 自己放出来的包（窗口结束时的补处理）：这一发就是「服务端说停滑」→ 换甲信号
+        if (replaying) {
+            if (isSelfStopGliding(event.packet)) takeoffRequested = true;
+            return;
+        }
+
+        if (!isEnabled()) {
+            if (delaying || !heldPackets.isEmpty() || suppressPong) reset();
             return;
         }
         if (mc.player == null) return;
 
-        // 自己放出来的包（延迟窗口结束时的补处理）：这一发就是「服务端说停滑」→ 换甲信号
-        if (replaying) {
-            if (isSelfStopGliding(event.packet)) {
-                stopGlideSinceStart = true;
-                takeoffRequested = true;
-            }
-            return;
-        }
-
-        // 本轮已经在扣包：服务端紧接着发来的 transaction ping 一起扣下（pong 发不出去，
-        // Grim 的 addRealTimeTask 就一直不执行）；「补 pong」也要用这一发
-        if (delaying && event.packet instanceof ClientboundPingPacket) {
+        // 史莱姆 onArmorGlideDelay 的第一行：记下最近一发收到的 transaction ping
+        //（「停滑」这一下就挂在它的 transaction 上，窗口结束时补的就是它）
+        if (event.packet instanceof ClientboundPingPacket) {
             lastPingPacket = event.packet;
             lastPingConnection = event.connection;
+        }
+
+        // 本轮已经在扣包：整段扣下
+        if (delaying) {
+            // 断开 / 复活 / 重配置 / 传送：会话状态要变了，扣下的全放掉，这一包照常处理
+            if (isSessionReset(event.packet)) {
+                reset();
+                return;
+            }
+            // keep-alive 不能等，直接放行（窗口继续，它不属于要被压状态的那条链）
+            if (event.packet instanceof ClientboundKeepAlivePacket) return;
+
             hold(event);
             return;
         }
 
-        if (!isSelfStopGliding(event.packet)) return;
-
-        stopGlideSinceStart = true;
-
-        // 服务端说我们停滑了：
-        // 窗口内 → 这一包扣下（本地滑翔位不变假，反作弊那边也停在滑翔），窗口结束放回来时才换甲
-        // 窗口外（没启用延后同步 / 网络比窗口还慢）→ 当场记一次换甲请求，本 tick 就换
-        if (delayTicks() > 0 && inWindow()) {
+        // 窗口内收到「服务端说我们不在滑翔」→ 开始整段扣包（这一发也在里面），
+        // 同时把这一轮的 pong 压住，到窗口结束才补发（史莱姆 currentDelaying）
+        if (isArmorGliding() && inWindow() && isSelfStopGliding(event.packet)) {
             delaying = true;
+            suppressPong = true;
+            delayedPingPacket = lastPingPacket;
+            delayedPingConnection = lastPingConnection;
             hold(event);
+        }
+    }
+
+    /**
+     * 发包监听：在 {@link ElytraFlySupport#onPacketSend} 最前面调用
+     *
+     * <p>两件事，都是史莱姆那套的前提：
+     * <ul>
+     *   <li>任何发出去的起飞包都刷窗口锚点（史莱姆在 {@code PlayerStateManager} 里监听 c2s 的
+     *       {@code START_FALL_FLYING}，原版客户端自己补的那一发也算）</li>
+     *   <li>扣包窗口里客户端回出去的 transaction pong 一律不发（史莱姆 {@code onPacketPing}
+     *       在 pre-handle 点取消那一发 ping，这里改在出口拦同一发 pong，效果一样），
+     *       窗口结束由 {@link #replyDelayedPing()} 补出去</li>
+     * </ul>
+     */
+    public static void onSend(PacketEvent.Send event) {
+        if (!isEnabled()) return;
+
+        if (event.packet instanceof ServerboundPlayerCommandPacket cmd
+            && cmd.getAction() == ServerboundPlayerCommandPacket.Action.START_FALL_FLYING) {
+            lastStartGlidingTick = tick;
             return;
         }
-        takeoffRequested = true;
+
+        if (suppressPong && !bypassPongSuppress && event.packet instanceof ServerboundPongPacket) {
+            event.cancel();
+        }
     }
 
     // ====== 内部 ======
 
-    /** 延后同步是否启用（史莱姆 max-delay-ticks 的 present 位） */
-    private static boolean delayOn() {
-        return enabled != null && enabled.get();
-    }
-
-    /** 窗口长度（tick）：起飞包之后这么多 tick 内的包扣下（没启用就是 0，等于不延迟） */
+    /** 窗口长度（tick）：起飞包之后这么多 tick 内的入站包扣住 */
     private static int delayTicks() {
-        if (!delayOn()) return 0;
         return syncDelayTicks == null ? DEFAULT_SYNC_DELAY_TICKS : Math.max(0, syncDelayTicks.get());
-    }
-
-    private static boolean antiKickOn() {
-        return antiKick == null || antiKick.get();
-    }
-
-    private static boolean pongFixOn() {
-        return pongFix == null || pongFix.get();
     }
 
     /** 还在「起飞包之后」的窗口里（史莱姆：{@code tick - lastStartGlidingTick < maxDelayTicks}） */
     private static boolean inWindow() {
         return tick - lastStartGlidingTick < delayTicks();
+    }
+
+    /**
+     * 史莱姆 {@code onArmorGlideDelay} 的第一道门 {@code isCurrentArmorGliding()}：
+     * 甲飞真的在维持滑翔（服务端此刻认我们滑翔）才配这一手
+     *
+     * <p>不这道门的话，锚点过期、人已落地之类的时候也会开始扣包，白白把客户端掐住
+     */
+    private static boolean isArmorGliding() {
+        if (!ElytraFlySupport.isArmorFlyEnabled() || mc.player == null) return false;
+        if (mc.player.onGround() || mc.player.isPassenger() || mc.player.isSpectator()) return false;
+        return mc.player.isFallFlying() || ElytraFlySupport.serverSaysGliding();
     }
 
     /** 扣下这一包：取消本 tick 的处理，塞进队列等窗口过了再放 */
@@ -331,7 +346,7 @@ public final class ElytraLagSyncSupport {
      *
      * <p>先重发一次收包事件（别的模块照常看到这一包），没被取消就交给原版处理。
      * 必须在主线程调用：原版客户端的收包处理自己会检查线程（{@code PacketUtils#ensureRunningOnSameThread}），
-     * 在这里调用就是「这一包刚到」。
+     * 在这里调用就是「这一包刚到」
      */
     private static void flushHeld() {
         if (heldPackets.isEmpty()) return;
@@ -358,16 +373,42 @@ public final class ElytraLagSyncSupport {
                 MeteorClient.EVENT_BUS.post(event);
                 if (!event.isCancelled()) handleRaw(packet, connection);
             } catch (Throwable t) {
-                ModernSupport.LOG.warn("[甲飞] Grim Lag 放包失败: {}",
+                ModernSupport.LOG.warn("[甲飞] 起飞限频绕过放包失败: {}",
                     packet.getClass().getSimpleName(), t);
             } finally {
                 replaying = false;
             }
         }
+    }
 
-        // 「补 pong」：扣下的那一发 ping 再处理一次，客户端就再补一发同 id 的 pong
-        // （史莱姆往队列里注入重复 ping 的效果），把 transaction 计数往前顶一格
-        if (pongFixOn()) replyLastPing();
+    /**
+     * 把压住的那一发 ping 补处理一次：客户端这时才发出它对应的 pong
+     *
+     * <p>史莱姆的做法是往入站队列里注入一发同 id 的 {@code CommonPingS2CPacket}；这里直接
+     * 再走一遍那一发原 ping，客户端同样会补出一发同 id 的 pong（反作弊那边「停滑」此刻才推进）
+     *
+     * <p>故意不走 {@code PacketEvent.Receive}：这是我们自己补的，别的模块不该再看到一次
+     */
+    private static void replyDelayedPing() {
+        if (!mc.isSameThread()) {
+            mc.execute(ElytraLagSyncSupport::replyDelayedPing);
+            return;
+        }
+
+        Packet<?> packet = delayedPingPacket;
+        Connection connection = delayedPingConnection;
+        delayedPingPacket = null;
+        delayedPingConnection = null;
+        if (packet == null || connection == null || !connection.isConnected()) return;
+
+        bypassPongSuppress = true;
+        try {
+            handleRaw(packet, connection);
+        } catch (Throwable t) {
+            ModernSupport.LOG.warn("[甲飞] 起飞限频绕过补 pong 失败", t);
+        } finally {
+            bypassPongSuppress = false;
+        }
     }
 
     @SuppressWarnings({"rawtypes", "unchecked"})
@@ -381,7 +422,7 @@ public final class ElytraLagSyncSupport {
      * 这一包是不是「服务端说我们不在滑翔」的自身实体同步
      *
      * <p>只认自身实体的共享标志位、滑翔位被清零。服务端会把这种同步包打在 bundle 里发，
-     * 所以 bundle 也拆开看。
+     * 所以 bundle 也拆开看
      */
     private static boolean isSelfStopGliding(Packet<?> packet) {
         if (mc.player == null) return false;
@@ -404,33 +445,17 @@ public final class ElytraLagSyncSupport {
         return false;
     }
 
-    /** 「补 pong」：再处理一次被扣下的那一发 ping（客户端因此再回一发同 id 的 pong） */
-    private static void replyLastPing() {
-        Packet<?> packet = lastPingPacket;
-        Connection connection = lastPingConnection;
-        lastPingPacket = null;
-        lastPingConnection = null;
-        if (packet == null || connection == null || !connection.isConnected()) return;
-
-        replaying = true;
-        try {
-            handleRaw(packet, connection);
-        } catch (Throwable t) {
-            ModernSupport.LOG.warn("[甲飞] Grim Lag 补 pong 失败", t);
-        } finally {
-            replaying = false;
-        }
+    /** 会话状态要变的包：扣着它们会把客户端 / 连接卡死 */
+    private static boolean isSessionReset(Packet<?> packet) {
+        return packet instanceof ClientboundDisconnectPacket
+            || packet instanceof ClientboundTransferPacket
+            || packet instanceof ClientboundStartConfigurationPacket
+            || packet instanceof ClientboundRespawnPacket;
     }
 
-    /** 补一发哨兵 pong（史莱姆的 GrimBadPacket 修复） */
-    private static void sendPong(int id) {
-        if (mc.getConnection() == null) return;
-        mc.getConnection().send(new ServerboundPongPacket(id));
-    }
-
+    /** 复制一份同步数据项、把值换掉（原版 {@code DataValue} 是 record，只能新建） */
     @SuppressWarnings({"unchecked", "rawtypes"})
     private static SynchedEntityData.DataValue<?> withValue(SynchedEntityData.DataValue<?> item, Object value) {
         return new SynchedEntityData.DataValue(item.id(), item.serializer(), value);
     }
-
 }

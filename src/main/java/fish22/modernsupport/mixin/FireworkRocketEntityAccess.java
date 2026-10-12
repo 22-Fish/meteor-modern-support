@@ -20,4 +20,12 @@ public interface FireworkRocketEntityAccess {
     static EntityDataAccessor<OptionalInt> meteor$getDataAttachedToTarget() {
         throw new AssertionError();
     }
+
+    /** 烟花已经活了多久（tick）；配合 {@link #meteor$getLifetime()} 算剩余寿命 */
+    @Accessor("life")
+    int meteor$getLife();
+
+    /** 烟花总共能活多久（tick） */
+    @Accessor("lifetime")
+    int meteor$getLifetime();
 }

@@ -1,6 +1,7 @@
 package fish22.modernsupport.mixin;
 
 import fish22.modernsupport.utils.SettingAccessor;
+import fish22.modernsupport.utils.AutoSave;
 import meteordevelopment.meteorclient.settings.Setting;
 import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
@@ -27,6 +28,12 @@ public abstract class MixinSetting implements SettingAccessor {
     private void onInit(CallbackInfo ci) {
         originalTitle = title;
         originalDescription = description;
+    }
+
+    /** 设置值变化（set/parse/reset 都会走这里）→ 通知自动保存 */
+    @Inject(method = "onChanged", at = @At("HEAD"))
+    private void modernsupport$autoSave(CallbackInfo ci) {
+        AutoSave.onChanged();
     }
 
     @Override

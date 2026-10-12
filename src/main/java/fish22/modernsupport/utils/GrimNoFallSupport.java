@@ -19,135 +19,161 @@
 
 package fish22.modernsupport.utils;
 
-import fish22.modernsupport.ModernSupport;
 import meteordevelopment.meteorclient.MeteorClient;
+import meteordevelopment.meteorclient.events.entity.player.SendMovementPacketsEvent;
 import meteordevelopment.meteorclient.events.packets.PacketEvent;
+import meteordevelopment.meteorclient.mixin.LivingEntityAccessor;
+import meteordevelopment.meteorclient.utils.player.ChatUtils;
 import meteordevelopment.orbit.EventHandler;
-import net.minecraft.network.protocol.game.ClientboundPlayerPositionPacket;
 import net.minecraft.network.protocol.game.ServerboundMovePlayerPacket;
-import net.minecraft.world.entity.PositionMoveRotation;
-import net.minecraft.world.entity.ai.attributes.Attributes;
-import net.minecraft.world.phys.Vec3;
 
 import static meteordevelopment.meteorclient.MeteorClient.mc;
 
 /**
  * Meteor 官方「无摔伤」（NoFall）模块「Grim」模式的逻辑
  *
- * <p>这就是史莱姆（SlimefunHelper）里 LAZY_GRIM_PLUS 那一套（NoFallGrimLazyPlus / 作者标注在
- * loyisa 4.9 能跑的那版 V2），按 Meteor 的事件重写了一遍：
+ * <p>搬的是史莱姆（SlimefunHelper）里作者标了「works on loyisa」的那一版
+ * {@code NoFallGrimLazyPlus}（配置里的 {@code LAZY_GRIM_PLUS}），不是后面的 V2
  *
- * <ol>
- *   <li><b>落地那一 tick</b>：客户端已经踩在地上、服务端还以为你在空中 ——
- *       拦下客户端自己那一发落地位置包，只补一发「只报落地状态、不带坐标」的包。
- *       这一发会被 Grim 的 NoFall 检查认成「空中报落地」，Grim 会把它改成 onGround=false
- *       再回一发位置纠正包（就是我们等的回弹），所以服务端那边不会真的结算这次落地；</li>
- *   <li>客户端 X/Z 换成服务端记的那一份（史莱姆那套），本地按落地记，进入等回弹状态；</li>
- *   <li><b>等回弹期间</b>：客户端自己的坐标包一律不发，改发「抬高 {@value #DELTA_Y}、声称还在空中」
- *       的包 —— 26.1 服务端在处理带坐标的包时，只要这个包的 Y 比它记的高（movedUpwards）
- *       就把摔伤距离清零（{@code Entity#resetFallDistance}），所以这段等待里服务端那条摔伤距离一直是 0。
- *       回弹没落地之前发别的坐标包没用：服务端在等传送确认时会直接吞掉移动包；</li>
- *   <li><b>等 Grim 的回弹</b>：Grim 会把位置纠正包发回来（它认为你该在别的位置）。
- *       回弹位置离刚才的落点不远就收下，把客户端挪到回弹位置、按落地站稳，然后补跳一下 ——
- *       这一跳走输入包（{@link fish22.modernsupport.mixin.MixinElytraKeyboardInput} 把本地输入的跳跃键按下），
- *       服务端看到的是「按了跳跃键的跳」，不会像硬抬坐标那样被判回弹；</li>
- *   <li>超时（{@value #LATENCY} × 2 tick 没等到）就回普通状态，不影响走路。</li>
- * </ol>
+ * <p>V2 那套（假装落地 → 等 Grim 回弹 → 挪到回弹坐标起跳）用不了：回弹点在半空，
+ * 从半空起跳在服务端预测里就是「空中起跳」，每 tick 被判一次回弹，
+ * 回弹没确认完之前移动包全被 Grim 的 SetbackBlocker 吞掉，
+ * 服务端那条摔伤距离一次都没清，最后落回地面照样结算（落得越高越是必死）
  *
- * <p>落地包被拦掉之后，服务端那边记住的坐标停在落地前的高度。清摔伤距离靠的是等回弹期间
- * 那几发抬高 {@value #DELTA_Y} 的坐标包（必须在服务端没在等传送确认的时候发才有用），
- * 落地那一 tick 只发状态包是为了让 Grim 回弹
+ * <p>史莱姆这版只在落地那一 tick 做一件事：<b>把客户端自己那发落地包压掉，
+ * 改发一发「Y 抬高 {@value #DELTA_Y}、声称还在空中」的坐标包</b>
+ *
+ * <ul>
+ *   <li>26.1 服务端 {@code ServerGamePacketListenerImpl#handleMovePlayer} 里
+ *       {@code if (movedUpwards) this.player.resetFallDistance()}：
+ *       只要这一发的 Y 高过它记的 lastGoodY，摔伤距离当场清零；</li>
+ *   <li>{@code onGround=false} 不会踩到 Grim 的 NoFall 检查，所以这一发不会招来回弹，
+ *       也不会被 SetbackBlocker 卡住 —— 清零这一下是真的送到了；</li>
+ *   <li>客户端本身不动（还站在地面上），下一 tick 的移动包照常发，
+ *       服务端看到的是「上一 tick 微微往上、然后正常下落」，摔伤距离从 0 重新算</li>
+ * </ul>
+ *
+ * <p>落地之后按住空格 {@value #HOLD_JUMP_TICKS} tick：客户端还踩在地上，
+ * 这一跳是原版合法起跳、服务端认（不会再被回弹），跳起来的那几发坐标又各清一次摔伤距离。
+ * 这就是「落地马上就跳起来」的由来 —— 跳要在地面上跳，不是在回弹点跳
  */
 public final class GrimNoFallSupport {
     private enum Step {
         COMMON,
-        WAIT_FOR_RESYNC,
-        APPLY_JUMP
+        /** 落地救完的窗口：按住空格，让客户端自己从地面跳起来 */
+        HOLD_JUMP
     }
 
-    /** 抬高量（史莱姆那边的 DELTA_Y） */
+    /** 抬高量（史莱姆的 DELTA_Y）：上报的 Y 比服务端记的 lastGoodY 高这么一点，就把摔伤距离清零 */
     private static final double DELTA_Y = 9.0E-8;
 
-    /** 等回弹的窗口（史莱姆那边的 latency） */
-    private static final int LATENCY = 5;
+    /** 史莱姆的 latency：两次救之间至少隔这么久，按住空格的窗口是它的两倍 */
+    private static final int LATENCY = 3;
+    private static final int HOLD_JUMP_TICKS = LATENCY * 2;
 
-    /** 收到回弹之后补跳几 tick（这几 tick 的输入包带跳跃键） */
-    private static final int JUMP_TICKS = 2;
+    /** 摔伤高度阈值的默认值（设置里 1-64，改的是 MixinNoFall 挂到模块上的那一项） */
+    public static final int DEFAULT_FALL_THRESHOLD = 10;
 
-    /** 服务端此刻记住的坐标（= 最后一发带坐标移动包里的坐标） */
-    private static double lastServerX;
-    private static double lastServerY;
-    private static double lastServerZ;
-
-    /** 这一摔是从多高开始掉的（史莱姆的 lastOnGroundHeight：踩地 / 上升时跟着抬） */
-    private static double groundHeight;
-
-    /** 这一 tick 开始时客户端在不在地上（用来认「这一 tick 刚落地」） */
-    private static boolean onGroundAtTickStart = true;
+    /** 排查用：关键分支在聊天栏打一行（问题定位完就关掉） */
+    private static final boolean DEBUG_CHAT = false;
 
     private static Step step = Step.COMMON;
-
-    /** 进入等回弹状态时的「落点」与 tick */
-    private static int markTick;
-    private static double markX;
-    private static double markY;
-    private static double markZ;
-
-    /** 收到的那一发回弹位置 */
-    private static boolean hasAccept;
-    private static int acceptTick;
-    private static double acceptX;
-    private static double acceptY;
-    private static double acceptZ;
-
-    /** 还差几 tick 要补跳 */
-    private static int jumpTicks;
-
-    /** 这一 tick 的输入包要不要带跳跃键 */
-    private static boolean jumpThisTick;
 
     /** 自己数的 tick */
     private static int tick;
 
-    /** 正在补自己的包（避免再进一遍发包监听） */
+    /** 上一次救（落地改包）的 tick */
+    private static int lastResyncTick;
+
+    /** 这一 tick 的输入：按下真实跳跃键 */
+    private static boolean pressJumpThisTick;
+
+    /** 这一 tick 压掉了原版位置包，等原版那一发过去之后再补「抬高 DELTA_Y 的空中包」 */
+    private static boolean pendingUpPacket;
+
+    /** 正在补自己的包：放行，别被自己的拦截吃掉 */
     private static boolean sendingPacket;
 
-    private static final PositionListener POSITION_LISTENER = new PositionListener();
+    /** 本 tick 是不是在「原版位置包发送窗口」内（LocalPlayer#sendPosition 的 Pre~Post） */
+    private static boolean inSendPosition;
+
+    /** 这一 tick 开始时客户端的坐标（史莱姆 EntityMovementStatus 里的 preProgress） */
+    private static double tickStartX;
+    private static double tickStartY;
+    private static double tickStartZ;
+
+    /** 这一 tick 开始时客户端在不在地上（用来认「这一 tick 刚落地」） */
+    private static boolean onGroundAtTickStart = true;
+
+    /** 这一摔是从多高开始掉的（史莱姆的 lastOnGroundHeight：踩地 / 上升时跟着抬） */
+    private static double groundHeight;
+
+    /** 现在是不是选中了 Grim 模式：没选中就整段不干活（别的模式照旧） */
+    private static boolean grimMode;
+
+    /** 只有摔下高度超过这个值才救（模块设置里读，1-64） */
+    private static int fallThreshold = DEFAULT_FALL_THRESHOLD;
+
+    /** 排查用：剩几 tick 要往聊天栏打每 tick 的状态 */
+    private static int debugTicks;
+
+    private static final Listener LISTENER = new Listener();
 
     private GrimNoFallSupport() {
     }
 
-    /** 模块激活：清记账 + 开始跟服务端的位置纠正 */
-    public static void onActivate() {
+    /** 模块每 tick 告诉我们当前是不是 Grim 模式（设置里可以随时切走） */
+    public static void setGrimMode(boolean value) {
+        if (grimMode == value) return;
+        grimMode = value;
         reset();
-        MeteorClient.EVENT_BUS.subscribe(POSITION_LISTENER);
     }
 
-    /** 模块关闭：停跟位置纠正 */
-    public static void onDeactivate() {
-        MeteorClient.EVENT_BUS.unsubscribe(POSITION_LISTENER);
+    /** 模块激活：清记账 + 开始跟原版移动包窗口 */
+    public static void onActivate() {
         reset();
+        MeteorClient.EVENT_BUS.subscribe(LISTENER);
+    }
+
+    /** 模块关闭：停跟移动包窗口 */
+    public static void onDeactivate() {
+        MeteorClient.EVENT_BUS.unsubscribe(LISTENER);
+        reset();
+    }
+
+    /** 模块每 tick 把设置里的高度阈值告诉我们 */
+    public static void setFallThreshold(int value) {
+        fallThreshold = value;
     }
 
     private static void reset() {
-        if (mc.player != null) {
-            lastServerX = mc.player.getX();
-            lastServerY = mc.player.getY();
-            lastServerZ = mc.player.getZ();
-            groundHeight = mc.player.getY();
-        }
-        onGroundAtTickStart = true;
+        if (mc.player != null) groundHeight = mc.player.getY();
         step = Step.COMMON;
-        jumpTicks = 0;
-        jumpThisTick = false;
-        hasAccept = false;
+        lastResyncTick = 0;
+        pressJumpThisTick = false;
+        pendingUpPacket = false;
+        sendingPacket = false;
+        inSendPosition = false;
+        onGroundAtTickStart = true;
+        debugTicks = 0;
         tick = 0;
     }
 
-    /** 每 tick 开始（模块自己的 onTick）：记账 + 跑「等回弹 / 补跳」状态机 */
+    /** 每 tick 开始（模块自己的 onTick）：记账 + 跑「按住空格」窗口 */
     public static void onTick() {
+        if (!grimMode) return;
+
         tick++;
         if (mc.player == null) return;
+
+        // 上一 tick 留下的标记一律复位（发包窗口由 SendMovementPacketsEvent 重新开）
+        inSendPosition = false;
+        pendingUpPacket = false;
+        pressJumpThisTick = false;
+
+        tickStartX = mc.player.getX();
+        tickStartY = mc.player.getY();
+        tickStartZ = mc.player.getZ();
 
         // 这一摔是从多高掉的：踩地 / 水里就按当前高度，往上飞就跟着抬
         if (mc.player.onGround() || mc.player.isInWater() || mc.player.isInLava()) {
@@ -157,84 +183,54 @@ public final class GrimNoFallSupport {
         }
         onGroundAtTickStart = mc.player.onGround();
 
-        if (step == Step.WAIT_FOR_RESYNC) {
-            if (markTick + LATENCY * 2 < tick) {
-                // 等太久了，回普通状态
+        if (step == Step.HOLD_JUMP) {
+            if (lastResyncTick + HOLD_JUMP_TICKS < tick) {
                 step = Step.COMMON;
-            } else if (hasAccept) {
-                if (tick <= acceptTick + 1) {
-                    step = Step.APPLY_JUMP;
-                    // 用回弹给的坐标站稳，然后再跳一下
-                    mc.player.setPos(acceptX, acceptY, acceptZ);
-                    mc.player.setOnGround(true);
-                    // 回弹落地前再补一发抬高包：把回弹这段可能又攒起来的摔伤距离清掉
-                    sendHoverPacket();
-                    markTick = tick;
-                    hasAccept = false;
-                    jumpTicks = JUMP_TICKS;
-                    ModernSupport.LOG.info("[GrimNoFall] 收到回弹，按回弹坐标站稳并补跳");
-                }
-            } else if (markTick + 2 >= tick) {
-                // 还没等到回弹：先按原输入补跳，别卡着不动
-                jumpTicks = JUMP_TICKS;
+            } else {
+                // 还踩在地上：按住空格，原版自己起跳（起跳冷却清掉，免得原版把这一跳丢掉）
+                pressJumpThisTick = true;
+                clearJumpCooldown();
             }
-        } else if (step == Step.APPLY_JUMP) {
-            step = Step.COMMON;
         }
 
-        // 补跳：这一 tick 的输入包带上跳跃键（由键盘输入混入负责按下）。
-        // 放在状态机之后：这一 tick 刚排上的跳就用这一 tick 的输入包
-        jumpThisTick = jumpTicks > 0;
-        if (jumpTicks > 0) jumpTicks--;
+        if (debugTicks > 0) {
+            debugTicks--;
+            debugChat(String.format("t%d dy=%.3f onGround=%s", tick - lastResyncTick,
+                mc.player.getDeltaMovement().y, mc.player.onGround()));
+        }
     }
 
-    /** 键盘输入那一步用：这一 tick 是否把跳跃键按下（见 {@link fish22.modernsupport.mixin.MixinElytraKeyboardInput}） */
+    /** 键盘输入那一步用：这一 tick 是否把跳跃键按下（{@link fish22.modernsupport.mixin.MixinElytraKeyboardInput}） */
     public static boolean shouldPressJumpInput() {
-        return jumpThisTick;
+        return pressJumpThisTick;
     }
 
-    /** 发包监听：落地那一 tick 拦包 + 补包，平时只记服务端那边的坐标 */
+    /**
+     * 发包监听：只动「原版位置包」那一发
+     *
+     * <p>{@link SendMovementPacketsEvent} 的窗口盖的是原版 {@code LocalPlayer#sendPosition}
+     */
     public static void onPacketSend(PacketEvent.Send event) {
-        if (sendingPacket || mc.player == null || mc.getConnection() == null) return;
+        if (sendingPacket || mc.player == null) return;
         if (!(event.packet instanceof ServerboundMovePlayerPacket move)) return;
+        if (!inSendPosition) return;
+        if (step != Step.COMMON || !move.hasPosition() || !shouldHandleLanding()) return;
 
-        // 等回弹期间：客户端自己的坐标包不发，改发抬高包把服务端那条摔伤距离一直清零
-        if (step == Step.WAIT_FOR_RESYNC && !hasAccept && move.hasPosition()) {
-            event.cancel();
-            sendHoverPacket();
-            return;
-        }
-
-        if (move.hasPosition() && shouldHandleLanding()) {
-            handleLanding();
-            // 客户端自己的落地位置包不发了
-            event.cancel();
-            return;
-        }
-
-        // 只有带坐标的移动包才会改服务端那边的位置记录
-        if (move.hasPosition()) {
-            double x = move.getX(lastServerX);
-            double y = move.getY(lastServerY);
-            double z = move.getZ(lastServerZ);
-            if (!Double.isNaN(x) && !Double.isNaN(y) && !Double.isNaN(z)) {
-                lastServerX = x;
-                lastServerY = y;
-                lastServerZ = z;
-            }
-        }
+        handleLanding();
+        // 客户端自己那一发落地位置包不发了，原版移动包发完后再补「抬头一点点」的空中包
+        event.cancel();
+        pendingUpPacket = true;
     }
 
     /** 这一 tick 是不是「刚落地、而且这一摔会摔掉血」 */
     private static boolean shouldHandleLanding() {
         if (step != Step.COMMON) return false;
-        if (tick <= markTick + LATENCY) return false;
+        if (tick <= lastResyncTick + LATENCY) return false;
         if (onGroundAtTickStart || !mc.player.onGround()) return false;
         if (!canSave()) return false;
 
-        double safeDistance = mc.player.getAttributeValue(Attributes.SAFE_FALL_DISTANCE);
-        return mc.player.getY() <= groundHeight - safeDistance
-            && lastServerY > mc.player.getY();
+        // 设置里的高度阈值：只有摔得比它高才动手
+        return groundHeight - mc.player.getY() > fallThreshold;
     }
 
     /** 这一摔管不管：创造 / 旁观、骑乘、滑翔、水里 / 岩浆里都不管 */
@@ -246,106 +242,73 @@ public final class GrimNoFallSupport {
     }
 
     /**
-     * 落地那一 tick 的处理（史莱姆那套）：
+     * 落地那一 tick 的处理（史莱姆 applyBeforeMovementPacketModify 里 COMMON 那一段）：
      *
      * <ol>
-     *   <li>补「只报落地状态、不带坐标」的包 → Grim 认出来会给回弹（服务端不结算这次落地）；</li>
-     *   <li>客户端 X/Z 换成服务端记的那一份，本地按落地记，进入等回弹状态。</li>
+     *   <li>原版那一发落地位置包由调用方压掉，原版移动包发完后再补一发
+     *       「X/Z 回到这一 tick 开始的位置、Y 抬高 {@value #DELTA_Y}、onGround=false」的包；</li>
+     *   <li>本地那份摔伤距离清掉，免得本地先算一次伤害；</li>
+     *   <li>进入「按住空格」窗口，让客户端这一跳从地面上起。</li>
      * </ol>
-     *
-     * <p>这一发必须排在客户端自己那一发落地包之前（Meteor 的发包事件发生在真正写包之前）。
-     * 清摔伤距离的抬高包放到「等回弹」那一段去补 —— 这边发也没用：Grim 判违规时会先让服务端
-     * 等传送确认，那段时间服务端会把我们的移动包直接吞掉
      */
     private static void handleLanding() {
-        step = Step.WAIT_FOR_RESYNC;
-        hasAccept = false;
-        markX = mc.player.getX();
-        markY = mc.player.getY();
-        markZ = mc.player.getZ();
-        markTick = tick;
+        step = Step.HOLD_JUMP;
+        lastResyncTick = tick;
 
-        sendingPacket = true;
-        try {
-            mc.getConnection().send(new ServerboundMovePlayerPacket.StatusOnly(
-                true,
-                mc.player.horizontalCollision
-            ));
-        } finally {
-            sendingPacket = false;
-        }
+        // 本地那份摔伤距离清掉：这一 tick 的落地由我们自己处理，不让本地先算一次伤害
+        mc.player.resetFallDistance();
+        debugTicks = 6;
 
-        // 客户端 X/Z 用服务端记的那一份（史莱姆那套），Y 不动、本地按落地站稳
-        mc.player.setPos(lastServerX, markY, lastServerZ);
-        mc.player.setOnGround(true);
-
-        ModernSupport.LOG.info("[GrimNoFall] 落地：已拦下落地包、补了落地状态包，等回弹");
+        debugChat("落地，清摔伤距离");
     }
 
-    /** 补「抬高 {@value #DELTA_Y}、声称还在空中」的包：服务端按 movedUpwards 把摔伤距离清零 */
-    private static void sendHoverPacket() {
+    /** 排查用：聊天栏打一行（{@value #DEBUG_CHAT} 关掉就不打了） */
+    private static void debugChat(String message) {
+        if (!DEBUG_CHAT) return;
+        ChatUtils.info("(无摔伤) " + message);
+    }
+
+    /**
+     * 补那一发「抬高 {@value #DELTA_Y}、声称还在空中」的坐标包
+     *
+     * <p>X/Z 用这一 tick 开始时的坐标（把这一 tick 的位移从服务端眼里抹掉），
+     * Y 用这一 tick 开始的 Y 再抬 {@value #DELTA_Y} —— 服务端算出来就是 movedUpwards，
+     * 于是 {@code resetFallDistance()}；onGround 必须是 false，
+     * 不然 Grim 会按「空中报落地」回弹我们
+     */
+    private static void sendUpPacket() {
         sendingPacket = true;
         try {
             mc.getConnection().send(new ServerboundMovePlayerPacket.Pos(
-                lastServerX,
-                lastServerY + DELTA_Y,
-                lastServerZ,
+                tickStartX,
+                tickStartY + DELTA_Y,
+                tickStartZ,
                 false,
                 mc.player.horizontalCollision
             ));
         } finally {
             sendingPacket = false;
         }
-        // 服务端那边记的坐标跟着这一发走
-        lastServerY += DELTA_Y;
     }
 
-    /** 服务端位置纠正（回弹 / 传送）：位置不远就按史莱姆那套收下 */
-    private static void onPositionCorrection(Vec3 absolute) {
-        if (mc.player == null) return;
+    /** 原版跳跃冷却（noJumpDelay）清零，史莱姆的 onJump 钩子干的就是这件事 */
+    private static void clearJumpCooldown() {
+        if (mc.player instanceof LivingEntityAccessor accessor) accessor.meteor$setJumpCooldown(0);
+    }
 
-        if (step == Step.WAIT_FOR_RESYNC
-            && tick < markTick + LATENCY
-            && squaredDistance(absolute.x, absolute.y, absolute.z, markX, markY, markZ) < 1.0) {
-            acceptX = absolute.x;
-            acceptY = absolute.y;
-            acceptZ = absolute.z;
-            acceptTick = tick;
-            hasAccept = true;
-            return;
+    /** 事件监听：原版位置包窗口 */
+    private static class Listener {
+        @EventHandler
+        private void onSendMovementPacketsPre(SendMovementPacketsEvent.Pre event) {
+            inSendPosition = true;
         }
 
-        lastServerX = absolute.x;
-        lastServerY = absolute.y;
-        lastServerZ = absolute.z;
-    }
-
-    private static double squaredDistance(double x1, double y1, double z1, double x2, double y2, double z2) {
-        double dx = x1 - x2;
-        double dy = y1 - y2;
-        double dz = z1 - z2;
-        return dx * dx + dy * dy + dz * dz;
-    }
-
-    /** 收服务端的包：位置纠正包 → 按史莱姆那套处理（收下 / 记账） */
-    private static class PositionListener {
         @EventHandler
-        private void onPacketReceive(PacketEvent.Receive event) {
-            if (!(event.packet instanceof ClientboundPlayerPositionPacket position)) return;
-            if (mc.player == null) return;
-
-            Vec3 absolute = PositionMoveRotation.calculateAbsolute(
-                new PositionMoveRotation(
-                    mc.player.position(),
-                    mc.player.getKnownMovement(),
-                    mc.player.getYRot(),
-                    mc.player.getXRot()
-                ),
-                position.change(),
-                position.relatives()
-            ).position();
-
-            onPositionCorrection(absolute);
+        private void onSendMovementPacketsPost(SendMovementPacketsEvent.Post event) {
+            inSendPosition = false;
+            // 原版那一发位置包已经过去了：这时候补自己的空中包，一 tick 里就只有这一发移动包
+            if (pendingUpPacket && mc.player != null && mc.getConnection() != null) sendUpPacket();
+            pendingUpPacket = false;
         }
     }
 }

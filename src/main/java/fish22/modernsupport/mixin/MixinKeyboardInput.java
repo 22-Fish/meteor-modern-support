@@ -81,8 +81,13 @@ public abstract class MixinKeyboardInput extends ClientInput {
         }
 
         // 本地正在滑翔（真鞘翅 / 无限鞘翅 / 甲飞强制滑翔）：滑翔运算不看 WASD，
-        // 方向由真实角度决定，这里映射只会让输入包报出与真实按键不同的键
-        if (mc.player == null || mc.player.isFallFlying()) {
+        // 方向由真实角度决定，这里映射只会让输入包报出与真实按键不同的键。
+        // 例外是水里：原版在水里退回流体运算（读 WASD），朝向又被合法转头转走了，
+        // 不映射就会变成「按左往后游」，所以水里照常映射
+        if (mc.player == null) {
+            return;
+        }
+        if (mc.player.isFallFlying() && !mc.player.isInWater()) {
             return;
         }
 
